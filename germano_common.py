@@ -10,6 +10,15 @@ import torch
 from torch import nn
 from torch.utils.data import Dataset
 
+def load_checkpoint(path:Path,device:torch.device):
+    """Load a full checkpoint produced by this project.
+
+    These checkpoints contain optimizer state and NumPy arrays in addition to
+    model weights, so PyTorch 2.6's weights-only loader cannot deserialize them.
+    Only call this for checkpoints from a trusted source.
+    """
+    return torch.load(path,map_location=device,weights_only=False)
+
 def set_seed(seed:int)->None:
     random.seed(seed); np.random.seed(seed); torch.manual_seed(seed)
     if torch.cuda.is_available(): torch.cuda.manual_seed_all(seed)
@@ -130,4 +139,4 @@ def save_spectrum_plot(field_name,dns,filtered_fine,filtered_coarse,predicted_fi
         elif label=='U-Net filtered 256': ax.loglog(k[v],p[v],linestyle='--',linewidth=1.8,label=label)
         else: ax.loglog(k[v],p[v],linewidth=1.8,label=label)
     kn=min(np.pi/(lx/coarse_n),np.pi/(ly/coarse_n)); ax.axvline(kn,linestyle=':',linewidth=1.4,label=f'{coarse_n}-grid Nyquist')
-    ax.set_title(f'{field_name}: isotropic spectrum comparison'); ax.set_xlabel(r'$k$'); ax.set_ylabel(r'Shell power $P(k)$'); ax.set_ylim(bottom=1e-10); ax.grid(True,which='both',alpha=.3); ax.legend(numpoints=1); fig.tight_layout(); fig.savefig(path,dpi=180); plt.close(fig)
+    ax.set_title(f'{field_name}: isotropic spectrum comparison'); ax.set_xlabel(r'$k$'); ax.set_ylabel(r'Shell power $W(k)$'); ax.set_ylim(bottom=1e-10); ax.grid(True,which='both',alpha=.3); ax.legend(numpoints=1); fig.tight_layout(); fig.savefig(path,dpi=180); plt.close(fig)

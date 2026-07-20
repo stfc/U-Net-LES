@@ -1,9 +1,9 @@
 {
-  "input_file": "/mnt/data/fields_run4_1545te.npz",
+  "input_file": "../../data/BOUT_runs/HW_2D/Papers/PoP23/HW_N256/fields/fields_HW_run0_time501.npz",
   "fields": [
     "U",
     "V",
-    "W"
+    "P"
   ],
   "fine_n": 256,
   "coarse_n": 32,

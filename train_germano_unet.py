@@ -6,6 +6,7 @@ import numpy as np, torch
 from torch.utils.data import DataLoader
 from germano_common import *
 
+
 def split_files(dataset,validation_fraction,test_fraction,split_mode,seed):
     td,vd,sd=dataset/'train',dataset/'validation',dataset/'test'
     if td.is_dir() and vd.is_dir() and sd.is_dir(): return recursive_npz_files(td),recursive_npz_files(vd),recursive_npz_files(sd)
@@ -15,6 +16,7 @@ def split_files(dataset,validation_fraction,test_fraction,split_mode,seed):
     nv=max(1,round(validation_fraction*len(files))); nt=max(1,round(test_fraction*len(files))); ntr=len(files)-nv-nt
     if ntr<1: raise ValueError('The split leaves no training snapshots.')
     return files[:ntr],files[ntr:ntr+nv],files[ntr+nv:]
+
 
 def run_epoch(model,loader,device,mean,std,alpha,lx,ly,lambda_dns,lambda_spectrum,optimizer=None):
     training=optimizer is not None; model.train(training); totals={k:0.0 for k in ['total','filtered','dns','spectrum','filtered_relative_l2','dns_relative_l2']}; count=0
@@ -27,15 +29,21 @@ def run_epoch(model,loader,device,mean,std,alpha,lx,ly,lambda_dns,lambda_spectru
             if training:
                 loss.backward(); torch.nn.utils.clip_grad_norm_(model.parameters(),1.0); optimizer.step()
             b=coarse.shape[0]; count+=b
-            for k in ['total','filtered','dns','spectrum']: totals[k]+=float(vals[k].detach())*b
-            totals['filtered_relative_l2']+=float(relative_l2(ft*std+mean,pf))*b; totals['dns_relative_l2']+=float(relative_l2(dns,pd))*b
+            for k in ["total", "filtered", "dns", "spectrum"]:
+                totals[k] += vals[k].detach().item() * b
+
+            totals["filtered_relative_l2"] += (relative_l2(ft * std + mean, pf).detach().item() * b)
+            totals["dns_relative_l2"] += (relative_l2(dns, pd).detach().item() * b)
+
     return {k:v/count for k,v in totals.items()}
+
 
 def parse_args():
     p=argparse.ArgumentParser(); p.add_argument('--dataset',type=Path,required=True); p.add_argument('--output-dir',type=Path,default=Path('germano_training_output')); p.add_argument('--fields',nargs=3,default=['U','V','W']); p.add_argument('--fine-n',type=int,default=256); p.add_argument('--coarse-n',type=int,default=32); p.add_argument('--lx',type=float,default=2*np.pi); p.add_argument('--ly',type=float,default=2*np.pi)
     g=p.add_mutually_exclusive_group(); g.add_argument('--alpha',type=float); g.add_argument('--alpha-factor',type=float,default=1.0)
     p.add_argument('--split-mode',choices=['sequential','random'],default='sequential'); p.add_argument('--validation-fraction',type=float,default=.1); p.add_argument('--test-fraction',type=float,default=.1); p.add_argument('--epochs',type=int,default=300); p.add_argument('--batch-size',type=int,default=4); p.add_argument('--learning-rate',type=float,default=2e-4); p.add_argument('--base-channels',type=int,default=24); p.add_argument('--lambda-dns',type=float,default=.05); p.add_argument('--lambda-spectrum',type=float,default=.02); p.add_argument('--num-workers',type=int,default=0); p.add_argument('--save-every',type=int,default=50); p.add_argument('--seed',type=int,default=7); p.add_argument('--resume',type=Path)
     return p.parse_args()
+
 
 def main():
     a=parse_args(); set_seed(a.seed)
@@ -51,7 +59,7 @@ def main():
     model=ResidualUNetSR(len(a.fields),a.base_channels,a.fine_n//a.coarse_n).to(device); opt=torch.optim.AdamW(model.parameters(),lr=a.learning_rate,weight_decay=1e-6); mean=torch.from_numpy(mean_np).to(device); std=torch.from_numpy(std_np).to(device)
     start=1; best=float('inf')
     if a.resume:
-        c=torch.load(a.resume,map_location=device); model.load_state_dict(c['model']); opt.load_state_dict(c['optimizer']); start=int(c['epoch'])+1; best=float(c['validation_loss']); print('Resumed from epoch',start-1)
+        c=load_checkpoint(a.resume,device); model.load_state_dict(c['model']); opt.load_state_dict(c['optimizer']); start=int(c['epoch'])+1; best=float(c['validation_loss']); print('Resumed from epoch',start-1)
     history=[]
     for epoch in range(start,a.epochs+1):
         tm=run_epoch(model,train_loader,device,mean,std,alpha,a.lx,a.ly,a.lambda_dns,a.lambda_spectrum,opt); vm=run_epoch(model,val_loader,device,mean,std,alpha,a.lx,a.ly,a.lambda_dns,a.lambda_spectrum)
@@ -63,7 +71,10 @@ def main():
         with (a.output_dir/'training_history.csv').open('w',newline='') as f:
             w=csv.DictWriter(f,fieldnames=list(history[0])); w.writeheader(); w.writerows(history)
         print(f"Epoch {epoch:05d} | train={tm['total']:.6e} | validation={vm['total']:.6e} | DNS relL2={vm['dns_relative_l2']:.6e}")
-    c=torch.load(ckdir/'best.pt',map_location=device); model.load_state_dict(c['model']); test=run_epoch(model,test_loader,device,mean,std,alpha,a.lx,a.ly,a.lambda_dns,a.lambda_spectrum)
+    c=load_checkpoint(ckdir/'best.pt',device); model.load_state_dict(c['model']); test=run_epoch(model,test_loader,device,mean,std,alpha,a.lx,a.ly,a.lambda_dns,a.lambda_spectrum)
     (a.output_dir/'metadata.json').write_text(json.dumps({'dataset':str(a.dataset),'train_snapshots':len(tr),'validation_snapshots':len(va),'test_snapshots':len(te),'best_epoch':int(c['epoch']),'test_metrics':test},indent=2))
+
     print('Test metrics:',test)
+
+
 if __name__=='__main__': main()

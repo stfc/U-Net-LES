@@ -166,7 +166,7 @@ def isotropic_energy_spectrum(
     lx: float,
     ly: float,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Return shell-integrated isotropic Fourier power P(k)."""
+    """Return shell-integrated isotropic Fourier power W(k)."""
     nx, ny = field.shape
     dx = lx / nx
     dy = ly / ny
@@ -199,15 +199,41 @@ def save_spectrum_comparison(
     fig, ax = plt.subplots(figsize=(7.2, 5.4))
     for label, (k, power) in spectra.items():
         mask = (k > 0.0) & (power > 0.0)
-        ax.loglog(k[mask], power[mask], label=label)
+
+        if label == "Filtered 32":
+            ax.loglog(
+                k[mask],
+                power[mask],
+                linestyle="None",
+                marker="o",
+                markersize=2.5,
+                label=label,
+            )
+        elif label == "Filtered 32":
+            ax.loglog(
+                k[mask],
+                power[mask],
+                linestyle="None",
+                marker="o",
+                markersize=2.5,
+                label=label,
+            )
+        else:
+            ax.loglog(
+                k[mask],
+                power[mask],
+                linewidth=1.8,
+                label=label,
+            )
     coarse_nyquist = min(np.pi / (lx / coarse_n), np.pi / (ly / coarse_n))
     ax.axvline(coarse_nyquist, linestyle="--", linewidth=1.2, label=f"{coarse_n}-grid Nyquist")
     ax.set_title(f"{name}: isotropic spectrum comparison")
     ax.set_xlabel(r"$k$")
-    ax.set_ylabel(r"Shell power $P(k)$")
+    ax.set_ylabel(r"Shell power $W(k)$")
     ax.grid(True, which="both", alpha=0.3)
     ax.legend()
-    ax.loglog(k[mask], power[mask], '.', markersize=5, label=label,)
+    ax.set_ylim(bottom=1e-18)
+    #ax.loglog(k[mask], power[mask], '.', markersize=5, label=label,)
     fig.tight_layout()
     fig.savefig(output_path, dpi=180)
     plt.close(fig)
@@ -271,6 +297,8 @@ def process_field(
 
     print(np.max(np.abs(filtered_fine - filtered_interpolated)))
 
+    #filtered_interpolated = filtered_fine
+
     reconstructed = inverse_germano_filter(
         filtered_interpolated, alpha, lx, ly
     )
@@ -325,6 +353,7 @@ def process_field(
         fields={
             "DNS": field,
             "Filtered 256": filtered_fine,
+            "Filtered 32": filtered_coarse,  # add this
             "Spectral interpolation": filtered_interpolated,
             "Reconstructed DNS": reconstructed,
         },
