@@ -166,7 +166,7 @@ def isotropic_energy_spectrum(
     lx: float,
     ly: float,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Return shell-integrated isotropic Fourier power W(k)."""
+    """Return shell-integrated isotropic Fourier power P(k)."""
     nx, ny = field.shape
     dx = lx / nx
     dy = ly / ny
@@ -229,7 +229,7 @@ def save_spectrum_comparison(
     ax.axvline(coarse_nyquist, linestyle="--", linewidth=1.2, label=f"{coarse_n}-grid Nyquist")
     ax.set_title(f"{name}: isotropic spectrum comparison")
     ax.set_xlabel(r"$k$")
-    ax.set_ylabel(r"Shell power $W(k)$")
+    ax.set_ylabel(r"Shell power $P(k)$")
     ax.grid(True, which="both", alpha=0.3)
     ax.legend()
     ax.set_ylim(bottom=1e-18)
