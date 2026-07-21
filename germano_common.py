@@ -36,6 +36,9 @@ def validate_hw_checkpoint(checkpoint: dict) -> None:
             "This checkpoint predates the Hasegawa-Wakatani constraints. "
             "Retrain it with fields U, V, W before inference or resuming."
         )
+    mode = checkpoint.get("vorticity_mode", "potential_laplacian")
+    if mode not in ("potential_laplacian", "learned_channel"):
+        raise ValueError(f"Unsupported checkpoint vorticity mode: {mode}")
 
 
 def set_seed(seed: int) -> None:
@@ -92,11 +95,27 @@ def k2_torch(
 
 
 def inverse_germano_torch(
-    filtered: torch.Tensor, alpha: float, lx: float, ly: float
+    filtered: torch.Tensor,
+    alpha: float,
+    lx: float,
+    ly: float,
+    cutoff_fraction=None,
+    cutoff_order=8,
 ) -> torch.Tensor:
     n = filtered.shape[-1]
     fh = torch.fft.fft2(filtered, dim=(-2, -1))
-    mult = 1 + alpha**2 * k2_torch(n, lx, ly, filtered.device, filtered.dtype)
+    k2 = k2_torch(n, lx, ly, filtered.device, filtered.dtype)
+    mult = 1 + alpha**2 * k2
+    if cutoff_fraction is not None:
+        if not 0 < cutoff_fraction <= 1:
+            raise ValueError("cutoff_fraction must be in (0, 1].")
+        if cutoff_order <= 0:
+            raise ValueError("cutoff_order must be positive.")
+        grid_nyquist = min(math.pi / (lx / n), math.pi / (ly / n))
+        cutoff_wavenumber = cutoff_fraction * grid_nyquist
+        mult = mult * torch.exp(
+            -(torch.sqrt(k2) / cutoff_wavenumber) ** cutoff_order
+        )
     return torch.fft.ifft2(mult * fh, dim=(-2, -1)).real
 
 
@@ -161,13 +180,17 @@ def periodic_laplacian_4th_torch(
 
 
 def hw_fields_numpy(
-    density: np.ndarray, potential: np.ndarray, lx: float, ly: float
+    density: np.ndarray,
+    potential: np.ndarray,
+    lx: float,
+    ly: float,
+    dtype=np.float32,
 ) -> np.ndarray:
     """Apply HW constraints and derive vorticity from potential."""
     density = density - density.mean(axis=(-2, -1), keepdims=True)
     potential = potential - potential.mean(axis=(-2, -1), keepdims=True)
     vorticity = periodic_laplacian_4th_numpy(potential, lx, ly)
-    return np.stack((density, potential, vorticity), axis=-3).astype(np.float32)
+    return np.stack((density, potential, vorticity), axis=-3).astype(dtype)
 
 
 def hw_fields_torch(
@@ -186,6 +209,7 @@ def load_dns_snapshot(
     expected_n: int,
     lx: float,
     ly: float,
+    dtype=np.float32,
 ) -> np.ndarray:
     if tuple(field_names) != HW_FIELD_NAMES:
         raise ValueError(f"HW fields must be ordered as {HW_FIELD_NAMES}.")
@@ -193,26 +217,33 @@ def load_dns_snapshot(
         missing = [name for name in ("U", "V") if name not in src]
         if missing:
             raise KeyError(f"{path} is missing fields: {missing}")
-        arrays = [
-            np.asarray(src[name], dtype=np.float32) for name in ("U", "V")
-        ]
+        arrays = [np.asarray(src[name], dtype=dtype) for name in ("U", "V")]
     for name, a in zip(("U", "V"), arrays):
         if a.shape != (expected_n, expected_n):
             raise ValueError(f"{path}: {name} has shape {a.shape}")
         if not np.all(np.isfinite(a)):
             raise ValueError(f"{path}: {name} contains NaN or Inf")
-    return hw_fields_numpy(arrays[0], arrays[1], lx, ly)
+    return hw_fields_numpy(arrays[0], arrays[1], lx, ly, dtype=dtype)
 
 
 def filter_snapshot(
-    dns: np.ndarray, alpha: float, lx: float, ly: float, coarse_n: int
+    dns: np.ndarray,
+    alpha: float,
+    lx: float,
+    ly: float,
+    coarse_n: int,
+    dtype=np.float32,
 ) -> tuple[np.ndarray, np.ndarray]:
     filtered_density = germano_filter(dns[0], alpha, lx, ly)
     filtered_potential = germano_filter(dns[1], alpha, lx, ly)
-    fine = hw_fields_numpy(filtered_density, filtered_potential, lx, ly)
+    fine = hw_fields_numpy(
+        filtered_density, filtered_potential, lx, ly, dtype=dtype
+    )
     coarse_density = spectral_resize(fine[0], coarse_n)
     coarse_potential = spectral_resize(fine[1], coarse_n)
-    coarse = hw_fields_numpy(coarse_density, coarse_potential, lx, ly)
+    coarse = hw_fields_numpy(
+        coarse_density, coarse_potential, lx, ly, dtype=dtype
+    )
     return coarse, fine
 
 
@@ -224,25 +255,34 @@ def calculate_training_statistics(
     alpha: float,
     lx: float,
     ly: float,
-) -> tuple[np.ndarray, np.ndarray]:
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     c = len(field_names)
     s = np.zeros(c)
     ss = np.zeros(c)
+    dns_s = np.zeros(c)
+    dns_ss = np.zeros(c)
     npts = 0
     for i, p in enumerate(files, 1):
         dns = load_dns_snapshot(p, field_names, fine_n, lx, ly)
         _, fine = filter_snapshot(dns, alpha, lx, ly, coarse_n)
         s += fine.sum((1, 2), dtype=np.float64)
         ss += np.square(fine, dtype=np.float64).sum((1, 2))
+        dns_s += dns.sum((1, 2), dtype=np.float64)
+        dns_ss += np.square(dns, dtype=np.float64).sum((1, 2))
         npts += fine_n * fine_n
         if i == 1 or i % 100 == 0 or i == len(files):
             print(f"Normalisation statistics: {i}/{len(files)}")
     mean = s / npts
     var = np.maximum(ss / npts - mean**2, 0)
     std = np.maximum(np.sqrt(var), 1e-8)
-    return mean.astype(np.float32).reshape(1, c, 1, 1), std.astype(
-        np.float32
-    ).reshape(1, c, 1, 1)
+    dns_mean = dns_s / npts
+    dns_var = np.maximum(dns_ss / npts - dns_mean**2, 0)
+    dns_std = np.maximum(np.sqrt(dns_var), 1e-8)
+    return (
+        mean.astype(np.float32).reshape(1, c, 1, 1),
+        std.astype(np.float32).reshape(1, c, 1, 1),
+        dns_std.astype(np.float32).reshape(1, c, 1, 1),
+    )
 
 
 class GermanoSnapshotDataset(Dataset):
@@ -352,7 +392,9 @@ class UpBlock(nn.Module):
 
 
 class ResidualUNetSR(nn.Module):
-    def __init__(self, channels=3, base_channels=24, scale_factor=8):
+    def __init__(
+        self, channels=3, base_channels=24, scale_factor=8, output_channels=2
+    ):
         super().__init__()
         b = base_channels
         self.scale_factor = scale_factor
@@ -365,7 +407,8 @@ class ResidualUNetSR(nn.Module):
         self.d3 = UpBlock(8 * b, 4 * b, 4 * b)
         self.d2 = UpBlock(4 * b, 2 * b, 2 * b)
         self.d1 = UpBlock(2 * b, b, b)
-        self.out = nn.Conv2d(b, 2, 1)
+        self.output_channels = output_channels
+        self.out = nn.Conv2d(b, output_channels, 1)
 
     def forward(self, coarse):
         base = periodic_interpolate(
@@ -379,7 +422,7 @@ class ResidualUNetSR(nn.Module):
         e4 = self.e4(self.pool(e3))
         bn = self.bn(e4)
         correction = self.out(self.d1(self.d2(self.d3(bn, e3), e2), e1))
-        return base[:, :2] + correction
+        return base[:, : self.output_channels] + correction
 
 
 def calculate_losses(
@@ -389,21 +432,41 @@ def calculate_losses(
     dns_target,
     mean,
     std,
+    dns_std,
     alpha,
     lx,
     ly,
     lambda_dns,
     lambda_spectrum,
+    inverse_cutoff_fraction,
+    inverse_cutoff_order,
+    learn_vorticity=False,
 ):
-    predicted_uv = model(coarse) * std[:, :2] + mean[:, :2]
-    pf = hw_fields_torch(predicted_uv[:, :1], predicted_uv[:, 1:2], lx, ly)
+    if learn_vorticity:
+        pf = model(coarse) * std + mean
+    else:
+        predicted_uv = model(coarse) * std[:, :2] + mean[:, :2]
+        pf = hw_fields_torch(
+            predicted_uv[:, :1], predicted_uv[:, 1:2], lx, ly
+        )
     pn = (pf - mean) / std
-    pd_unconstrained = inverse_germano_torch(pf, alpha, lx, ly)
-    pd = hw_fields_torch(
-        pd_unconstrained[:, :1], pd_unconstrained[:, 1:2], lx, ly
+    pd_unconstrained = inverse_germano_torch(
+        pf,
+        alpha,
+        lx,
+        ly,
+        inverse_cutoff_fraction,
+        inverse_cutoff_order,
     )
+    if learn_vorticity:
+        pd = pd_unconstrained
+    else:
+        pd = hw_fields_torch(
+            pd_unconstrained[:, :1], pd_unconstrained[:, 1:2], lx, ly
+        )
     lf = nn.functional.l1_loss(pn, filtered_target_normalised)
-    ld = nn.functional.l1_loss(pd, dns_target)
+    dns_absolute_error = torch.abs((pd - dns_target) / dns_std)
+    ld = dns_absolute_error.mean()
     ph = torch.fft.rfft2(pn, dim=(-2, -1))
     th = torch.fft.rfft2(filtered_target_normalised, dim=(-2, -1))
     ls = nn.functional.l1_loss(
@@ -412,7 +475,15 @@ def calculate_losses(
     total = lf + lambda_dns * ld + lambda_spectrum * ls
     return (
         total,
-        {"total": total, "filtered": lf, "dns": ld, "spectrum": ls},
+        {
+            "total": total,
+            "filtered": lf,
+            "dns": ld,
+            "spectrum": ls,
+            "dns_U": dns_absolute_error[:, 0].mean(),
+            "dns_V": dns_absolute_error[:, 1].mean(),
+            "dns_W": dns_absolute_error[:, 2].mean(),
+        },
         pf,
         pd,
     )
@@ -440,15 +511,21 @@ def isotropic_spectrum(field, lx, ly):
     return k[v], p[v]
 
 
-def save_image(field, title, path, cmap=None):
+def save_image(field, title, path, cmap=None, symmetric=False):
     nx, ny = field.shape
     fig, ax = plt.subplots(figsize=(6.3, 5.2))
+    limits = {}
+    if symmetric:
+        maximum = float(np.max(np.abs(field)))
+        if maximum > 0:
+            limits = {"vmin": -maximum, "vmax": maximum}
     im = ax.imshow(
         field.T,
         origin="lower",
         extent=(0, nx, 0, ny),
         aspect="equal",
         cmap=cmap,
+        **limits,
     )
     ax.set_title(title)
     ax.set_xlabel("x [pixels]")
@@ -470,6 +547,7 @@ def save_spectrum_plot(
     lx,
     ly,
     path,
+    inverse_input_label="U-Net filtered",
 ):
     spectra = {
         "DNS": isotropic_spectrum(dns, lx, ly),
@@ -477,9 +555,7 @@ def save_spectrum_plot(
             filtered_fine, lx, ly
         ),
         f"Filtered {coarse_n}": isotropic_spectrum(filtered_coarse, lx, ly),
-        f"U-Net filtered {predicted_filtered.shape[0]}": isotropic_spectrum(
-            predicted_filtered, lx, ly
-        ),
+        inverse_input_label: isotropic_spectrum(predicted_filtered, lx, ly),
         "Reconstructed DNS": isotropic_spectrum(predicted_dns, lx, ly),
     }
     fig, ax = plt.subplots(figsize=(7.4, 5.6))
@@ -494,7 +570,7 @@ def save_spectrum_plot(
                 markersize=4,
                 label=label,
             )
-        elif label.startswith("U-Net filtered"):
+        elif label == inverse_input_label:
             ax.loglog(k[v], p[v], linestyle="--", linewidth=1.8, label=label)
         else:
             ax.loglog(k[v], p[v], linewidth=1.8, label=label)

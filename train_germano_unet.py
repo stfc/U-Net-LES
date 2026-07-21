@@ -1,11 +1,34 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 import argparse, csv, json, random
+from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
+import sys
+import traceback
 import numpy as np, torch
 from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
 from germano_common import *
+
+
+class Tee:
+    """Write a text stream to both the terminal and a log file."""
+
+    def __init__(self, terminal, log_file):
+        self.terminal = terminal
+        self.log_file = log_file
+
+    def write(self, text):
+        self.terminal.write(text)
+        self.log_file.write(text)
+        return len(text)
+
+    def flush(self):
+        self.terminal.flush()
+        self.log_file.flush()
+
+    def isatty(self):
+        return self.terminal.isatty()
 
 
 def split_files(dataset, validation_fraction, test_fraction, split_mode, seed):
@@ -35,25 +58,31 @@ def run_epoch(
     device,
     mean,
     std,
+    dns_std,
     alpha,
     lx,
     ly,
     lambda_dns,
     lambda_spectrum,
+    inverse_cutoff_fraction,
+    inverse_cutoff_order,
+    learn_vorticity,
     optimizer=None,
 ):
     training = optimizer is not None
     model.train(training)
+    loss_names = [
+        "total",
+        "filtered",
+        "dns",
+        "spectrum",
+        "dns_U",
+        "dns_V",
+        "dns_W",
+    ]
     totals = {
-        k: 0.0
-        for k in [
-            "total",
-            "filtered",
-            "dns",
-            "spectrum",
-            "filtered_relative_l2",
-            "dns_relative_l2",
-        ]
+        name: 0.0
+        for name in loss_names + ["filtered_relative_l2", "dns_relative_l2"]
     }
     count = 0
     ctx = torch.enable_grad() if training else torch.no_grad()
@@ -73,11 +102,15 @@ def run_epoch(
                 dns,
                 mean,
                 std,
+                dns_std,
                 alpha,
                 lx,
                 ly,
                 lambda_dns,
                 lambda_spectrum,
+                inverse_cutoff_fraction,
+                inverse_cutoff_order,
+                learn_vorticity,
             )
             if training:
                 loss.backward()
@@ -85,7 +118,7 @@ def run_epoch(
                 optimizer.step()
             b = coarse.shape[0]
             count += b
-            for k in ["total", "filtered", "dns", "spectrum"]:
+            for k in loss_names:
                 totals[k] += vals[k].detach().item() * b
 
             totals["filtered_relative_l2"] += (
@@ -115,6 +148,16 @@ def configure_tensorboard(writer):
                 ]
                 for name in ("filtered_relative_l2", "dns_relative_l2")
             },
+            "Per-field normalized DNS loss": {
+                name: [
+                    "Multiline",
+                    [
+                        f"metrics/train/dns_{name}",
+                        f"metrics/validation/dns_{name}",
+                    ],
+                ]
+                for name in HW_FIELD_NAMES
+            },
         }
     )
 
@@ -126,6 +169,16 @@ def log_epoch_metrics(writer, epoch, train_metrics, validation_metrics, lr):
         writer.add_scalar(f"metrics/validation/{name}", value, epoch)
     writer.add_scalar("optimizer/learning_rate", lr, epoch)
     writer.flush()
+
+
+def serialise_parameters(args, **derived):
+    parameters = {}
+    for name, value in vars(args).items():
+        if isinstance(value, Path):
+            value = str(value)
+        parameters[name] = value
+    parameters.update(derived)
+    return parameters
 
 
 def parse_args():
@@ -151,8 +204,23 @@ def parse_args():
     p.add_argument("--batch-size", type=int, default=4)
     p.add_argument("--learning-rate", type=float, default=2e-4)
     p.add_argument("--base-channels", type=int, default=24)
+    p.add_argument(
+        "--learn-vorticity",
+        action="store_true",
+        help=(
+            "Predict vorticity as an independent third U-Net output channel "
+            "instead of deriving it as the Laplacian of potential"
+        ),
+    )
     p.add_argument("--lambda-dns", type=float, default=0.05)
     p.add_argument("--lambda-spectrum", type=float, default=0.02)
+    p.add_argument(
+        "--inverse-cutoff-fraction",
+        type=float,
+        default=0.75,
+        help="Smooth inverse cutoff as a fraction of Nyquist; 0 disables it",
+    )
+    p.add_argument("--inverse-cutoff-order", type=float, default=8.0)
     p.add_argument("--num-workers", type=int, default=0)
     p.add_argument("--save-every", type=int, default=50)
     p.add_argument("--seed", type=int, default=7)
@@ -162,25 +230,38 @@ def parse_args():
         type=Path,
         help="TensorBoard log directory (default: OUTPUT_DIR/tensorboard)",
     )
+    p.add_argument(
+        "--log-file",
+        type=Path,
+        help="Console log file (default: OUTPUT_DIR/training.log)",
+    )
     return p.parse_args()
 
 
-def main():
-    a = parse_args()
+def run_training(a):
     set_seed(a.seed)
     if tuple(a.fields) != HW_FIELD_NAMES:
         raise ValueError(f"Hasegawa-Wakatani fields must be {HW_FIELD_NAMES}.")
     if a.fine_n != 8 * a.coarse_n:
         raise ValueError("Current model requires fine_n = 8 * coarse_n.")
+    if not 0 <= a.inverse_cutoff_fraction <= 1:
+        raise ValueError("inverse-cutoff-fraction must be in [0, 1].")
+    if a.inverse_cutoff_order <= 0:
+        raise ValueError("inverse-cutoff-order must be positive.")
+    inverse_cutoff_fraction = a.inverse_cutoff_fraction or None
     a.output_dir.mkdir(parents=True, exist_ok=True)
     ckdir = a.output_dir / "checkpoints"
     ckdir.mkdir(exist_ok=True)
+    parameters_path = a.output_dir / "training_parameters.json"
+    parameters_path.write_text(
+        json.dumps(serialise_parameters(a), indent=2, sort_keys=True)
+    )
     tr, va, te = split_files(
         a.dataset, a.validation_fraction, a.test_fraction, a.split_mode, a.seed
     )
     delta = a.lx / a.fine_n
     alpha = a.alpha if a.alpha is not None else a.alpha_factor * delta
-    mean_np, std_np = calculate_training_statistics(
+    mean_np, std_np, dns_std_np = calculate_training_statistics(
         tr, a.fields, a.fine_n, a.coarse_n, alpha, a.lx, a.ly
     )
 
@@ -212,19 +293,32 @@ def main():
     if device.type == "cuda":
         print("GPU:", torch.cuda.get_device_name(0))
         torch.backends.cudnn.benchmark = True
+    model_output_channels = 3 if a.learn_vorticity else 2
     model = ResidualUNetSR(
-        len(a.fields), a.base_channels, a.fine_n // a.coarse_n
+        len(a.fields),
+        a.base_channels,
+        a.fine_n // a.coarse_n,
+        model_output_channels,
     ).to(device)
     opt = torch.optim.AdamW(
         model.parameters(), lr=a.learning_rate, weight_decay=1e-6
     )
     mean = torch.from_numpy(mean_np).to(device)
     std = torch.from_numpy(std_np).to(device)
+    dns_std = torch.from_numpy(dns_std_np).to(device)
     start = 1
     best = float("inf")
     if a.resume:
         c = load_checkpoint(a.resume, device)
         validate_hw_checkpoint(c)
+        checkpoint_learns_vorticity = (
+            c.get("vorticity_mode", "potential_laplacian")
+            == "learned_channel"
+        )
+        if checkpoint_learns_vorticity != a.learn_vorticity:
+            raise ValueError(
+                "--learn-vorticity must match the resumed checkpoint."
+            )
         model.load_state_dict(c["model"])
         opt.load_state_dict(c["optimizer"])
         start = int(c["epoch"]) + 1
@@ -234,6 +328,57 @@ def main():
     writer = SummaryWriter(log_dir=tensorboard_dir, purge_step=start)
     configure_tensorboard(writer)
     print("TensorBoard logs:", tensorboard_dir)
+    parameters = serialise_parameters(
+        a,
+        effective_alpha=alpha,
+        grid_spacing=delta,
+        scale_factor=a.fine_n // a.coarse_n,
+        optimizer="AdamW",
+        optimizer_learning_rate=opt.param_groups[0]["lr"],
+        optimizer_weight_decay=opt.param_groups[0]["weight_decay"],
+        optimizer_betas=opt.param_groups[0]["betas"],
+        optimizer_epsilon=opt.param_groups[0]["eps"],
+        optimizer_amsgrad=opt.param_groups[0]["amsgrad"],
+        gradient_clip_norm=1.0,
+        model="ResidualUNetSR",
+        model_input_channels=len(a.fields),
+        model_output_channels=model_output_channels,
+        trainable_model_parameters=sum(
+            parameter.numel() for parameter in model.parameters()
+            if parameter.requires_grad
+        ),
+        differential_filter="1 / (1 + alpha^2 k^2)",
+        downsampling="centered Fourier-mode truncation",
+        vorticity_operator=(
+            "learned_independent_channel"
+            if a.learn_vorticity
+            else "fourth_order_periodic_laplacian"
+        ),
+        vorticity_mode=(
+            "learned_channel" if a.learn_vorticity else "potential_laplacian"
+        ),
+        convolution_padding="circular",
+        interpolation_boundary="periodic",
+        inverse_regularization="smooth_exponential_cutoff",
+        inverse_cutoff_wavenumber=(
+            inverse_cutoff_fraction * np.pi / delta
+            if inverse_cutoff_fraction is not None
+            else None
+        ),
+        physics_version=1,
+        train_snapshots=len(tr),
+        validation_snapshots=len(va),
+        test_snapshots=len(te),
+        normalization_mean=mean_np.reshape(-1).tolist(),
+        normalization_std=std_np.reshape(-1).tolist(),
+        dns_normalization_std=dns_std_np.reshape(-1).tolist(),
+        device=str(device),
+        gpu=torch.cuda.get_device_name(0) if device.type == "cuda" else None,
+        tensorboard_dir=str(tensorboard_dir),
+    )
+    parameters_path.write_text(
+        json.dumps(parameters, indent=2, sort_keys=True)
+    )
     history = []
     for epoch in range(start, a.epochs + 1):
         tm = run_epoch(
@@ -242,11 +387,15 @@ def main():
             device,
             mean,
             std,
+            dns_std,
             alpha,
             a.lx,
             a.ly,
             a.lambda_dns,
             a.lambda_spectrum,
+            inverse_cutoff_fraction,
+            a.inverse_cutoff_order,
+            a.learn_vorticity,
             opt,
         )
         vm = run_epoch(
@@ -255,11 +404,15 @@ def main():
             device,
             mean,
             std,
+            dns_std,
             alpha,
             a.lx,
             a.ly,
             a.lambda_dns,
             a.lambda_spectrum,
+            inverse_cutoff_fraction,
+            a.inverse_cutoff_order,
+            a.learn_vorticity,
         )
         row = {
             "epoch": epoch,
@@ -283,9 +436,21 @@ def main():
             "delta": delta,
             "mean": mean_np,
             "std": std_np,
+            "dns_std": dns_std_np,
             "field_names": list(a.fields),
             "physics_version": 1,
-            "vorticity_operator": "fourth_order_periodic_laplacian",
+            "vorticity_operator": (
+                "learned_independent_channel"
+                if a.learn_vorticity
+                else "fourth_order_periodic_laplacian"
+            ),
+            "vorticity_mode": (
+                "learned_channel"
+                if a.learn_vorticity
+                else "potential_laplacian"
+            ),
+            "model_output_channels": model_output_channels,
+            "training_parameters": parameters,
             "fine_n": a.fine_n,
             "coarse_n": a.coarse_n,
             "lx": a.lx,
@@ -293,6 +458,8 @@ def main():
             "base_channels": a.base_channels,
             "lambda_dns": a.lambda_dns,
             "lambda_spectrum": a.lambda_spectrum,
+            "inverse_cutoff_fraction": inverse_cutoff_fraction,
+            "inverse_cutoff_order": a.inverse_cutoff_order,
         }
         torch.save(c, ckdir / "latest.pt")
         if vm["total"] < best:
@@ -317,11 +484,15 @@ def main():
         device,
         mean,
         std,
+        dns_std,
         alpha,
         a.lx,
         a.ly,
         a.lambda_dns,
         a.lambda_spectrum,
+        inverse_cutoff_fraction,
+        a.inverse_cutoff_order,
+        a.learn_vorticity,
     )
     for name, value in test.items():
         writer.add_scalar(f"metrics/test/{name}", value, int(c["epoch"]))
@@ -337,6 +508,8 @@ def main():
                 "best_epoch": int(c["epoch"]),
                 "test_metrics": test,
                 "tensorboard_dir": str(tensorboard_dir),
+                "training_parameters_file": str(parameters_path),
+                "training_parameters": parameters,
             },
             indent=2,
         )
@@ -345,5 +518,23 @@ def main():
     print("Test metrics:", test)
 
 
+def main():
+    args = parse_args()
+    args.output_dir.mkdir(parents=True, exist_ok=True)
+    args.log_file = args.log_file or args.output_dir / "training.log"
+    args.log_file.parent.mkdir(parents=True, exist_ok=True)
+    with args.log_file.open("a", buffering=1) as log_file:
+        stdout = Tee(sys.stdout, log_file)
+        stderr = Tee(sys.stderr, log_file)
+        with redirect_stdout(stdout), redirect_stderr(stderr):
+            print(f"Training console log: {args.log_file}")
+            try:
+                run_training(args)
+            except Exception:
+                traceback.print_exc()
+                return 1
+    return 0
+
+
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())
