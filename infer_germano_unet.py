@@ -6,8 +6,10 @@ import numpy as np, torch
 from germano_common import *
 
 
-def inverse_input_label(mode):
+def inverse_input_label(mode, cutoff_fraction=None):
     if mode == "unet":
+        if cutoff_fraction is not None:
+            return "Cutoff-filtered U-Net outcome (inverse input)"
         return "U-Net filtered (U-Net outcome)"
     return "Filtered DNS (inverse input)"
 
@@ -16,6 +18,40 @@ def inverse_input_filename(mode):
     if mode == "unet":
         return "U-Net_filtered"
     return "Filtered_DNS_inverse_input"
+
+
+def save_dns_centerline_plots(source, fields, dns, reconstructed, output_dir):
+    """Plot DNS and reconstructed values along y = N_DNS // 2."""
+    center_y = dns.shape[-1] // 2
+    x_index = np.arange(dns.shape[-2])
+    for channel, name in enumerate(fields):
+        fig, ax = plt.subplots(figsize=(8.0, 4.8))
+        ax.plot(
+            x_index,
+            dns[channel, :, center_y],
+            linewidth=1.8,
+            label="DNS",
+        )
+        ax.plot(
+            x_index,
+            reconstructed[channel, :, center_y],
+            "--",
+            linewidth=1.8,
+            label="Reconstructed DNS",
+        )
+        ax.set_title(
+            f"{HW_FIELD_LABELS[name]} centerline comparison, "
+            f"y={center_y}: {source}"
+        )
+        ax.set_xlabel("x index")
+        ax.set_ylabel(HW_FIELD_LABELS[name])
+        ax.grid(True, alpha=0.3)
+        ax.legend()
+        fig.tight_layout()
+        fig.savefig(
+            output_dir / f"{name}_DNS_centerline_comparison.png", dpi=180
+        )
+        plt.close(fig)
 
 
 def parse_args():
@@ -129,13 +165,18 @@ def main():
                     )
             else:
                 pf = torch.from_numpy(fine[None]).to(device)
+            pf = spectral_cutoff_torch(
+                pf,
+                lx,
+                ly,
+                cutoff_fraction,
+                cutoff_order,
+            )
             pd_unconstrained = inverse_germano_torch(
                 pf,
                 alpha,
                 lx,
                 ly,
-                cutoff_fraction,
-                cutoff_order,
             )
             if learn_vorticity:
                 pd = pd_unconstrained
@@ -149,6 +190,7 @@ def main():
         pf_np, pd_np = pf[0].cpu().numpy(), pd[0].cpu().numpy()
         out = a.output_dir / p.stem
         out.mkdir(parents=True, exist_ok=True)
+        save_dns_centerline_plots(p.name, fields, dns, pd_np, out)
         reconstruction = {
             "dns_256": dns,
             "filtered_256": fine,
@@ -201,7 +243,7 @@ def main():
             )
             save_image(
                 pf_np[ch],
-                f"{label}: {inverse_input_label(a.inverse_input)}",
+                f"{label}: {inverse_input_label(a.inverse_input, cutoff_fraction)}",
                 out / f"{name}_{inverse_input_filename(a.inverse_input)}.png",
                 cmap,
             )
@@ -236,7 +278,7 @@ def main():
                 lx,
                 ly,
                 out / f"{name}_spectrum_comparison.png",
-                inverse_input_label(a.inverse_input),
+                inverse_input_label(a.inverse_input, cutoff_fraction),
             )
         print(f"Processed {i}/{len(files)}: {p.name}")
     with (a.output_dir / "inference_metrics.csv").open("w", newline="") as f:
@@ -255,6 +297,7 @@ def main():
                 "physics_dtype": "float64",
                 "inverse_cutoff_fraction": cutoff_fraction,
                 "inverse_cutoff_order": cutoff_order,
+                "cutoff_application": "inverse_input_before_inverse_germano",
                 "vorticity_mode": vorticity_mode,
             },
             indent=2,

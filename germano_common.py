@@ -119,6 +119,31 @@ def inverse_germano_torch(
     return torch.fft.ifft2(mult * fh, dim=(-2, -1)).real
 
 
+def spectral_cutoff_torch(
+    field: torch.Tensor,
+    lx: float,
+    ly: float,
+    cutoff_fraction,
+    cutoff_order=8,
+) -> torch.Tensor:
+    """Apply a smooth exponential low-pass cutoff to a periodic field."""
+    if cutoff_fraction is None:
+        return field
+    if not 0 < cutoff_fraction <= 1:
+        raise ValueError("cutoff_fraction must be in (0, 1].")
+    if cutoff_order <= 0:
+        raise ValueError("cutoff_order must be positive.")
+    n = field.shape[-1]
+    k2 = k2_torch(n, lx, ly, field.device, field.dtype)
+    grid_nyquist = min(math.pi / (lx / n), math.pi / (ly / n))
+    cutoff_wavenumber = cutoff_fraction * grid_nyquist
+    multiplier = torch.exp(
+        -(torch.sqrt(k2) / cutoff_wavenumber) ** cutoff_order
+    )
+    fh = torch.fft.fft2(field, dim=(-2, -1))
+    return torch.fft.ifft2(multiplier * fh, dim=(-2, -1)).real
+
+
 def recursive_npz_files(directory: Path) -> list[Path]:
     return sorted(p for p in directory.rglob("*.npz") if p.is_file())
 
@@ -450,13 +475,18 @@ def calculate_losses(
             predicted_uv[:, :1], predicted_uv[:, 1:2], lx, ly
         )
     pn = (pf - mean) / std
-    pd_unconstrained = inverse_germano_torch(
+    inverse_input = spectral_cutoff_torch(
         pf,
-        alpha,
         lx,
         ly,
         inverse_cutoff_fraction,
         inverse_cutoff_order,
+    )
+    pd_unconstrained = inverse_germano_torch(
+        inverse_input,
+        alpha,
+        lx,
+        ly,
     )
     if learn_vorticity:
         pd = pd_unconstrained
