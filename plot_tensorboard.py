@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import math
 from pathlib import Path
 
 import matplotlib.pyplot as plt
@@ -16,9 +15,28 @@ from tensorboard.backend.event_processing.event_accumulator import (
 
 PLOT_GROUPS = {
     "losses": ("total", "filtered", "dns", "spectrum"),
-    "relative_l2": ("filtered_relative_l2", "dns_relative_l2"),
+    "relative_l2": (
+        "filtered_relative_l2",
+        "dns_relative_l2",
+        "spectrum_relative_l2",
+    ),
     "dns_field_losses": ("dns_U", "dns_V", "dns_W"),
 }
+
+PANEL_LAYOUT = [
+    ["definitions", "total", "learning_rate"],
+    ["filtered", "dns", "spectrum"],
+    [
+        "filtered_relative_l2",
+        "dns_relative_l2",
+        "spectrum_relative_l2",
+    ],
+    [
+        "dns_U",
+        "dns_V",
+        "dns_W",
+    ],
+]
 
 
 def parse_args():
@@ -76,31 +94,34 @@ def plot_all_metrics(
     lambda_spectrum=None,
 ):
     available = set(accumulator.Tags().get("scalars", ()))
-    metrics = [
-        metric
-        for group in PLOT_GROUPS.values()
-        for metric in group
-    ]
-    panels = [("metric", metric) for metric in metrics]
-    if "optimizer/learning_rate" in available:
-        panels.append(("learning_rate", "learning_rate"))
-    columns = 3
-    rows = math.ceil(len(panels) / columns)
-    fig, axes = plt.subplots(
-        rows,
-        columns,
-        figsize=(5.6 * columns, 4.4 * rows),
-        squeeze=False,
+    fig, axes = plt.subplot_mosaic(
+        PANEL_LAYOUT,
+        figsize=(16.8, 17.6),
+        gridspec_kw={"height_ratios": (1, 1, 1, 1)},
     )
     plotted = False
-    for ax, (panel_type, metric) in zip(axes.flat, panels):
-        if panel_type == "learning_rate":
+    for metric in (
+        "total",
+        "learning_rate",
+        "filtered",
+        "dns",
+        "spectrum",
+        "filtered_relative_l2",
+        "dns_relative_l2",
+        "spectrum_relative_l2",
+        "dns_U",
+        "dns_V",
+        "dns_W",
+    ):
+        ax = axes[metric]
+        if metric == "learning_rate":
             steps, values = scalar_series(
                 accumulator, "optimizer/learning_rate"
-            )
-            ax.plot(steps, values, color="tab:green")
+            ) if "optimizer/learning_rate" in available else ([], [])
+            if steps:
+                ax.plot(steps, values, color="tab:green")
+                plotted = True
             ax.set_title("Learning Rate")
-            plotted = True
         else:
             for split, color in (
                 ("train", "tab:blue"),
@@ -119,7 +140,7 @@ def plot_all_metrics(
             ax.set_yscale("log")
         ax.grid(True, which="both", alpha=0.25)
         if ax.lines:
-            if panel_type == "metric":
+            if metric != "learning_rate":
                 ax.legend()
         else:
             ax.text(
@@ -130,50 +151,46 @@ def plot_all_metrics(
                 va="center",
                 transform=ax.transAxes,
             )
-    unused_axes = list(axes.flat[len(panels):])
-    if unused_axes:
-        definition_ax = unused_axes.pop(0)
-        definition_ax.set_axis_off()
-        definitions = (
-            "Definitions\n\n"
-            r"$\mathcal{L}_{total}"
-            r"=\mathcal{L}_{filtered}"
-            r"+\lambda_{DNS}\mathcal{L}_{DNS}"
-            r"+\lambda_{spectrum}\mathcal{L}_{spectrum}$"
-            "\n\n"
-            r"$L_{2,\mathrm{relative}}"
-            r"=\dfrac{\|\hat{q}-q\|_2}{\|q\|_2}$"
-            "\n\n"
-            r"$\lambda_{filtered}=1$"
-            "\n"
-            rf"$\lambda_{{DNS}}={format_weight(lambda_dns)}$"
-            "\n"
-            rf"$\lambda_{{spectrum}}={format_weight(lambda_spectrum)}$"
-            "\n\n"
-            "Total: weighted loss\n"
-            "Component curves: unweighted losses\n\n"
-            r"$\hat{q}$: prediction"
-            "\n"
-            r"$q$: target"
-        )
-        definition_ax.text(
-            0.5,
-            0.5,
-            definitions,
-            ha="center",
-            va="center",
-            fontsize=13,
-            linespacing=1.5,
-            transform=definition_ax.transAxes,
-            bbox={
-                "boxstyle": "round,pad=1.0",
-                "facecolor": "whitesmoke",
-                "edgecolor": "0.35",
-                "linewidth": 1.2,
-            },
-        )
-    for ax in unused_axes:
-        ax.set_visible(False)
+    definition_ax = axes["definitions"]
+    definition_ax.set_axis_off()
+    definitions = (
+        "Definitions\n\n"
+        r"$\mathcal{L}_{total}"
+        r"=\mathcal{L}_{filtered}"
+        r"+\lambda_{DNS}\mathcal{L}_{DNS}"
+        r"+\lambda_{spectrum}\mathcal{L}_{spectrum}$"
+        "\n\n"
+        r"$L_{2,\mathrm{relative}}"
+        r"=\dfrac{\|\hat{q}-q\|_2}{\|q\|_2}$"
+        "\n\n"
+        r"$\lambda_{filtered}=1$"
+        "\n"
+        rf"$\lambda_{{DNS}}={format_weight(lambda_dns)}$"
+        "\n"
+        rf"$\lambda_{{spectrum}}={format_weight(lambda_spectrum)}$"
+        "\n\n"
+        "Total: weighted loss\n"
+        "Component curves: unweighted losses\n\n"
+        r"$\hat{q}$: prediction"
+        "\n"
+        r"$q$: target"
+    )
+    definition_ax.text(
+        0.5,
+        0.5,
+        definitions,
+        ha="center",
+        va="center",
+        fontsize=13,
+        linespacing=1.5,
+        transform=definition_ax.transAxes,
+        bbox={
+            "boxstyle": "round,pad=1.0",
+            "facecolor": "whitesmoke",
+            "edgecolor": "0.35",
+            "linewidth": 1.2,
+        },
+    )
     if not plotted:
         plt.close(fig)
         return False

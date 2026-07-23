@@ -525,6 +525,7 @@ def calculate_losses(
     ls = nn.functional.l1_loss(
         torch.log1p(predicted_energy), torch.log1p(target_energy)
     )
+    spectrum_relative_l2 = relative_l2(target_energy, predicted_energy)
     total = lf + lambda_dns * ld + lambda_spectrum * ls
     return (
         total,
@@ -533,6 +534,7 @@ def calculate_losses(
             "filtered": lf,
             "dns": ld,
             "spectrum": ls,
+            "spectrum_relative_l2": spectrum_relative_l2,
             "dns_U": dns_absolute_error[:, 0].mean(),
             "dns_V": dns_absolute_error[:, 1].mean(),
             "dns_W": dns_absolute_error[:, 2].mean(),

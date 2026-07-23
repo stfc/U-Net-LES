@@ -82,7 +82,12 @@ def run_epoch(
     ]
     totals = {
         name: 0.0
-        for name in loss_names + ["filtered_relative_l2", "dns_relative_l2"]
+        for name in loss_names
+        + [
+            "filtered_relative_l2",
+            "dns_relative_l2",
+            "spectrum_relative_l2",
+        ]
     }
     count = 0
     ctx = torch.enable_grad() if training else torch.no_grad()
@@ -120,6 +125,9 @@ def run_epoch(
             count += b
             for k in loss_names:
                 totals[k] += vals[k].detach().item() * b
+            totals["spectrum_relative_l2"] += (
+                vals["spectrum_relative_l2"].detach().item() * b
+            )
 
             totals["filtered_relative_l2"] += (
                 relative_l2(ft * std + mean, pf).detach().item() * b
@@ -131,7 +139,7 @@ def run_epoch(
     return {k: v / count for k, v in totals.items()}
 
 
-def configure_tensorboard(writer):
+def configure_tensorboard(writer, normalize):
     writer.add_custom_scalars(
         {
             "Losses": {
@@ -146,9 +154,17 @@ def configure_tensorboard(writer):
                     "Multiline",
                     [f"metrics/train/{name}", f"metrics/validation/{name}"],
                 ]
-                for name in ("filtered_relative_l2", "dns_relative_l2")
+                for name in (
+                    "filtered_relative_l2",
+                    "dns_relative_l2",
+                    "spectrum_relative_l2",
+                )
             },
-            "Per-field normalized DNS loss": {
+            (
+                "Per-field normalized DNS loss"
+                if normalize
+                else "Per-field absolute DNS loss"
+            ): {
                 name: [
                     "Multiline",
                     [
@@ -211,6 +227,16 @@ def parse_args():
         help="Floating-point precision for data, U-Net, losses, and physics",
     )
     p.add_argument(
+        "--normalize",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "Normalize LES inputs and filtered targets and scale DNS loss "
+            "by its standard deviation (default: enabled; use "
+            "--no-normalize for physical values throughout)"
+        ),
+    )
+    p.add_argument(
         "--learn-vorticity",
         action="store_true",
         help=(
@@ -269,16 +295,26 @@ def run_training(a):
     )
     delta = a.lx / a.fine_n
     alpha = a.alpha if a.alpha is not None else a.alpha_factor * delta
-    mean_np, std_np, dns_std_np = calculate_training_statistics(
-        tr,
-        a.fields,
-        a.fine_n,
-        a.coarse_n,
-        alpha,
-        a.lx,
-        a.ly,
-        dtype=numpy_dtype,
-    )
+    if a.normalize:
+        mean_np, std_np, dns_std_np = calculate_training_statistics(
+            tr,
+            a.fields,
+            a.fine_n,
+            a.coarse_n,
+            alpha,
+            a.lx,
+            a.ly,
+            dtype=numpy_dtype,
+        )
+    else:
+        statistics_shape = (1, len(a.fields), 1, 1)
+        mean_np = np.zeros(statistics_shape, dtype=numpy_dtype)
+        std_np = np.ones(statistics_shape, dtype=numpy_dtype)
+        dns_std_np = np.ones(statistics_shape, dtype=numpy_dtype)
+        print(
+            "Normalization disabled: LES inputs, filtered targets, model "
+            "outputs, reconstructed DNS, and DNS losses use physical values."
+        )
 
     def ds(files):
         return GermanoSnapshotDataset(
@@ -341,6 +377,15 @@ def run_training(a):
                 f"--precision {a.precision} does not match resumed "
                 f"checkpoint precision {checkpoint_precision}."
             )
+        checkpoint_normalizes = c.get(
+            "normalize",
+            c.get("training_parameters", {}).get("normalize", True),
+        )
+        if checkpoint_normalizes != a.normalize:
+            raise ValueError(
+                f"--{'normalize' if a.normalize else 'no-normalize'} does "
+                "not match the resumed checkpoint."
+            )
         model.load_state_dict(c["model"])
         opt.load_state_dict(c["optimizer"])
         start = int(c["epoch"]) + 1
@@ -348,7 +393,7 @@ def run_training(a):
         print("Resumed from epoch", start - 1)
     tensorboard_dir = a.tensorboard_dir or a.output_dir / "tensorboard"
     writer = SummaryWriter(log_dir=tensorboard_dir, purge_step=start)
-    configure_tensorboard(writer)
+    configure_tensorboard(writer, a.normalize)
     print("TensorBoard logs:", tensorboard_dir)
     parameters = serialise_parameters(
         a,
@@ -394,6 +439,7 @@ def run_training(a):
         normalization_mean=mean_np.reshape(-1).tolist(),
         normalization_std=std_np.reshape(-1).tolist(),
         dns_normalization_std=dns_std_np.reshape(-1).tolist(),
+        normalization_enabled=a.normalize,
         device=str(device),
         gpu=torch.cuda.get_device_name(0) if device.type == "cuda" else None,
         tensorboard_dir=str(tensorboard_dir),
@@ -483,6 +529,7 @@ def run_training(a):
             "inverse_cutoff_fraction": inverse_cutoff_fraction,
             "inverse_cutoff_order": a.inverse_cutoff_order,
             "precision": a.precision,
+            "normalize": a.normalize,
         }
         torch.save(c, ckdir / "latest.pt")
         if vm["total"] < best:
