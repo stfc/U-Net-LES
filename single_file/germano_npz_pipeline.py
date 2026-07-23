@@ -232,7 +232,7 @@ def save_spectrum_comparison(
     ax.set_ylabel(r"Shell power $P(k)$")
     ax.grid(True, which="both", alpha=0.3)
     ax.legend()
-    ax.set_ylim(bottom=1e-18)
+    ax.set_ylim(bottom=10e-10)
     #ax.loglog(k[mask], power[mask], '.', markersize=5, label=label,)
     fig.tight_layout()
     fig.savefig(output_path, dpi=180)

@@ -73,6 +73,10 @@ from germano_common import (
     spectral_cutoff_torch,
     validate_hw_checkpoint,
 )
+from visualization_common import (
+    arakawa_bracket as shared_arakawa_bracket,
+    save_arakawa_comparison,
+)
 
 
 _HERE = Path(__file__).resolve().parent
@@ -168,23 +172,8 @@ _PREVIOUS_DNS_AMAX = None
 
 
 def _arakawa_bracket(f: torch.Tensor, g: torch.Tensor, dx: float, dy: float):
-    """The three-Jacobian Arakawa stencil used by misc_styles.find_bracket."""
-    tr = lambda a, i, j: torch.roll(a, shifts=(i, j), dims=(-2, -1))
-    jpp = (tr(f, 0, 1) - tr(f, 0, -1)) * (tr(g, 1, 0) - tr(g, -1, 0)) \
-        - (tr(f, 1, 0) - tr(f, -1, 0)) * (tr(g, 0, 1) - tr(g, 0, -1))
-    jpx = (
-        tr(g, 1, 0) * (tr(f, 1, 1) - tr(f, 1, -1))
-        - tr(g, -1, 0) * (tr(f, -1, 1) - tr(f, -1, -1))
-        - tr(g, 0, 1) * (tr(f, 1, 1) - tr(f, -1, 1))
-        + tr(g, 0, -1) * (tr(f, 1, -1) - tr(f, -1, -1))
-    )
-    jxp = (
-        tr(g, 1, 1) * (tr(f, 0, 1) - tr(f, 1, 0))
-        - tr(g, -1, -1) * (tr(f, -1, 0) - tr(f, 0, -1))
-        - tr(g, -1, 1) * (tr(f, 0, 1) - tr(f, -1, 0))
-        + tr(g, 1, -1) * (tr(f, 1, 0) - tr(f, 0, -1))
-    )
-    return (jpp + jpx + jxp) / (12.0 * dx * dy)
+    """Compatibility wrapper for the shared Arakawa implementation."""
+    return shared_arakawa_bracket(f, g, dx, dy)
 
 
 def _germano_filter_torch(field: torch.Tensor) -> torch.Tensor:
@@ -549,6 +538,16 @@ def _save_initial_dns_arakawa(
     reference_fields: np.ndarray | None = None,
 ) -> tuple[Path, Path]:
     """Calculate and save HW Arakawa fields and spectra on the DNS grid."""
+    if reference_fields is not None:
+        return save_arakawa_comparison(
+            fields,
+            reference_fields,
+            LX,
+            LY,
+            Path(f"results_StylES_{COARSE_N}x{COARSE_N}") / "arakawa",
+            stem="arakawa_DNS_time0000",
+            cutoff_fraction=POST_CUTOFF_FRACTION,
+        )
     dx_dns = LX / FINE_N
     dy_dns = LY / FINE_N
 
@@ -665,6 +664,7 @@ def _save_initial_dns_arakawa(
         ax.set_title(f"{title} spectrum")
         ax.set_xlabel(r"wavenumber $k$")
         ax.set_ylabel("shell-summed power")
+        ax.set_ylim(bottom=10e-10)
         ax.grid(True, which="both", alpha=0.25)
     fig.tight_layout()
     fig.savefig(spectrum_path, dpi=180)
@@ -744,6 +744,7 @@ def _save_initial_dns_fields(
         ax.set_title(title)
         ax.set_xlabel(r"wavenumber $k$")
         ax.set_ylabel("shell-summed power")
+        ax.set_ylim(bottom=10e-10)
         ax.grid(True, which="both", alpha=0.25)
         ax.legend()
     fig.tight_layout()

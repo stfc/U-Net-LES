@@ -130,4 +130,4 @@ def save_spectrum_plot(field_name,dns,filtered_fine,filtered_coarse,predicted_fi
         elif label=='U-Net filtered 256': ax.loglog(k[v],p[v],linestyle='--',linewidth=1.8,label=label)
         else: ax.loglog(k[v],p[v],linewidth=1.8,label=label)
     kn=min(np.pi/(lx/coarse_n),np.pi/(ly/coarse_n)); ax.axvline(kn,linestyle=':',linewidth=1.4,label=f'{coarse_n}-grid Nyquist')
-    ax.set_title(f'{field_name}: isotropic spectrum comparison'); ax.set_xlabel(r'$k$'); ax.set_ylabel(r'Shell power $P(k)$'); ax.set_ylim(bottom=1e-10); ax.grid(True,which='both',alpha=.3); ax.legend(numpoints=1); fig.tight_layout(); fig.savefig(path,dpi=180); plt.close(fig)
+    ax.set_title(f'{field_name}: isotropic spectrum comparison'); ax.set_xlabel(r'$k$'); ax.set_ylabel(r'Shell power $P(k)$'); ax.set_ylim(bottom=10e-10); ax.grid(True,which='both',alpha=.3); ax.legend(numpoints=1); fig.tight_layout(); fig.savefig(path,dpi=180); plt.close(fig)

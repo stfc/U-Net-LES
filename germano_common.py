@@ -689,7 +689,7 @@ def save_spectrum_plot(
     )
     ax.set_xlabel(r"$k$")
     ax.set_ylabel(r"Shell energy $E(k)$")
-    ax.set_ylim(bottom=1e-10)
+    ax.set_ylim(bottom=10e-10)
     ax.grid(True, which="both", alpha=0.3)
     ax.legend(numpoints=1)
     fig.tight_layout()

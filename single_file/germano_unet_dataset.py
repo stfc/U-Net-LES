@@ -930,7 +930,7 @@ def save_spectrum_plot(
     axis.set_title(f"{field_name}: isotropic spectrum comparison")
     axis.set_xlabel(r"$k$")
     axis.set_ylabel(r"Shell power $P(k)$")
-    axis.set_ylim(bottom=1.0e-10)
+    axis.set_ylim(bottom=10e-10)
     axis.grid(True, which="both", alpha=0.3)
     axis.legend(numpoints=1)
 

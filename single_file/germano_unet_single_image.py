@@ -81,7 +81,7 @@ def save_spec(name,dns,ff,fc,uf,rd,coarse,lx,ly,path):
         elif lab=='U-Net filtered 256': ax.loglog(k[m],p[m],'--',linewidth=1.8,label=lab)
         else: ax.loglog(k[m],p[m],linewidth=1.8,label=lab)
     kn=min(np.pi/(lx/coarse),np.pi/(ly/coarse)); ax.axvline(kn,linestyle=':',linewidth=1.4,label=f'{coarse}-grid Nyquist')
-    ax.set_title(f'{name}: isotropic spectrum comparison'); ax.set_xlabel(r'$k$'); ax.set_ylabel(r'Shell power $P(k)$'); ax.set_ylim(bottom=1e-10); ax.grid(True,which='both',alpha=.3); ax.legend(numpoints=1); fig.tight_layout(); fig.savefig(path,dpi=180); plt.close(fig)
+    ax.set_title(f'{name}: isotropic spectrum comparison'); ax.set_xlabel(r'$k$'); ax.set_ylabel(r'Shell power $P(k)$'); ax.set_ylim(bottom=10e-10); ax.grid(True,which='both',alpha=.3); ax.legend(numpoints=1); fig.tight_layout(); fig.savefig(path,dpi=180); plt.close(fig)
 
 def main():
     ap=argparse.ArgumentParser(); ap.add_argument('input',type=Path); ap.add_argument('--output-dir',type=Path,default=Path('germano_unet_single_output')); ap.add_argument('--fields',nargs=3,default=['U','V','P']); ap.add_argument('--coarse-n',type=int,default=32); ap.add_argument('--lx',type=float,default=2*np.pi); ap.add_argument('--ly',type=float,default=2*np.pi)

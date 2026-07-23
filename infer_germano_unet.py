@@ -1,9 +1,13 @@
 #!/usr/bin/env python3
 from __future__ import annotations
-import argparse, csv, json
+import argparse, csv, json, os
 from pathlib import Path
 import numpy as np, torch
 from germano_common import *
+from visualization_common import (
+    save_arakawa_comparison,
+    save_field_spectrum_comparison,
+)
 
 
 def inverse_input_label(mode, cutoff_fraction=None):
@@ -18,6 +22,16 @@ def inverse_input_filename(mode):
     if mode == "unet":
         return "U-Net_filtered"
     return "Filtered_DNS_inverse_input"
+
+
+def optional_environment_float(name, default):
+    """Read an optional pBOUT float, accepting its cutoff-disable values."""
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    if value.lower() in {"none", "off", "disable", "disabled"}:
+        return None
+    return float(value)
 
 
 def save_dns_centerline_plots(source, fields, dns, reconstructed, output_dir):
@@ -68,21 +82,6 @@ def parse_args():
         help="Field passed to the inverse Germano filter (default: unet)",
     )
     p.add_argument(
-        "--inverse-cutoff-fraction",
-        type=float,
-        help="Override checkpoint cutoff as a fraction of grid Nyquist",
-    )
-    p.add_argument(
-        "--inverse-cutoff-order",
-        type=float,
-        help="Override checkpoint exponential cutoff order",
-    )
-    p.add_argument(
-        "--disable-inverse-cutoff",
-        action="store_true",
-        help="Use the exact inverse Germano operator",
-    )
-    p.add_argument(
         "--precision",
         choices=("checkpoint", "float32", "float64"),
         default="checkpoint",
@@ -124,18 +123,39 @@ def main():
             f"{expected_output_channels} model outputs, but metadata specifies "
             f"{model_output_channels}."
         )
-    cutoff_fraction = a.inverse_cutoff_fraction
-    if cutoff_fraction is None:
-        cutoff_fraction = c.get("inverse_cutoff_fraction", 0.75)
-    cutoff_order = a.inverse_cutoff_order
-    if cutoff_order is None:
-        cutoff_order = c.get("inverse_cutoff_order", 8.0)
+    cutoff_fraction = optional_environment_float(
+        "PBOUT_UNET_INVERSE_CUTOFF_FRACTION",
+        c.get("inverse_cutoff_fraction", 0.75),
+    )
+    cutoff_order = float(
+        os.environ.get(
+            "PBOUT_UNET_INVERSE_CUTOFF_ORDER",
+            c.get("inverse_cutoff_order", 8.0),
+        )
+    )
+    post_cutoff_fraction = optional_environment_float(
+        "PBOUT_UNET_POST_CUTOFF_FRACTION", 0.5
+    )
+    post_cutoff_order = float(
+        os.environ.get("PBOUT_UNET_POST_CUTOFF_ORDER", 8.0)
+    )
     if cutoff_fraction is not None and not 0 < cutoff_fraction <= 1:
-        raise ValueError("inverse-cutoff-fraction must be in (0, 1].")
+        raise ValueError(
+            "PBOUT_UNET_INVERSE_CUTOFF_FRACTION must be in (0, 1]."
+        )
+    if post_cutoff_fraction is not None and not 0 < post_cutoff_fraction <= 1:
+        raise ValueError(
+            "PBOUT_UNET_POST_CUTOFF_FRACTION must be in (0, 1]."
+        )
     if cutoff_order <= 0:
-        raise ValueError("inverse-cutoff-order must be positive.")
-    if a.disable_inverse_cutoff or a.inverse_input == "filtered-dns":
-        cutoff_fraction = None
+        raise ValueError("PBOUT_UNET_INVERSE_CUTOFF_ORDER must be positive.")
+    if post_cutoff_order <= 0:
+        raise ValueError("PBOUT_UNET_POST_CUTOFF_ORDER must be positive.")
+    print(
+        "Cutoffs: "
+        f"inverse_fraction={cutoff_fraction}, inverse_order={cutoff_order}; "
+        f"post_fraction={post_cutoff_fraction}, post_order={post_cutoff_order}"
+    )
     model = ResidualUNetSR(
         len(fields),
         base_channels,
@@ -190,15 +210,20 @@ def main():
                 lx,
                 ly,
             )
+            pd_unconstrained = spectral_cutoff_torch(
+                pd_unconstrained,
+                lx,
+                ly,
+                post_cutoff_fraction,
+                post_cutoff_order,
+            )
             if learn_vorticity:
                 pd = pd_unconstrained
             else:
-                pd = hw_fields_torch(
-                    pd_unconstrained[:, :1],
-                    pd_unconstrained[:, 1:2],
-                    lx,
-                    ly,
+                vorticity = periodic_laplacian_4th_torch(
+                    pd_unconstrained[:, 1:2], lx, ly
                 )
+                pd = torch.cat((pd_unconstrained[:, :2], vorticity), dim=1)
         pf_np, pd_np = pf[0].cpu().numpy(), pd[0].cpu().numpy()
         out = a.output_dir / p.stem
         out.mkdir(parents=True, exist_ok=True)
@@ -291,6 +316,23 @@ def main():
             out / "HW_energy_spectrum_comparison.png",
             inverse_input_label(a.inverse_input, cutoff_fraction),
         )
+        save_field_spectrum_comparison(
+            pd_np,
+            dns,
+            fields,
+            lx,
+            ly,
+            out / "reconstructed_DNS_spectrum_comparison.png",
+            post_cutoff_fraction,
+        )
+        save_arakawa_comparison(
+            pd_np,
+            dns,
+            lx,
+            ly,
+            out,
+            cutoff_fraction=post_cutoff_fraction,
+        )
         print(f"Processed {i}/{len(files)}: {p.name}")
     with (a.output_dir / "inference_metrics.csv").open("w", newline="") as f:
         w = csv.DictWriter(f, fieldnames=list(rows[0]))
@@ -309,7 +351,12 @@ def main():
                 "physics_dtype": precision,
                 "inverse_cutoff_fraction": cutoff_fraction,
                 "inverse_cutoff_order": cutoff_order,
-                "cutoff_application": "inverse_input_before_inverse_germano",
+                "post_cutoff_fraction": post_cutoff_fraction,
+                "post_cutoff_order": post_cutoff_order,
+                "cutoff_application": {
+                    "inverse": "inverse_input_before_inverse_germano",
+                    "post": "reconstructed_dns_after_inverse_germano",
+                },
                 "vorticity_mode": vorticity_mode,
             },
             indent=2,
