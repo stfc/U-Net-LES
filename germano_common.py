@@ -280,6 +280,7 @@ def calculate_training_statistics(
     alpha: float,
     lx: float,
     ly: float,
+    dtype=np.float32,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     c = len(field_names)
     s = np.zeros(c)
@@ -288,8 +289,12 @@ def calculate_training_statistics(
     dns_ss = np.zeros(c)
     npts = 0
     for i, p in enumerate(files, 1):
-        dns = load_dns_snapshot(p, field_names, fine_n, lx, ly)
-        _, fine = filter_snapshot(dns, alpha, lx, ly, coarse_n)
+        dns = load_dns_snapshot(
+            p, field_names, fine_n, lx, ly, dtype=dtype
+        )
+        _, fine = filter_snapshot(
+            dns, alpha, lx, ly, coarse_n, dtype=dtype
+        )
         s += fine.sum((1, 2), dtype=np.float64)
         ss += np.square(fine, dtype=np.float64).sum((1, 2))
         dns_s += dns.sum((1, 2), dtype=np.float64)
@@ -304,9 +309,9 @@ def calculate_training_statistics(
     dns_var = np.maximum(dns_ss / npts - dns_mean**2, 0)
     dns_std = np.maximum(np.sqrt(dns_var), 1e-8)
     return (
-        mean.astype(np.float32).reshape(1, c, 1, 1),
-        std.astype(np.float32).reshape(1, c, 1, 1),
-        dns_std.astype(np.float32).reshape(1, c, 1, 1),
+        mean.astype(dtype).reshape(1, c, 1, 1),
+        std.astype(dtype).reshape(1, c, 1, 1),
+        dns_std.astype(dtype).reshape(1, c, 1, 1),
     )
 
 
@@ -323,6 +328,7 @@ class GermanoSnapshotDataset(Dataset):
         self.ly = ly
         self.mean = mean[0]
         self.std = std[0]
+        self.dtype = mean.dtype
 
     def __len__(self):
         return len(self.files)
@@ -334,14 +340,20 @@ class GermanoSnapshotDataset(Dataset):
             self.fine_n,
             self.lx,
             self.ly,
+            dtype=self.dtype,
         )
         coarse, fine = filter_snapshot(
-            dns, self.alpha, self.lx, self.ly, self.coarse_n
+            dns,
+            self.alpha,
+            self.lx,
+            self.ly,
+            self.coarse_n,
+            dtype=self.dtype,
         )
         return (
-            torch.from_numpy((coarse - self.mean) / self.std).float(),
-            torch.from_numpy((fine - self.mean) / self.std).float(),
-            torch.from_numpy(dns).float(),
+            torch.from_numpy((coarse - self.mean) / self.std),
+            torch.from_numpy((fine - self.mean) / self.std),
+            torch.from_numpy(dns),
         )
 
 
@@ -497,10 +509,11 @@ def calculate_losses(
     lf = nn.functional.l1_loss(pn, filtered_target_normalised)
     dns_absolute_error = torch.abs((pd - dns_target) / dns_std)
     ld = dns_absolute_error.mean()
-    ph = torch.fft.rfft2(pn, dim=(-2, -1))
-    th = torch.fft.rfft2(filtered_target_normalised, dim=(-2, -1))
+    filtered_target = filtered_target_normalised * std + mean
+    predicted_energy = hw_energy_spectrum_torch(pf, lx, ly)
+    target_energy = hw_energy_spectrum_torch(filtered_target, lx, ly)
     ls = nn.functional.l1_loss(
-        torch.log1p(torch.abs(ph)), torch.log1p(torch.abs(th))
+        torch.log1p(predicted_energy), torch.log1p(target_energy)
     )
     total = lf + lambda_dns * ld + lambda_spectrum * ls
     return (
@@ -517,6 +530,33 @@ def calculate_losses(
         pf,
         pd,
     )
+
+
+def hw_energy_spectrum_torch(fields, lx, ly):
+    """Return HW energy per Fourier mode from physical n and phi fields.
+
+    E_k = 1/2 (n_k n_k* + (d_x phi)_k (d_x phi)_k*
+                         + (d_y phi)_k (d_y phi)_k*)
+    """
+    if fields.shape[-3] < 2:
+        raise ValueError("HW energy requires density and potential channels.")
+    nx, ny = fields.shape[-2:]
+    density_hat = torch.fft.fft2(fields[..., 0, :, :], dim=(-2, -1))
+    potential_hat = torch.fft.fft2(fields[..., 1, :, :], dim=(-2, -1))
+    kx = 2 * math.pi * torch.fft.fftfreq(
+        nx, d=lx / nx, device=fields.device, dtype=fields.dtype
+    )
+    ky = 2 * math.pi * torch.fft.fftfreq(
+        ny, d=ly / ny, device=fields.device, dtype=fields.dtype
+    )
+    dphi_dx_hat = 1j * kx[:, None] * potential_hat
+    dphi_dy_hat = 1j * ky[None, :] * potential_hat
+    normalization = float(nx * ny) ** 2
+    return 0.5 * (
+        density_hat.abs().square()
+        + dphi_dx_hat.abs().square()
+        + dphi_dy_hat.abs().square()
+    ) / normalization
 
 
 def relative_l2(reference, prediction):
@@ -539,6 +579,37 @@ def isotropic_spectrum(field, lx, ly):
     k = np.arange(p.size) * dk
     v = c > 0
     return k[v], p[v]
+
+
+def isotropic_hw_energy_spectrum(fields, lx, ly):
+    """Return the shell-summed HW energy spectrum from physical n and phi.
+
+    E_k = 1/2 (n_k n_k* + (d_x phi)_k (d_x phi)_k*
+                         + (d_y phi)_k (d_y phi)_k*)
+    """
+    if fields.ndim != 3 or fields.shape[0] < 2:
+        raise ValueError(
+            "HW energy requires fields shaped (channels, nx, ny)."
+        )
+    nx, ny = fields.shape[-2:]
+    density_hat = np.fft.fft2(fields[0])
+    potential_hat = np.fft.fft2(fields[1])
+    kx = 2 * np.pi * np.fft.fftfreq(nx, d=lx / nx)
+    ky = 2 * np.pi * np.fft.fftfreq(ny, d=ly / ny)
+    kx_grid, ky_grid = np.meshgrid(kx, ky, indexing="ij")
+    dphi_dx_hat = 1j * kx_grid * potential_hat
+    dphi_dy_hat = 1j * ky_grid * potential_hat
+    energy = 0.5 * np.real(
+        np.conj(density_hat) * density_hat
+        + np.conj(dphi_dx_hat) * dphi_dx_hat
+        + np.conj(dphi_dy_hat) * dphi_dy_hat
+    ) / float(nx * ny) ** 2
+    wavenumber = np.sqrt(kx_grid**2 + ky_grid**2)
+    dk = min(2 * np.pi / lx, 2 * np.pi / ly)
+    shell = np.rint(wavenumber / dk).astype(int)
+    shell_energy = np.bincount(shell.ravel(), weights=energy.ravel())
+    k = np.arange(shell_energy.size) * dk
+    return k, shell_energy
 
 
 def save_image(field, title, path, cmap=None, symmetric=False):
@@ -567,7 +638,6 @@ def save_image(field, title, path, cmap=None, symmetric=False):
 
 
 def save_spectrum_plot(
-    field_name,
     dns,
     filtered_fine,
     filtered_coarse,
@@ -580,13 +650,19 @@ def save_spectrum_plot(
     inverse_input_label="U-Net filtered",
 ):
     spectra = {
-        "DNS": isotropic_spectrum(dns, lx, ly),
-        f"Filtered {filtered_fine.shape[0]}": isotropic_spectrum(
+        "DNS": isotropic_hw_energy_spectrum(dns, lx, ly),
+        f"Filtered {filtered_fine.shape[-1]}": isotropic_hw_energy_spectrum(
             filtered_fine, lx, ly
         ),
-        f"Filtered {coarse_n}": isotropic_spectrum(filtered_coarse, lx, ly),
-        inverse_input_label: isotropic_spectrum(predicted_filtered, lx, ly),
-        "Reconstructed DNS": isotropic_spectrum(predicted_dns, lx, ly),
+        f"Filtered {coarse_n}": isotropic_hw_energy_spectrum(
+            filtered_coarse, lx, ly
+        ),
+        inverse_input_label: isotropic_hw_energy_spectrum(
+            predicted_filtered, lx, ly
+        ),
+        "Reconstructed DNS": isotropic_hw_energy_spectrum(
+            predicted_dns, lx, ly
+        ),
     }
     fig, ax = plt.subplots(figsize=(7.4, 5.6))
     for label, (k, p) in spectra.items():
@@ -609,10 +685,10 @@ def save_spectrum_plot(
         kn, linestyle=":", linewidth=1.4, label=f"{coarse_n}-grid Nyquist"
     )
     ax.set_title(
-        f"{HW_FIELD_LABELS[field_name]}: isotropic spectrum comparison"
+        r"HW energy spectrum: $E=\frac{1}{2}\int(n^2+|\nabla\phi|^2)$"
     )
     ax.set_xlabel(r"$k$")
-    ax.set_ylabel(r"Shell power $P(k)$")
+    ax.set_ylabel(r"Shell energy $E(k)$")
     ax.set_ylim(bottom=1e-10)
     ax.grid(True, which="both", alpha=0.3)
     ax.legend(numpoints=1)

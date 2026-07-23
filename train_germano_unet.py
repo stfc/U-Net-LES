@@ -205,6 +205,12 @@ def parse_args():
     p.add_argument("--learning-rate", type=float, default=2e-4)
     p.add_argument("--base-channels", type=int, default=24)
     p.add_argument(
+        "--precision",
+        choices=("float32", "float64"),
+        default="float32",
+        help="Floating-point precision for data, U-Net, losses, and physics",
+    )
+    p.add_argument(
         "--learn-vorticity",
         action="store_true",
         help=(
@@ -240,6 +246,8 @@ def parse_args():
 
 def run_training(a):
     set_seed(a.seed)
+    torch_dtype = getattr(torch, a.precision)
+    numpy_dtype = getattr(np, a.precision)
     if tuple(a.fields) != HW_FIELD_NAMES:
         raise ValueError(f"Hasegawa-Wakatani fields must be {HW_FIELD_NAMES}.")
     if a.fine_n != 8 * a.coarse_n:
@@ -262,7 +270,14 @@ def run_training(a):
     delta = a.lx / a.fine_n
     alpha = a.alpha if a.alpha is not None else a.alpha_factor * delta
     mean_np, std_np, dns_std_np = calculate_training_statistics(
-        tr, a.fields, a.fine_n, a.coarse_n, alpha, a.lx, a.ly
+        tr,
+        a.fields,
+        a.fine_n,
+        a.coarse_n,
+        alpha,
+        a.lx,
+        a.ly,
+        dtype=numpy_dtype,
     )
 
     def ds(files):
@@ -290,6 +305,7 @@ def run_training(a):
     test_loader = DataLoader(test_ds, shuffle=False, **kw)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print("Device:", device)
+    print("Precision:", a.precision)
     if device.type == "cuda":
         print("GPU:", torch.cuda.get_device_name(0))
         torch.backends.cudnn.benchmark = True
@@ -299,7 +315,7 @@ def run_training(a):
         a.base_channels,
         a.fine_n // a.coarse_n,
         model_output_channels,
-    ).to(device)
+    ).to(device=device, dtype=torch_dtype)
     opt = torch.optim.AdamW(
         model.parameters(), lr=a.learning_rate, weight_decay=1e-6
     )
@@ -318,6 +334,12 @@ def run_training(a):
         if checkpoint_learns_vorticity != a.learn_vorticity:
             raise ValueError(
                 "--learn-vorticity must match the resumed checkpoint."
+            )
+        checkpoint_precision = c.get("precision", "float32")
+        if checkpoint_precision != a.precision:
+            raise ValueError(
+                f"--precision {a.precision} does not match resumed "
+                f"checkpoint precision {checkpoint_precision}."
             )
         model.load_state_dict(c["model"])
         opt.load_state_dict(c["optimizer"])
@@ -460,6 +482,7 @@ def run_training(a):
             "lambda_spectrum": a.lambda_spectrum,
             "inverse_cutoff_fraction": inverse_cutoff_fraction,
             "inverse_cutoff_order": a.inverse_cutoff_order,
+            "precision": a.precision,
         }
         torch.save(c, ckdir / "latest.pt")
         if vm["total"] < best:

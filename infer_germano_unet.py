@@ -82,6 +82,12 @@ def parse_args():
         action="store_true",
         help="Use the exact inverse Germano operator",
     )
+    p.add_argument(
+        "--precision",
+        choices=("checkpoint", "float32", "float64"),
+        default="checkpoint",
+        help="U-Net and physics precision (default: use checkpoint precision)",
+    )
     return p.parse_args()
 
 
@@ -91,6 +97,14 @@ def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     c = load_checkpoint(a.checkpoint, device)
     validate_hw_checkpoint(c)
+    precision = (
+        c.get("precision", "float32")
+        if a.precision == "checkpoint"
+        else a.precision
+    )
+    torch_dtype = getattr(torch, precision)
+    numpy_dtype = getattr(np, precision)
+    print(f"Device: {device}; precision: {precision}")
     fields = c["field_names"]
     fine_n = int(c["fine_n"])
     coarse_n = int(c["coarse_n"])
@@ -127,11 +141,11 @@ def main():
         base_channels,
         fine_n // coarse_n,
         model_output_channels,
-    ).to(device)
+    ).to(device=device, dtype=torch_dtype)
     model.load_state_dict(c["model"])
     model.eval()
-    mean_np = np.asarray(c["mean"], np.float32)
-    std_np = np.asarray(c["std"], np.float32)
+    mean_np = np.asarray(c["mean"], dtype=numpy_dtype)
+    std_np = np.asarray(c["std"], dtype=numpy_dtype)
     mean = torch.from_numpy(mean_np).to(device)
     std = torch.from_numpy(std_np).to(device)
     files = [a.input] if a.input.is_file() else recursive_npz_files(a.input)
@@ -140,25 +154,23 @@ def main():
     rows = []
     for i, p in enumerate(files, 1):
         dns = load_dns_snapshot(
-            p, fields, fine_n, lx, ly, dtype=np.float64
+            p, fields, fine_n, lx, ly, dtype=numpy_dtype
         )
         coarse, fine = filter_snapshot(
-            dns, alpha, lx, ly, coarse_n, dtype=np.float64
+            dns, alpha, lx, ly, coarse_n, dtype=numpy_dtype
         )
         x = (
             torch.from_numpy(((coarse - mean_np[0]) / std_np[0])[None])
-            .float()
-            .to(device)
+            .to(device=device, dtype=torch_dtype)
         )
         with torch.no_grad():
             if a.inverse_input == "unet":
-                predicted = model(x).double()
+                predicted = model(x)
                 if learn_vorticity:
-                    pf = predicted * std.double() + mean.double()
+                    pf = predicted * std + mean
                 else:
                     predicted_uv = (
-                        predicted * std[:, :2].double()
-                        + mean[:, :2].double()
+                        predicted * std[:, :2] + mean[:, :2]
                     )
                     pf = hw_fields_torch(
                         predicted_uv[:, :1], predicted_uv[:, 1:2], lx, ly
@@ -267,19 +279,18 @@ def main():
                 out / f"{name}_DNS_reconstruction_error.png",
                 cmap,
             )
-            save_spectrum_plot(
-                name,
-                dns[ch],
-                fine[ch],
-                coarse[ch],
-                pf_np[ch],
-                pd_np[ch],
-                coarse_n,
-                lx,
-                ly,
-                out / f"{name}_spectrum_comparison.png",
-                inverse_input_label(a.inverse_input, cutoff_fraction),
-            )
+        save_spectrum_plot(
+            dns,
+            fine,
+            coarse,
+            pf_np,
+            pd_np,
+            coarse_n,
+            lx,
+            ly,
+            out / "HW_energy_spectrum_comparison.png",
+            inverse_input_label(a.inverse_input, cutoff_fraction),
+        )
         print(f"Processed {i}/{len(files)}: {p.name}")
     with (a.output_dir / "inference_metrics.csv").open("w", newline="") as f:
         w = csv.DictWriter(f, fieldnames=list(rows[0]))
@@ -294,7 +305,8 @@ def main():
                 "snapshots_processed": len(files),
                 "device": str(device),
                 "inverse_input": a.inverse_input,
-                "physics_dtype": "float64",
+                "precision": precision,
+                "physics_dtype": precision,
                 "inverse_cutoff_fraction": cutoff_fraction,
                 "inverse_cutoff_order": cutoff_order,
                 "cutoff_application": "inverse_input_before_inverse_germano",
