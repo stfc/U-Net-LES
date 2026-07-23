@@ -207,6 +207,10 @@ def main():
         raise ValueError("PBOUT_UNET_INVERSE_CUTOFF_ORDER must be positive.")
     if post_cutoff_order <= 0:
         raise ValueError("PBOUT_UNET_POST_CUTOFF_ORDER must be positive.")
+    normalization_enabled = c.get(
+        "normalize",
+        c.get("training_parameters", {}).get("normalize", True),
+    )
     effective_inference = {
         "checkpoint": str(a.checkpoint),
         "checkpoint_epoch": c.get("epoch"),
@@ -214,6 +218,7 @@ def main():
         "device": str(device),
         "precision": precision,
         "physics_dtype": precision,
+        "normalization_enabled": normalization_enabled,
         "inverse_input": a.inverse_input,
         "inverse_cutoff_fraction": cutoff_fraction,
         "inverse_cutoff_order": cutoff_order,
