@@ -11,6 +11,7 @@ not need an argument parser::
 
   PBOUT_UNET_CHECKPOINT=/path/to/best.pt
   PBOUT_UNET_DNS_PATH=/path/to/dns_snapshot.npz
+  PBOUT_UNET_ALPHA=0                     # override checkpoint filter width
   PBOUT_UNET_DNS_INIT=1                  # full-resolution, inverse-only DNS mode
   PBOUT_UNET_DEVICE=cuda                 # or cpu; default is automatic
   PBOUT_UNET_IMPLICIT=1                  # return -(DNS-LES) brackets
@@ -27,6 +28,7 @@ to disable it.
 from __future__ import annotations
 
 import os
+import re
 import site
 import sys
 import shutil
@@ -105,12 +107,18 @@ DNS_PATH = Path(_dns_path).expanduser() if _dns_path else None
 DNS_INIT = os.environ.get("PBOUT_UNET_DNS_INIT", "0").lower() not in {
     "0", "false", "no", "off"
 }
+BOUT_INPUT = Path(
+    os.environ.get("PBOUT_UNET_BOUT_INP", "data/BOUT.inp")
+).expanduser()
 IMPLICIT = os.environ.get("PBOUT_UNET_IMPLICIT", "1").lower() not in {
     "0", "false", "no", "off"
 }
 VORTICITY_FROM_POTENTIAL = os.environ.get(
     "PBOUT_UNET_VORTICITY_FROM_POTENTIAL", "1"
 ).lower() not in {"0", "false", "no", "off"}
+
+_BOUT_OUTPUT_TIMESTEP = None
+_LAST_FIELD_OUTPUT_INDEX = -1
 
 
 def _optional_float(name: str, default):
@@ -120,6 +128,61 @@ def _optional_float(name: str, default):
     if value.lower() in {"none", "off", "disable", "disabled"}:
         return None
     return float(value)
+
+
+def _bout_output_timestep() -> float:
+    """Read the top-level BOUT++ physical-time output interval."""
+    global _BOUT_OUTPUT_TIMESTEP
+    if _BOUT_OUTPUT_TIMESTEP is not None:
+        return _BOUT_OUTPUT_TIMESTEP
+    if not BOUT_INPUT.is_file():
+        raise FileNotFoundError(
+            f"BOUT++ input file not found: {BOUT_INPUT}. Set "
+            "PBOUT_UNET_BOUT_INP to the data/BOUT.inp used by this run."
+        )
+
+    assignment = re.compile(
+        r"^\s*timestep\s*=\s*"
+        r"([-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?)"
+        r"\s*(?:#.*)?$",
+        re.IGNORECASE,
+    )
+    in_top_level = True
+    for line in BOUT_INPUT.read_text().splitlines():
+        stripped = line.strip()
+        if stripped.startswith("[") and stripped.endswith("]"):
+            in_top_level = False
+        if not in_top_level:
+            continue
+        match = assignment.match(line)
+        if match:
+            timestep = float(match.group(1))
+            if not np.isfinite(timestep) or timestep <= 0:
+                raise ValueError(
+                    f"{BOUT_INPUT}: timestep must be finite and positive"
+                )
+            _BOUT_OUTPUT_TIMESTEP = timestep
+            return timestep
+    raise ValueError(
+        f"{BOUT_INPUT}: no top-level 'timestep = ...' setting was found"
+    )
+
+
+def _field_output_due(simtime: float) -> bool:
+    """Return true once at each BOUT++ physical-time output point."""
+    global _LAST_FIELD_OUTPUT_INDEX
+    timestep = _bout_output_timestep()
+    output_index = int(round(simtime / timestep))
+    output_time = output_index * timestep
+    tolerance = 1e-8 * max(1.0, abs(simtime), abs(output_time))
+    if (
+        output_index < 0
+        or abs(simtime - output_time) > tolerance
+        or output_index <= _LAST_FIELD_OUTPUT_INDEX
+    ):
+        return False
+    _LAST_FIELD_OUTPUT_INDEX = output_index
+    return True
 
 
 def _print_init_metadata(initial_state: str) -> None:
@@ -214,7 +277,9 @@ FINE_N = int(_checkpoint["fine_n"])
 COARSE_N = int(_checkpoint["coarse_n"])
 LX = float(_checkpoint["lx"])
 LY = float(_checkpoint["ly"])
-ALPHA = float(_checkpoint["alpha"])
+ALPHA = float(os.environ.get("PBOUT_UNET_ALPHA", _checkpoint["alpha"]))
+if not np.isfinite(ALPHA) or ALPHA < 0:
+    raise ValueError("PBOUT_UNET_ALPHA must be finite and non-negative")
 BASE_CHANNELS = int(_checkpoint["base_channels"])
 PRECISION = _checkpoint.get("precision", "float32")
 if PRECISION not in ("float32", "float64"):
@@ -406,7 +471,7 @@ def _save_arakawa_images(
     filtered_density: torch.Tensor,
 ) -> None:
     """Save LES, DNS, and filtered-DNS terms in diagnostic layouts."""
-    output_dir = Path(f"results_Unet_{COARSE_N}x{COARSE_N}") / "arakawa"
+    output_dir = Path(f"results_U-Net") / "arakawa"
     diagnostic_sets = (
         (
             "LES",
@@ -450,7 +515,7 @@ def _save_les_bout_arakawa_comparison(
         time_step,
         calculated_terms,
         bout_terms,
-        Path(f"results_Unet_{COARSE_N}x{COARSE_N}") / "arakawa",
+        Path(f"results_U-Net") / "arakawa",
     )
 
 
@@ -479,7 +544,7 @@ def saveArakawaTerms(pArakawa):
         )
 
     terms = values[4:].reshape(2, nx, nz)
-    output_dir = Path("results_unet_DNS")
+    output_dir = Path("results_U-Net_DNS")
     output_dir.mkdir(parents=True, exist_ok=True)
     stem = f"arakawa_terms_time{time_step:07d}"
     np.savez_compressed(
@@ -507,7 +572,7 @@ def _save_initial_dns_arakawa(
         reference_fields,
         LX,
         LY,
-        Path(f"results_Unet_{COARSE_N}x{COARSE_N}") / "arakawa",
+        Path(f"results_U-Net") / "arakawa",
         stem="arakawa_DNS_initial",
         cutoff_fraction=POST_CUTOFF_FRACTION,
         spectrum_stem="arakawa_DNS_spectrum_initial.png",
@@ -519,7 +584,7 @@ def _save_initial_dns_fields(
     reference_fields: np.ndarray | None = None,
 ) -> tuple[Path, Path]:
     """Save DNS fields and their original/reconstructed spectra."""
-    output_dir = Path(f"results_Unet_{COARSE_N}x{COARSE_N}") / "images"
+    output_dir = Path(f"results_U-Net") / "images"
     output_dir.mkdir(parents=True, exist_ok=True)
     output_path = output_dir / "fields_DNS_initial.png"
     save_field_images(
@@ -698,12 +763,12 @@ def initFlow(npv):
     initial_dns, initial_fdns = _reconstruct_dns(coarse)
     initial_dns = initial_dns[0].detach().cpu().double().numpy()
     initial_fdns = initial_fdns[0].detach().cpu().double().numpy()
-    results_dir = Path(f"results_Unet_{COARSE_N}x{COARSE_N}") / "fields"
+    results_dir = Path(f"results_U-Net") / "fields"
     if results_dir.exists():
         shutil.rmtree(results_dir)
     results_dir.mkdir(parents=True)
 
-    images_dir = Path(f"results_Unet_{COARSE_N}x{COARSE_N}") / "images"
+    images_dir = Path(f"results_U-Net") / "images"
     if images_dir.exists():
         shutil.rmtree(images_dir)
     images_dir.mkdir(parents=True)
@@ -737,7 +802,7 @@ def initFlow(npv):
     )
 
     print("\n\n", flush=True)
-    print("------------------ U-net parameters---------------", flush=True)
+    print("------------------ U-Net parameters---------------", flush=True)
     _print_init_metadata(initial_state)
     print("\n\n", flush=True)
 
@@ -767,13 +832,13 @@ def findLESTerms(pLES):
         dns = _inverse_germano_only(filtered_fine)
     else:
         dns, filtered_fine = _reconstruct_dns(simulation_fields)
-    if time_step % 100 == 0:
+    if _field_output_due(simtime):
         results_dir = Path(
-            f"results_Unet_{COARSE_N}x{COARSE_N}"
+            f"results_U-Net"
         ) / "fields"
         results_dir.mkdir(parents=True, exist_ok=True)
         images_dir = Path(
-            f"results_Unet_{COARSE_N}x{COARSE_N}"
+            f"results_U-Net"
         ) / "images"
         images_dir.mkdir(parents=True, exist_ok=True)
         dns_np = dns.detach().cpu().double().numpy()
@@ -788,15 +853,15 @@ def findLESTerms(pLES):
             V=output_fields[1],
             P=output_fields[2],
         )
-        for batch_index, reconstructed_fields in enumerate(dns_np):
-            batch_suffix = "" if batch == 1 else f"_batch{batch_index:03d}"
-            save_field_images(
-                reconstructed_fields,
-                FIELD_NAMES,
-                images_dir
-                / f"fields_DNS_{time_step:07d}{batch_suffix}.png",
-                f"Reconstructed DNS, step {time_step}, t={simtime:g}",
-            )
+        # for batch_index, reconstructed_fields in enumerate(dns_np):
+        #     batch_suffix = "" if batch == 1 else f"_batch{batch_index:03d}"
+        #     save_field_images(
+        #         reconstructed_fields,
+        #         FIELD_NAMES,
+        #         images_dir
+        #         / f"fields_DNS_{time_step:07d}{batch_suffix}.png",
+        #         f"Reconstructed DNS, step {time_step}, t={simtime:g}",
+        #     )
         filtered_np = filtered_fine.detach().cpu().double().numpy()
         filtered_output_fields = (
             filtered_np[0]
@@ -882,7 +947,7 @@ def findLESTerms(pLES):
                     bracket_vort.detach().cpu().double().numpy(),
                     bracket_n.detach().cpu().double().numpy(),
                 ),
-                Path(f"results_Unet_{COARSE_N}x{COARSE_N}") / "arakawa",
+                Path(f"results_U-Net") / "arakawa",
             )
 
     # Back to (x, batch/y, z), then C-order flattening expected by hw.cxx.

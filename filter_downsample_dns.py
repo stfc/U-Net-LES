@@ -35,7 +35,10 @@ def parse_args():
         "--alpha",
         type=float,
         default=1.0,
-        help="Filter width in DNS grid spacings (default: 1.0)",
+        help=(
+            "Filter width in DNS grid spacings; use 0 to disable the "
+            "differential filter (default: 1.0)"
+        ),
     )
     parser.add_argument("--coarse-n", type=int, default=32)
     parser.add_argument("--lx", type=float, default=2 * np.pi)
@@ -147,8 +150,8 @@ def save_spectra(
 
 def main():
     args = parse_args()
-    if args.alpha <= 0:
-        raise ValueError("alpha must be positive.")
+    if args.alpha < 0:
+        raise ValueError("alpha must be non-negative.")
     if args.coarse_n < 5:
         raise ValueError("coarse-n must be at least 5 for the W stencil.")
     fine_n = infer_dns_resolution(args.input)
