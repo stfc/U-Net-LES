@@ -31,6 +31,7 @@ import site
 import sys
 import shutil
 import json
+import warnings
 
 from pathlib import Path
 
@@ -57,6 +58,12 @@ if _SITE_PACKAGES and sys.version_info[:2] != (3, 11):
 if _SITE_PACKAGES and _SITE_PACKAGES not in sys.path:
     site.addsitedir(_SITE_PACKAGES)
 
+warnings.filterwarnings(
+    "ignore",
+    message=r"The value of the smallest subnormal.*is zero",
+    category=UserWarning,
+)
+
 import numpy as np
 import torch
 import matplotlib.pyplot as plt
@@ -78,6 +85,9 @@ from germano_common import (
 from visualization_common import (
     arakawa_bracket as shared_arakawa_bracket,
     save_arakawa_comparison,
+    save_arakawa_diagnostics,
+    save_arakawa_implementation_comparison,
+    save_bout_arakawa_image,
     save_field_images,
 )
 
@@ -366,8 +376,7 @@ def _save_arakawa_images(
     filtered_density: torch.Tensor,
 ) -> None:
     """Save LES, DNS, and filtered-DNS terms in diagnostic layouts."""
-    output_dir = Path(f"results_StylES_{COARSE_N}x{COARSE_N}") / "arakawa"
-    output_dir.mkdir(parents=True, exist_ok=True)
+    output_dir = Path(f"results_Unet_{COARSE_N}x{COARSE_N}") / "arakawa"
     diagnostic_sets = (
         (
             "LES",
@@ -388,61 +397,7 @@ def _save_arakawa_images(
             filtered_density.detach().cpu().double().numpy(),
         ),
     )
-    term_titles = (r"$J(\phi,\omega)$", r"$J(\phi,n)$")
-
-    for name, figure_title, vorticity_arrays, density_arrays in diagnostic_sets:
-        batch_count = len(vorticity_arrays)
-        for batch_index, fields in enumerate(
-            zip(vorticity_arrays, density_arrays)
-        ):
-            nx, nz = fields[0].shape
-            center_index = nz // 2
-            x_pixels = np.arange(nx)
-            fig, axes = plt.subplots(2, 2, figsize=(12.2, 9.2))
-            for column, (field, title) in enumerate(zip(fields, term_titles)):
-                maximum = float(np.max(np.abs(field)))
-                limits = (
-                    {"vmin": -maximum, "vmax": maximum}
-                    if maximum > 0 else {}
-                )
-                image = axes[0, column].imshow(
-                    field.T,
-                    origin="lower",
-                    extent=(0, nx, 0, nz),
-                    aspect="equal",
-                    cmap="coolwarm",
-                    **limits,
-                )
-                axes[0, column].set_title(f"{figure_title} {title}")
-                axes[0, column].set_xlabel("x [pixels]")
-                axes[0, column].set_ylabel("z [pixels]")
-                fig.colorbar(image, ax=axes[0, column])
-
-                axes[1, column].plot(
-                    x_pixels, field[:, center_index], linewidth=1.2
-                )
-                axes[1, column].axhline(
-                    0.0, color="0.5", linewidth=0.7
-                )
-                axes[1, column].set_title(
-                    f"{title}: centerline z={center_index}"
-                )
-                axes[1, column].set_xlabel("x [pixels]")
-                axes[1, column].set_ylabel("Arakawa term")
-                axes[1, column].grid(True, alpha=0.25)
-
-            fig.suptitle(f"{figure_title}, step {time_step}")
-            fig.tight_layout()
-            batch_suffix = (
-                "" if batch_count == 1 else f"_batch{batch_index:03d}"
-            )
-            fig.savefig(
-                output_dir
-                / f"arakawa_{name}_terms_time{time_step:07d}"
-                  f"{batch_suffix}.png",
-                dpi=180,
-            )
-            plt.close(fig)
+    save_arakawa_diagnostics(time_step, diagnostic_sets, output_dir)
 
 
 def _save_les_bout_arakawa_comparison(
@@ -453,88 +408,20 @@ def _save_les_bout_arakawa_comparison(
     bout_density: torch.Tensor,
 ) -> None:
     """Compare Python and BOUT++ Arakawa terms, including centerlines."""
-    output_dir = (
-        Path(f"results_StylES_{COARSE_N}x{COARSE_N}") / "arakawa"
+    calculated_terms = (
+        calculated_vorticity.detach().cpu().double().numpy(),
+        calculated_density.detach().cpu().double().numpy(),
     )
-    output_dir.mkdir(parents=True, exist_ok=True)
-    diagnostics = (
-        (
-            "vorticity",
-            calculated_vorticity,
-            bout_vorticity,
-            r"$J(V,P)$",
-        ),
-        (
-            "density",
-            calculated_density,
-            bout_density,
-            r"$J(V,U)$",
-        ),
+    bout_terms = (
+        bout_vorticity.detach().cpu().double().numpy(),
+        bout_density.detach().cpu().double().numpy(),
     )
-    center_index = COARSE_N // 2
-    x_pixels = np.arange(COARSE_N)
-
-    for name, calculated, bout, term_label in diagnostics:
-        calculated_arrays = calculated.detach().cpu().double().numpy()
-        bout_arrays = bout.detach().cpu().double().numpy()
-        for batch_index, (calculated_field, bout_field) in enumerate(
-            zip(calculated_arrays, bout_arrays)
-        ):
-            difference = calculated_field - bout_field
-            fields_to_plot = (
-                (calculated_field, "Calculated in pBOUT-unet"),
-                (bout_field, "Provided by BOUT++"),
-                (difference, "Calculated - BOUT++"),
-            )
-            fig, axes = plt.subplots(2, 3, figsize=(17.5, 9.2))
-            for column, (values, label) in enumerate(fields_to_plot):
-                maximum = float(np.max(np.abs(values)))
-                limits = (
-                    {"vmin": -maximum, "vmax": maximum}
-                    if maximum > 0 else {}
-                )
-                image = axes[0, column].imshow(
-                    values.T,
-                    origin="lower",
-                    extent=(0, COARSE_N, 0, COARSE_N),
-                    aspect="equal",
-                    cmap="coolwarm",
-                    **limits,
-                )
-                axes[0, column].set_title(f"{term_label}: {label}")
-                axes[0, column].set_xlabel("x [pixels]")
-                axes[0, column].set_ylabel("y [pixels]")
-                fig.colorbar(image, ax=axes[0, column])
-
-                axes[1, column].plot(
-                    x_pixels, values[:, center_index], linewidth=1.2
-                )
-                axes[1, column].axhline(
-                    0.0, color="0.5", linewidth=0.7
-                )
-                axes[1, column].set_title(
-                    f"{label}: centerline y={center_index}"
-                )
-                axes[1, column].set_xlabel("x [pixels]")
-                axes[1, column].set_ylabel("Arakawa term")
-                axes[1, column].grid(True, alpha=0.25)
-
-            fig.suptitle(
-                f"LES Arakawa implementation comparison, step {time_step}",
-                fontsize=14,
-            )
-            fig.tight_layout()
-            batch_suffix = (
-                "" if len(calculated_arrays) == 1
-                else f"_batch{batch_index:03d}"
-            )
-            fig.savefig(
-                output_dir
-                / f"arakawa_LES_{name}_comparison_time{time_step:07d}"
-                  f"{batch_suffix}.png",
-                dpi=180,
-            )
-            plt.close(fig)
+    save_arakawa_implementation_comparison(
+        time_step,
+        calculated_terms,
+        bout_terms,
+        Path(f"results_Unet_{COARSE_N}x{COARSE_N}") / "arakawa",
+    )
 
 
 def saveArakawaTerms(pArakawa):
@@ -573,40 +460,9 @@ def saveArakawaTerms(pArakawa):
         phi_density=terms[1],
     )
 
-    center_index = nz // 2
-    x_pixels = np.arange(nx)
-    diagnostics = (
-        (terms[0], r"$J(\phi,\omega)$"),
-        (terms[1], r"$J(\phi,n)$"),
+    save_bout_arakawa_image(
+        terms, time_step, simtime, output_dir / f"{stem}.png"
     )
-    fig, axes = plt.subplots(2, 2, figsize=(12.2, 9.2))
-    for column, (field, title) in enumerate(diagnostics):
-        maximum = float(np.max(np.abs(field)))
-        limits = {"vmin": -maximum, "vmax": maximum} if maximum > 0 else {}
-        image = axes[0, column].imshow(
-            field.T,
-            origin="lower",
-            extent=(0, nx, 0, nz),
-            aspect="equal",
-            cmap="coolwarm",
-            **limits,
-        )
-        axes[0, column].set_title(f"BOUT++ Arakawa term {title}")
-        axes[0, column].set_xlabel("x [pixels]")
-        axes[0, column].set_ylabel("z [pixels]")
-        fig.colorbar(image, ax=axes[0, column])
-
-        axes[1, column].plot(x_pixels, field[:, center_index], linewidth=1.2)
-        axes[1, column].axhline(0.0, color="0.5", linewidth=0.7)
-        axes[1, column].set_title(f"{title}: centerline z={center_index}")
-        axes[1, column].set_xlabel("x [pixels]")
-        axes[1, column].set_ylabel("Arakawa term")
-        axes[1, column].grid(True, alpha=0.25)
-
-    fig.suptitle(f"DNS Arakawa terms, step {time_step}, t={simtime:g}")
-    fig.tight_layout()
-    fig.savefig(output_dir / f"{stem}.png", dpi=180)
-    plt.close(fig)
     return None
 
 
@@ -616,138 +472,16 @@ def _save_initial_dns_arakawa(
     reference_fields: np.ndarray | None = None,
 ) -> tuple[Path, Path]:
     """Calculate and save HW Arakawa fields and spectra on the DNS grid."""
-    if reference_fields is not None:
-        return save_arakawa_comparison(
-            fields,
-            reference_fields,
-            LX,
-            LY,
-            Path(f"results_StylES_{COARSE_N}x{COARSE_N}") / "arakawa",
-            stem="arakawa_DNS_time0000",
-            cutoff_fraction=POST_CUTOFF_FRACTION,
-        )
-    dx_dns = LX / FINE_N
-    dy_dns = LY / FINE_N
-
-    def calculate_terms(source: np.ndarray):
-        dns = torch.from_numpy(source[None]).to(
-            device=DEVICE, dtype=TORCH_DTYPE
-        )
-        potential = dns[:, 1:2]
-        return (
-            _arakawa_bracket(potential, dns[:, 2:3], dx_dns, dy_dns)[0, 0],
-            _arakawa_bracket(potential, dns[:, 0:1], dx_dns, dy_dns)[0, 0],
-        )
-
-    current_terms = calculate_terms(fields)
-    reference_terms = (
-        calculate_terms(reference_fields) if reference_fields is not None else None
+    return save_arakawa_comparison(
+        fields,
+        reference_fields,
+        LX,
+        LY,
+        Path(f"results_Unet_{COARSE_N}x{COARSE_N}") / "arakawa",
+        stem="arakawa_DNS_initial",
+        cutoff_fraction=POST_CUTOFF_FRACTION,
+        spectrum_stem="arakawa_DNS_spectrum_initial.png",
     )
-    titles = (r"DNS $J(V,P)$", r"DNS $J(V,U)$")
-
-    output_dir = (
-        Path(f"results_StylES_{COARSE_N}x{COARSE_N}") / "arakawa"
-    )
-    output_dir.mkdir(parents=True, exist_ok=True)
-    output_path = output_dir / "arakawa_DNS_time0000.png"
-
-    fig, axes = plt.subplots(2, 2, figsize=(12.2, 9.2))
-    center_index = FINE_N // 2
-    x_pixels = np.arange(FINE_N)
-    for term_index, (ax, term, title) in enumerate(
-        zip(axes[0], current_terms, titles)
-    ):
-        values = term.detach().cpu().double().numpy()
-        maximum = float(np.max(np.abs(values)))
-        limits = {"vmin": -maximum, "vmax": maximum} if maximum > 0 else {}
-        image = ax.imshow(
-            values.T,
-            origin="lower",
-            extent=(0, FINE_N, 0, FINE_N),
-            aspect="equal",
-            cmap="coolwarm",
-            **limits,
-        )
-        ax.set_title(title)
-        ax.set_xlabel("x [pixels]")
-        ax.set_ylabel("y [pixels]")
-        fig.colorbar(image, ax=ax)
-        center_ax = axes[1, term_index]
-        current_label = "Reconstructed DNS" if reference_terms else "DNS"
-        center_ax.plot(
-            x_pixels,
-            values[:, center_index],
-            color="tab:blue",
-            linewidth=1.2,
-            label=current_label,
-        )
-        if reference_terms is not None:
-            reference_values = (
-                reference_terms[term_index].detach().cpu().double().numpy()
-            )
-            center_ax.plot(
-                x_pixels,
-                reference_values[:, center_index],
-                color="black",
-                linewidth=1.0,
-                label="Original DNS",
-            )
-        center_ax.axhline(0.0, color="0.5", linewidth=0.7)
-        center_ax.set_title(f"{title}: centerline y={center_index}")
-        center_ax.set_xlabel("x [pixels]")
-        center_ax.set_ylabel("Arakawa term")
-        center_ax.grid(True, alpha=0.25)
-        center_ax.legend()
-    fig.tight_layout()
-    fig.savefig(output_path, dpi=180)
-    plt.close(fig)
-
-    spectrum_path = output_dir / "arakawa_DNS_spectrum_time0000.png"
-    fig, axes = plt.subplots(1, 2, figsize=(12.2, 5.2))
-    for term_index, (ax, term, title) in enumerate(
-        zip(axes, current_terms, titles)
-    ):
-        values = term.detach().cpu().double().numpy()
-        wavenumber, power = isotropic_spectrum(values, LX, LY)
-        positive = (wavenumber > 0) & (power > 0)
-        current_label = "Reconstructed DNS" if reference_terms else "DNS"
-        ax.loglog(
-            wavenumber[positive], power[positive],
-            color="tab:blue", label=current_label,
-        )
-        if reference_terms is not None:
-            reference_values = reference_terms[term_index].detach().cpu().double().numpy()
-            reference_k, reference_power = isotropic_spectrum(
-                reference_values, LX, LY
-            )
-            reference_positive = (reference_k > 0) & (reference_power > 0)
-            ax.loglog(
-                reference_k[reference_positive],
-                reference_power[reference_positive],
-                color="black",
-                label="Original DNS",
-            )
-        if POST_CUTOFF_FRACTION is not None:
-            grid_nyquist = min(
-                np.pi / (LX / FINE_N), np.pi / (LY / FINE_N)
-            )
-            cutoff = POST_CUTOFF_FRACTION * grid_nyquist
-            ax.axvline(
-                cutoff,
-                color="tab:red",
-                linestyle="--",
-                label=f"post cutoff ({POST_CUTOFF_FRACTION:g} Nyquist)",
-            )
-        ax.legend()
-        ax.set_title(f"{title} spectrum")
-        ax.set_xlabel(r"wavenumber $k$")
-        ax.set_ylabel("shell-summed power")
-        ax.set_ylim(bottom=10e-10)
-        ax.grid(True, which="both", alpha=0.25)
-    fig.tight_layout()
-    fig.savefig(spectrum_path, dpi=180)
-    plt.close(fig)
-    return output_path, spectrum_path
 
 
 def _save_initial_dns_fields(
@@ -755,9 +489,9 @@ def _save_initial_dns_fields(
     reference_fields: np.ndarray | None = None,
 ) -> tuple[Path, Path]:
     """Save DNS fields and their original/reconstructed spectra."""
-    output_dir = Path(f"results_StylES_{COARSE_N}x{COARSE_N}") / "images"
+    output_dir = Path(f"results_Unet_{COARSE_N}x{COARSE_N}") / "images"
     output_dir.mkdir(parents=True, exist_ok=True)
-    output_path = output_dir / "fields_DNS_time0000.png"
+    output_path = output_dir / "field_DNS_initial.png"
     save_field_images(
         fields,
         FIELD_NAMES,
@@ -765,7 +499,7 @@ def _save_initial_dns_fields(
         "Reconstructed DNS" if reference_fields is not None else "DNS",
     )
 
-    spectrum_path = output_dir / "fields_DNS_spectrum_time0000.png"
+    spectrum_path = output_dir / "fields_DNS_spectrum_initial.png"
     spectrum_titles = (
         r"Density $U$ spectrum",
         r"Electrostatic potential $V$ spectrum",
@@ -934,17 +668,17 @@ def initFlow(npv):
         )
     initial_dns = initial_dns[0].detach().cpu().double().numpy()
     initial_fdns = initial_fdns[0].detach().cpu().double().numpy()
-    results_dir = Path(f"results_StylES_{COARSE_N}x{COARSE_N}") / "fields"
+    results_dir = Path(f"results_Unet_{COARSE_N}x{COARSE_N}") / "fields"
     if results_dir.exists():
         shutil.rmtree(results_dir)
     results_dir.mkdir(parents=True)
 
-    initial_dir = Path(f"results_StylES_{COARSE_N}x{COARSE_N}") / "initial"
+    initial_dir = Path(f"results_Unet_{COARSE_N}x{COARSE_N}") / "initial"
     if initial_dir.exists():
         shutil.rmtree(initial_dir)
     initial_dir.mkdir(parents=True)
 
-    images_dir = Path(f"results_StylES_{COARSE_N}x{COARSE_N}") / "images"
+    images_dir = Path(f"results_Unet_{COARSE_N}x{COARSE_N}") / "images"
     if images_dir.exists():
         shutil.rmtree(images_dir)
     images_dir.mkdir(parents=True)
@@ -1026,11 +760,11 @@ def findLESTerms(pLES):
     _PREVIOUS_DNS_AMAX = target_dns_amax
     if time_step % 100 == 0:
         results_dir = Path(
-            f"results_StylES_{COARSE_N}x{COARSE_N}"
+            f"results_Unet_{COARSE_N}x{COARSE_N}"
         ) / "fields"
         results_dir.mkdir(parents=True, exist_ok=True)
         images_dir = Path(
-            f"results_StylES_{COARSE_N}x{COARSE_N}"
+            f"results_Unet_{COARSE_N}x{COARSE_N}"
         ) / "images"
         images_dir.mkdir(parents=True, exist_ok=True)
         dns_np = dns.detach().cpu().double().numpy()

@@ -16,7 +16,7 @@ def parse_args():
     parser.add_argument(
         "--input-dir",
         type=Path,
-        default=Path("results_StylES_32x32/fields"),
+        default=Path("results_Unet_32x32/fields"),
         help="Directory containing fields_DNS_*.npz files",
     )
     parser.add_argument(
