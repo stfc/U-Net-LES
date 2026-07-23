@@ -163,6 +163,7 @@ def _print_init_metadata(initial_state: str) -> None:
         ),
         "device": str(DEVICE),
         "precision": PRECISION,
+        "no_normalize": NO_NORMALIZE,
         "site_packages": _SITE_PACKAGES,
         "dns_path": str(DNS_PATH) if DNS_PATH is not None else None,
         "dns_init": DNS_INIT,
@@ -200,6 +201,11 @@ if not CHECKPOINT.is_file():
 
 _checkpoint = load_checkpoint(CHECKPOINT, DEVICE)
 validate_hw_checkpoint(_checkpoint)
+NORMALIZATION_ENABLED = _checkpoint.get(
+    "normalize",
+    _checkpoint.get("training_parameters", {}).get("normalize", True),
+)
+NO_NORMALIZE = not NORMALIZATION_ENABLED
 FIELD_NAMES = tuple(_checkpoint["field_names"])
 FINE_N = int(_checkpoint["fine_n"])
 COARSE_N = int(_checkpoint["coarse_n"])
@@ -245,12 +251,6 @@ POST_CUTOFF_FRACTION = _optional_float(
 POST_CUTOFF_ORDER = float(
     os.environ.get("PBOUT_UNET_POST_CUTOFF_ORDER", 8.0)
 )
-
-# Previous-step amplitudes used to keep reconstructed DNS fields on the
-# evolving LES amplitude scale.  initFlow supplies the first pair.
-_PREVIOUS_LES_AMAX = None
-_PREVIOUS_DNS_AMAX = None
-
 
 def _arakawa_bracket(f: torch.Tensor, g: torch.Tensor, dx: float, dy: float):
     """Compatibility wrapper for the shared Arakawa implementation."""
@@ -586,8 +586,6 @@ def initFlow(npv):
     preserve the initial fields supplied by BOUT++.
     """
 
-    global _PREVIOUS_LES_AMAX, _PREVIOUS_DNS_AMAX
-
     if DNS_INIT:
         if DNS_PATH is None:
             raise ValueError(
@@ -652,20 +650,6 @@ def initFlow(npv):
         device=DEVICE, dtype=TORCH_DTYPE
     )
     initial_dns, initial_fdns = _reconstruct_dns(coarse)
-    _PREVIOUS_LES_AMAX = torch.amax(
-        torch.abs(coarse), dim=(-2, -1), keepdim=True
-    )
-    _PREVIOUS_DNS_AMAX = torch.amax(
-        torch.abs(initial_dns), dim=(-2, -1), keepdim=True
-    )
-    if torch.any(_PREVIOUS_LES_AMAX == 0):
-        zero_channels = torch.nonzero(
-            _PREVIOUS_LES_AMAX[0, :, 0, 0] == 0, as_tuple=False
-        ).flatten().cpu().tolist()
-        raise ValueError(
-            "Cannot initialize DNS amplitude rescaling because the initial "
-            f"LES absolute maximum is zero for channel(s) {zero_channels}."
-        )
     initial_dns = initial_dns[0].detach().cpu().double().numpy()
     initial_fdns = initial_fdns[0].detach().cpu().double().numpy()
     results_dir = Path(f"results_Unet_{COARSE_N}x{COARSE_N}") / "fields"
@@ -678,15 +662,15 @@ def initFlow(npv):
         shutil.rmtree(images_dir)
     images_dir.mkdir(parents=True)
     time_step = 0
-    initial_output = results_dir / "fields_DNS_initial.npz"
-    np.savez_compressed(
-        initial_output,
-        pStep=np.asarray(0),
-        simtime=np.asarray(0.0),
-        U=initial_dns[0],
-        V=initial_dns[1],
-        P=initial_dns[2],
-    )
+    # initial_output = results_dir / "fields_DNS_initial.npz"
+    # np.savez_compressed(
+    #     initial_output,
+    #     pStep=np.asarray(0),
+    #     simtime=np.asarray(0.0),
+    #     U=initial_dns[0],
+    #     V=initial_dns[1],
+    #     P=initial_dns[2],
+    # )
 
     # initial_filtered_output = results_dir / "fields_fDNS_initial.npz"
     # np.savez_compressed(
@@ -716,8 +700,6 @@ def initFlow(npv):
 
 @torch.inference_mode()
 def findLESTerms(pLES):
-    global _PREVIOUS_LES_AMAX, _PREVIOUS_DNS_AMAX
-
     values = np.asarray(pLES, dtype=np.float64).reshape(-1)
     if values.size < 4:
         raise ValueError("findLESTerms requires the four-value BOUT header")
@@ -732,27 +714,6 @@ def findLESTerms(pLES):
         device=DEVICE, dtype=TORCH_DTYPE
     )
     dns, filtered_fine = _reconstruct_dns(coarse)
-    if _PREVIOUS_LES_AMAX is None or _PREVIOUS_DNS_AMAX is None:
-        raise RuntimeError(
-            "findLESTerms was called before initFlow initialized the LES/DNS "
-            "amplitude references"
-        )
-    les_amax = torch.amax(torch.abs(coarse), dim=(-2, -1), keepdim=True)
-    target_dns_amax = (
-        les_amax / _PREVIOUS_LES_AMAX * _PREVIOUS_DNS_AMAX
-    )
-    reconstructed_dns_amax = torch.amax(
-        torch.abs(dns), dim=(-2, -1), keepdim=True
-    )
-    dns = torch.where(
-        reconstructed_dns_amax > 0,
-        dns * target_dns_amax / reconstructed_dns_amax.clamp_min(
-            torch.finfo(dns.dtype).tiny
-        ),
-        dns,
-    )
-    _PREVIOUS_LES_AMAX = les_amax
-    _PREVIOUS_DNS_AMAX = target_dns_amax
     if time_step % 100 == 0:
         results_dir = Path(
             f"results_Unet_{COARSE_N}x{COARSE_N}"
