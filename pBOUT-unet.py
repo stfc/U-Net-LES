@@ -11,7 +11,7 @@ not need an argument parser::
 
   PBOUT_UNET_CHECKPOINT=/path/to/best.pt
   PBOUT_UNET_DNS_PATH=/path/to/dns_snapshot.npz
-  PBOUT_UNET_ALPHA=0                     # override checkpoint filter width
+  PBOUT_UNET_ALPHA=10                    # same units as --alpha-factor
   PBOUT_UNET_DNS_INIT=1                  # full-resolution, inverse-only DNS mode
   PBOUT_UNET_DEVICE=cuda                 # or cpu; default is automatic
   PBOUT_UNET_IMPLICIT=1                  # return -(DNS-LES) brackets
@@ -31,7 +31,6 @@ import os
 import re
 import site
 import sys
-import shutil
 import json
 import warnings
 
@@ -68,7 +67,6 @@ warnings.filterwarnings(
 
 import numpy as np
 import torch
-import matplotlib.pyplot as plt
 
 from germano_common import (
     ResidualUNetSR,
@@ -78,28 +76,26 @@ from germano_common import (
     hw_fields_numpy,
     hw_fields_torch,
     inverse_germano_torch,
-    isotropic_spectrum,
     load_dns_snapshot,
     load_checkpoint,
-    periodic_laplacian_4th_torch,
-    save_image,
     spectral_cutoff_torch,
     validate_hw_checkpoint,
 )
 from visualization_common import (
     arakawa_bracket as shared_arakawa_bracket,
+    prepare_run_output,
+    save_bout_arakawa_terms,
     save_arakawa_closure_comparison,
     save_arakawa_comparison,
-    save_arakawa_diagnostics,
-    save_arakawa_implementation_comparison,
-    save_bout_arakawa_image,
-    save_field_images,
+    save_dns_snapshot,
+    save_initial_dns_fields,
 )
 
 
 _HERE = Path(__file__).resolve().parent
 _DEFAULT_CHECKPOINT = (
-    _HERE / "germano_training_output_32_v4" / "checkpoints" / "best.pt"
+    _HERE
+    / "results/germano_training_output_32_v4/checkpoints/best.pt"
 )
 CHECKPOINT = Path(os.environ.get("PBOUT_UNET_CHECKPOINT", _DEFAULT_CHECKPOINT))
 _dns_path = os.environ.get("PBOUT_UNET_DNS_PATH")
@@ -244,7 +240,8 @@ def _print_init_metadata(initial_state: str) -> None:
         "coarse_n": COARSE_N,
         "lx": LX,
         "ly": LY,
-        "alpha": ALPHA,
+        "alpha_factor": ALPHA_FACTOR,
+        "alpha_physical": ALPHA,
         "base_channels": BASE_CHANNELS,
         "inverse_cutoff_fraction": CUTOFF_FRACTION,
         "inverse_cutoff_order": CUTOFF_ORDER,
@@ -277,8 +274,15 @@ FINE_N = int(_checkpoint["fine_n"])
 COARSE_N = int(_checkpoint["coarse_n"])
 LX = float(_checkpoint["lx"])
 LY = float(_checkpoint["ly"])
-ALPHA = float(os.environ.get("PBOUT_UNET_ALPHA", _checkpoint["alpha"]))
-if not np.isfinite(ALPHA) or ALPHA < 0:
+DNS_GRID_SPACING = LX / FINE_N
+_alpha_factor_override = os.environ.get("PBOUT_UNET_ALPHA")
+if _alpha_factor_override is None:
+    ALPHA = float(_checkpoint["alpha"])
+    ALPHA_FACTOR = ALPHA / DNS_GRID_SPACING
+else:
+    ALPHA_FACTOR = float(_alpha_factor_override)
+    ALPHA = ALPHA_FACTOR * DNS_GRID_SPACING
+if not np.isfinite(ALPHA_FACTOR) or ALPHA_FACTOR < 0:
     raise ValueError("PBOUT_UNET_ALPHA must be finite and non-negative")
 BASE_CHANNELS = int(_checkpoint["base_channels"])
 PRECISION = _checkpoint.get("precision", "float32")
@@ -461,187 +465,10 @@ def _validate_les_spacing(
         )
 
 
-def _save_arakawa_images(
-    time_step: int,
-    les_vorticity: torch.Tensor,
-    les_density: torch.Tensor,
-    dns_vorticity: torch.Tensor,
-    dns_density: torch.Tensor,
-    filtered_vorticity: torch.Tensor,
-    filtered_density: torch.Tensor,
-) -> None:
-    """Save LES, DNS, and filtered-DNS terms in diagnostic layouts."""
-    output_dir = Path(f"results_U-Net") / "arakawa"
-    diagnostic_sets = (
-        (
-            "LES",
-            "LES input Arakawa terms",
-            les_vorticity.detach().cpu().double().numpy(),
-            les_density.detach().cpu().double().numpy(),
-        ),
-        (
-            "DNS",
-            "DNS-resolution Arakawa terms before filtering",
-            dns_vorticity.detach().cpu().double().numpy(),
-            dns_density.detach().cpu().double().numpy(),
-        ),
-        (
-            "filtered_DNS",
-            "Filtered DNS Arakawa terms",
-            filtered_vorticity.detach().cpu().double().numpy(),
-            filtered_density.detach().cpu().double().numpy(),
-        ),
-    )
-    save_arakawa_diagnostics(time_step, diagnostic_sets, output_dir)
-
-
-def _save_les_bout_arakawa_comparison(
-    time_step: int,
-    calculated_vorticity: torch.Tensor,
-    calculated_density: torch.Tensor,
-    bout_vorticity: torch.Tensor,
-    bout_density: torch.Tensor,
-) -> None:
-    """Compare Python and BOUT++ Arakawa terms, including centerlines."""
-    calculated_terms = (
-        calculated_vorticity.detach().cpu().double().numpy(),
-        calculated_density.detach().cpu().double().numpy(),
-    )
-    bout_terms = (
-        bout_vorticity.detach().cpu().double().numpy(),
-        bout_density.detach().cpu().double().numpy(),
-    )
-    save_arakawa_implementation_comparison(
-        time_step,
-        calculated_terms,
-        bout_terms,
-        Path(f"results_U-Net") / "arakawa",
-    )
-
-
 def saveArakawaTerms(pArakawa):
-    """Write BOUT++ Arakawa terms and a centerline image for one time step.
-
-    The flat payload is ``step, time, nx, nz, J(phi,vort), J(phi,n)``.  The
-    two fields use the same ``(x, y/batch, z)`` ordering as the other BOUT++
-    callbacks; this diagnostic currently requires the HW model's single
-    y-plane layout.
-    """
-
-    values = np.asarray(pArakawa, dtype=np.float64).reshape(-1)
-    if values.size < 4:
-        raise ValueError("saveArakawaTerms requires a four-value header")
-
-    time_step = int(values[0])
-    simtime = float(values[1])
-    nx = int(values[2])
-    nz = int(values[3])
-    plane = nx * nz
-    if nx <= 0 or nz <= 0 or values.size != 4 + 2 * plane:
-        raise ValueError(
-            f"saveArakawaTerms received {values.size} values; expected "
-            f"{4 + 2 * plane} for a {nx}x{nz} grid"
-        )
-
-    terms = values[4:].reshape(2, nx, nz)
-    output_dir = Path("results_U-Net_DNS")
-    output_dir.mkdir(parents=True, exist_ok=True)
-    stem = f"arakawa_terms_time{time_step:07d}"
-    np.savez_compressed(
-        output_dir / f"{stem}.npz",
-        pStep=np.asarray(time_step),
-        simtime=np.asarray(simtime),
-        phi_vorticity=terms[0],
-        phi_density=terms[1],
-    )
-
-    save_bout_arakawa_image(
-        terms, time_step, simtime, output_dir / f"{stem}.png"
-    )
+    """BOUT++ callback delegating Arakawa output to visualization helpers."""
+    save_bout_arakawa_terms(pArakawa, Path("results_U-Net_DNS"))
     return None
-
-
-@torch.inference_mode()
-def _save_initial_dns_arakawa(
-    fields: np.ndarray,
-    reference_fields: np.ndarray | None = None,
-) -> tuple[Path, Path]:
-    """Calculate and save HW Arakawa fields and spectra on the DNS grid."""
-    return save_arakawa_comparison(
-        fields,
-        reference_fields,
-        LX,
-        LY,
-        Path(f"results_U-Net") / "arakawa",
-        stem="arakawa_DNS_initial",
-        cutoff_fraction=POST_CUTOFF_FRACTION,
-        spectrum_stem="arakawa_DNS_spectrum_initial.png",
-    )
-
-
-def _save_initial_dns_fields(
-    fields: np.ndarray,
-    reference_fields: np.ndarray | None = None,
-) -> tuple[Path, Path]:
-    """Save DNS fields and their original/reconstructed spectra."""
-    output_dir = Path(f"results_U-Net") / "images"
-    output_dir.mkdir(parents=True, exist_ok=True)
-    output_path = output_dir / "fields_DNS_initial.png"
-    save_field_images(
-        fields,
-        FIELD_NAMES,
-        output_path,
-        "Reconstructed DNS" if reference_fields is not None else "DNS",
-    )
-
-    spectrum_path = output_dir / "fields_DNS_spectrum_initial.png"
-    spectrum_titles = (
-        r"Density $U$ spectrum",
-        r"Electrostatic potential $V$ spectrum",
-        r"Vorticity $P$ spectrum",
-    )
-    fig, axes = plt.subplots(1, 3, figsize=(17.5, 5.2))
-    for channel, (ax, title) in enumerate(zip(axes, spectrum_titles)):
-        wavenumber, power = isotropic_spectrum(fields[channel], LX, LY)
-        positive = (wavenumber > 0) & (power > 0)
-        current_label = "Reconstructed DNS" if reference_fields is not None else "DNS"
-        ax.loglog(
-            wavenumber[positive],
-            power[positive],
-            color="tab:blue",
-            label=current_label,
-        )
-        if reference_fields is not None:
-            reference_k, reference_power = isotropic_spectrum(
-                reference_fields[channel], LX, LY
-            )
-            reference_positive = (reference_k > 0) & (reference_power > 0)
-            ax.loglog(
-                reference_k[reference_positive],
-                reference_power[reference_positive],
-                color="black",
-                label="Original DNS",
-            )
-        if POST_CUTOFF_FRACTION is not None:
-            grid_nyquist = min(
-                np.pi / (LX / FINE_N), np.pi / (LY / FINE_N)
-            )
-            ax.axvline(
-                POST_CUTOFF_FRACTION * grid_nyquist,
-                color="tab:red",
-                linestyle="--",
-                label=f"post cutoff ({POST_CUTOFF_FRACTION:g} Nyquist)",
-            )
-        ax.set_title(title)
-        ax.set_xlabel(r"wavenumber $k$")
-        ax.set_ylabel("shell-summed power")
-        ax.set_ylim(bottom=10e-10)
-        ax.grid(True, which="both", alpha=0.25)
-        ax.legend()
-    fig.tight_layout()
-    fig.savefig(spectrum_path, dpi=180)
-    plt.close(fig)
-    return output_path, spectrum_path
 
 
 def _load_dns_uvp(path: Path) -> np.ndarray:
@@ -707,17 +534,31 @@ def initFlow(npv):
             dtype=NUMPY_DTYPE,
         )
 
-        fields_output, fields_spectrum_output = _save_initial_dns_fields(
-            fields, reference_fields
+        fields_output, fields_spectrum_output = save_initial_dns_fields(
+            fields,
+            reference_fields,
+            FIELD_NAMES,
+            LX,
+            LY,
+            Path("results_U-Net") / "images",
+            POST_CUTOFF_FRACTION,
         )
-        arakawa_output, arakawa_spectrum_output = (
-            _save_initial_dns_arakawa(fields, reference_fields)
+        arakawa_output, arakawa_spectrum_output = save_arakawa_comparison(
+            fields,
+            reference_fields,
+            LX,
+            LY,
+            Path("results_U-Net") / "arakawa",
+            stem="arakawa_DNS_initial",
+            cutoff_fraction=POST_CUTOFF_FRACTION,
+            spectrum_stem="arakawa_DNS_spectrum_initial.png",
         )
 
         print(
             f"Initialized BOUT++ from filtered DNS snapshot {DNS_PATH};\n"
             f"resolution={FINE_N}, Lx={LX}, Ly={LY};\n"
-            f"differential filter alpha={ALPHA:g}; fields were not resized "
+            f"differential filter alpha-factor={ALPHA_FACTOR:g} "
+            f"(physical alpha={ALPHA:g}); fields were not resized "
             "and U-Net was not called;\n"
             f"saved filtered and original DNS fields to {fields_output};\n"
             f"saved their spectra to {fields_spectrum_output};\n"
@@ -760,45 +601,29 @@ def initFlow(npv):
     coarse = torch.from_numpy(fields[None]).to(
         device=DEVICE, dtype=TORCH_DTYPE
     )
-    initial_dns, initial_fdns = _reconstruct_dns(coarse)
+    initial_dns, _ = _reconstruct_dns(coarse)
     initial_dns = initial_dns[0].detach().cpu().double().numpy()
-    initial_fdns = initial_fdns[0].detach().cpu().double().numpy()
-    results_dir = Path(f"results_U-Net") / "fields"
-    if results_dir.exists():
-        shutil.rmtree(results_dir)
-    results_dir.mkdir(parents=True)
+    prepare_run_output(Path("results_U-Net"))
 
-    images_dir = Path(f"results_U-Net") / "images"
-    if images_dir.exists():
-        shutil.rmtree(images_dir)
-    images_dir.mkdir(parents=True)
-    time_step = 0
-    # initial_output = results_dir / "fields_DNS_initial.npz"
-    # np.savez_compressed(
-    #     initial_output,
-    #     pStep=np.asarray(0),
-    #     simtime=np.asarray(0.0),
-    #     U=initial_dns[0],
-    #     V=initial_dns[1],
-    #     P=initial_dns[2],
-    # )
-
-    # initial_filtered_output = results_dir / "fields_fDNS_initial.npz"
-    # np.savez_compressed(
-    #     initial_filtered_output,
-    #     pStep=np.asarray(0),
-    #     simtime=np.asarray(0.0),
-    #     U=initial_fdns[0],
-    #     V=initial_fdns[1],
-    #     P=initial_fdns[2],
-    # )
-
-    fields_image_output, fields_spectrum_output = _save_initial_dns_fields(
-        initial_dns, reference_dns
+    fields_image_output, fields_spectrum_output = save_initial_dns_fields(
+        initial_dns,
+        reference_dns,
+        FIELD_NAMES,
+        LX,
+        LY,
+        Path("results_U-Net") / "images",
+        POST_CUTOFF_FRACTION,
     )
 
-    arakawa_image_output, arakawa_spectrum_output = (
-        _save_initial_dns_arakawa(initial_dns, reference_dns)
+    arakawa_image_output, arakawa_spectrum_output = save_arakawa_comparison(
+        initial_dns,
+        reference_dns,
+        LX,
+        LY,
+        Path("results_U-Net") / "arakawa",
+        stem="arakawa_DNS_initial",
+        cutoff_fraction=POST_CUTOFF_FRACTION,
+        spectrum_stem="arakawa_DNS_spectrum_initial.png",
     )
 
     print("\n\n", flush=True)
@@ -833,49 +658,14 @@ def findLESTerms(pLES):
     else:
         dns, filtered_fine = _reconstruct_dns(simulation_fields)
     if _field_output_due(simtime):
-        results_dir = Path(
-            f"results_U-Net"
-        ) / "fields"
-        results_dir.mkdir(parents=True, exist_ok=True)
-        images_dir = Path(
-            f"results_U-Net"
-        ) / "images"
-        images_dir.mkdir(parents=True, exist_ok=True)
         dns_np = dns.detach().cpu().double().numpy()
-        output_fields = (
-            dns_np[0] if batch == 1 else dns_np.transpose(1, 0, 2, 3)
+        save_dns_snapshot(
+            dns_np,
+            FIELD_NAMES,
+            time_step,
+            simtime,
+            Path("results_U-Net"),
         )
-        np.savez_compressed(
-            results_dir / f"fields_DNS_{time_step:07d}.npz",
-            pStep=np.asarray(time_step),
-            simtime=np.asarray(simtime),
-            U=output_fields[0],
-            V=output_fields[1],
-            P=output_fields[2],
-        )
-        # for batch_index, reconstructed_fields in enumerate(dns_np):
-        #     batch_suffix = "" if batch == 1 else f"_batch{batch_index:03d}"
-        #     save_field_images(
-        #         reconstructed_fields,
-        #         FIELD_NAMES,
-        #         images_dir
-        #         / f"fields_DNS_{time_step:07d}{batch_suffix}.png",
-        #         f"Reconstructed DNS, step {time_step}, t={simtime:g}",
-        #     )
-        filtered_np = filtered_fine.detach().cpu().double().numpy()
-        filtered_output_fields = (
-            filtered_np[0]
-            if batch == 1
-            else filtered_np.transpose(1, 0, 2, 3)
-        )
-        # np.savez_compressed(
-        #     results_dir / f"fields_fDNS_{time_step:07d}.npz",
-        #     pStep=np.asarray(time_step),
-        #     simtime=np.asarray(simtime),
-        #     U=filtered_output_fields[0],
-        #     V=filtered_output_fields[1],
-        #     P=filtered_output_fields[2],
-        # )
 
     dx_dns = LX / FINE_N
     dy_dns = LY / FINE_N
@@ -884,8 +674,6 @@ def findLESTerms(pLES):
         phi, dns[:, 2:3], dx_dns, dy_dns
     )
     bracket_n = _arakawa_bracket(phi, dns[:, 0:1], dx_dns, dy_dns)
-    dns_bracket_vort = bracket_vort[:, 0]
-    dns_bracket_n = bracket_n[:, 0]
 
     dx_les_checkpoint = LX / simulation_n
     dy_les_checkpoint = LY / simulation_n

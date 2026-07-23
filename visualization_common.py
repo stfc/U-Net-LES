@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import shutil
 from pathlib import Path
 
 import matplotlib.pyplot as plt
@@ -124,6 +125,103 @@ def save_field_spectrum_comparison(
     fig.savefig(output_path, dpi=180)
     plt.close(fig)
     return output_path
+
+
+def save_initial_dns_fields(
+    fields: np.ndarray,
+    reference_fields: np.ndarray | None,
+    field_names,
+    lx: float,
+    ly: float,
+    output_dir: Path,
+    cutoff_fraction: float | None = None,
+) -> tuple[Path, Path]:
+    """Save initial DNS fields and their original/reconstructed spectra."""
+    output_dir.mkdir(parents=True, exist_ok=True)
+    field_path = output_dir / "fields_DNS_initial.png"
+    current_label = (
+        "Reconstructed DNS" if reference_fields is not None else "DNS"
+    )
+    save_field_images(fields, field_names, field_path, current_label)
+
+    spectrum_path = output_dir / "fields_DNS_spectrum_initial.png"
+    count = len(field_names)
+    fig, axes = plt.subplots(
+        1, count, figsize=(5.8 * count, 5.2), squeeze=False
+    )
+    for channel, (ax, name) in enumerate(zip(axes[0], field_names)):
+        plotted_fields = [(fields[channel], current_label, "tab:blue")]
+        if reference_fields is not None:
+            plotted_fields.insert(
+                0, (reference_fields[channel], "Original DNS", "black")
+            )
+        for values, label, color in plotted_fields:
+            k, power = isotropic_spectrum(values, lx, ly)
+            positive = (k > 0) & (power > 0)
+            ax.loglog(k[positive], power[positive], color=color, label=label)
+        _add_cutoff(ax, fields.shape[-2:], lx, ly, cutoff_fraction)
+        ax.set_title(f"{HW_FIELD_LABELS.get(name, name)} spectrum")
+        ax.set_xlabel(r"wavenumber $k$")
+        ax.set_ylabel("shell-summed power")
+        ax.set_ylim(bottom=SPECTRUM_Y_MIN)
+        ax.grid(True, which="both", alpha=0.25)
+        ax.legend()
+    fig.tight_layout()
+    fig.savefig(spectrum_path, dpi=180)
+    plt.close(fig)
+    return field_path, spectrum_path
+
+
+def prepare_run_output(output_dir: Path) -> tuple[Path, Path]:
+    """Create empty field and image directories for a new inference run."""
+    fields_dir = output_dir / "fields"
+    images_dir = output_dir / "images"
+    for path in (fields_dir, images_dir):
+        if path.exists():
+            shutil.rmtree(path)
+        path.mkdir(parents=True)
+    return fields_dir, images_dir
+
+
+def save_dns_snapshot(
+    dns: np.ndarray,
+    field_names,
+    time_step: int,
+    simtime: float,
+    output_dir: Path,
+    save_images: bool = False,
+) -> Path:
+    """Save one reconstructed DNS batch as NPZ and optional field images."""
+    if dns.ndim != 4 or dns.shape[1] != len(field_names):
+        raise ValueError(
+            "dns must have shape (batch, len(field_names), nx, ny)"
+        )
+    fields_dir = output_dir / "fields"
+    fields_dir.mkdir(parents=True, exist_ok=True)
+    output_fields = dns[0] if len(dns) == 1 else dns.transpose(1, 0, 2, 3)
+    snapshot_path = fields_dir / f"fields_DNS_{time_step:07d}.npz"
+    archive_names = tuple("P" if name == "W" else name for name in field_names)
+    np.savez_compressed(
+        snapshot_path,
+        pStep=np.asarray(time_step),
+        simtime=np.asarray(simtime),
+        **{
+            name: output_fields[channel]
+            for channel, name in enumerate(archive_names)
+        },
+    )
+    if save_images:
+        images_dir = output_dir / "images"
+        images_dir.mkdir(parents=True, exist_ok=True)
+        for batch_index, fields in enumerate(dns):
+            suffix = "" if len(dns) == 1 else f"_batch{batch_index:03d}"
+            save_field_images(
+                fields,
+                field_names,
+                images_dir / f"fields_DNS_{time_step:07d}{suffix}.png",
+                f"Reconstructed DNS, step {time_step}, t={simtime:g}",
+            )
+    return snapshot_path
 
 
 def calculate_arakawa_terms(
@@ -375,6 +473,39 @@ def save_bout_arakawa_image(
         f"DNS Arakawa terms, step {time_step}, t={simtime:g}",
         output_path,
     )
+
+
+def save_bout_arakawa_terms(payload, output_dir: Path) -> tuple[Path, Path]:
+    """Validate and save a flat BOUT++ Arakawa diagnostic payload."""
+    values = np.asarray(payload, dtype=np.float64).reshape(-1)
+    if values.size < 4:
+        raise ValueError("saveArakawaTerms requires a four-value header")
+
+    time_step = int(values[0])
+    simtime = float(values[1])
+    nx = int(values[2])
+    nz = int(values[3])
+    plane = nx * nz
+    if nx <= 0 or nz <= 0 or values.size != 4 + 2 * plane:
+        raise ValueError(
+            f"saveArakawaTerms received {values.size} values; expected "
+            f"{4 + 2 * plane} for a {nx}x{nz} grid"
+        )
+
+    terms = values[4:].reshape(2, nx, nz)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    stem = f"arakawa_terms_time{time_step:07d}"
+    snapshot_path = output_dir / f"{stem}.npz"
+    np.savez_compressed(
+        snapshot_path,
+        pStep=np.asarray(time_step),
+        simtime=np.asarray(simtime),
+        phi_vorticity=terms[0],
+        phi_density=terms[1],
+    )
+    image_path = output_dir / f"{stem}.png"
+    save_bout_arakawa_image(terms, time_step, simtime, image_path)
+    return snapshot_path, image_path
 
 
 def save_arakawa_comparison(
