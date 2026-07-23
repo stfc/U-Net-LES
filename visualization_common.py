@@ -14,6 +14,47 @@ from germano_common import HW_FIELD_LABELS, isotropic_spectrum
 SPECTRUM_Y_MIN = 10e-10
 
 
+def save_field_images(
+    fields: np.ndarray,
+    field_names,
+    output_path: Path,
+    title_prefix: str = "Reconstructed DNS",
+) -> Path:
+    """Save channel-first physical fields in a single diagnostic image."""
+    if fields.ndim != 3 or fields.shape[0] != len(field_names):
+        raise ValueError(
+            "fields must have shape (len(field_names), nx, ny)"
+        )
+    nx, ny = fields.shape[-2:]
+    fig, axes = plt.subplots(
+        1, len(field_names),
+        figsize=(5.8 * len(field_names), 5.2),
+        squeeze=False,
+    )
+    for channel, (ax, name) in enumerate(zip(axes[0], field_names)):
+        cmap = {
+            "U": "Blues",
+            "V": "Reds_r",
+            "W": "hot",
+            "P": "hot",
+        }.get(name, "viridis")
+        image = ax.imshow(
+            fields[channel].T,
+            origin="lower",
+            extent=(0, nx, 0, ny),
+            aspect="equal",
+            cmap=cmap,
+        )
+        ax.set_title(f"{title_prefix}: {HW_FIELD_LABELS.get(name, name)}")
+        ax.set_xlabel("x [pixels]")
+        ax.set_ylabel("y [pixels]")
+        fig.colorbar(image, ax=ax)
+    fig.tight_layout()
+    fig.savefig(output_path, dpi=180)
+    plt.close(fig)
+    return output_path
+
+
 def arakawa_bracket(
     f: torch.Tensor, g: torch.Tensor, dx: float, dy: float
 ) -> torch.Tensor:

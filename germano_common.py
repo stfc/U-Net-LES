@@ -204,6 +204,16 @@ def periodic_laplacian_4th_torch(
     return dxx + dyy
 
 
+def enforce_vorticity_from_potential_torch(
+    fields: torch.Tensor, lx: float, ly: float
+) -> torch.Tensor:
+    """Replace W with the fourth-order periodic Laplacian of potential V."""
+    if fields.shape[-3] < 2:
+        raise ValueError("Vorticity enforcement requires U and V channels.")
+    vorticity = periodic_laplacian_4th_torch(fields[..., 1:2, :, :], lx, ly)
+    return torch.cat((fields[..., :2, :, :], vorticity), dim=-3)
+
+
 def hw_fields_numpy(
     density: np.ndarray,
     potential: np.ndarray,

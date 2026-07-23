@@ -30,6 +30,7 @@ import os
 import site
 import sys
 import shutil
+import json
 
 from pathlib import Path
 
@@ -63,6 +64,7 @@ import matplotlib.pyplot as plt
 from germano_common import (
     ResidualUNetSR,
     filter_snapshot,
+    enforce_vorticity_from_potential_torch,
     hw_fields_torch,
     inverse_germano_torch,
     isotropic_spectrum,
@@ -76,6 +78,7 @@ from germano_common import (
 from visualization_common import (
     arakawa_bracket as shared_arakawa_bracket,
     save_arakawa_comparison,
+    save_field_images,
 )
 
 
@@ -104,6 +107,74 @@ def _optional_float(name: str, default):
     if value.lower() in {"none", "off", "disable", "disabled"}:
         return None
     return float(value)
+
+
+def _print_init_metadata(initial_state: str) -> None:
+    """Print checkpoint metadata and the effective pBOUT configuration."""
+    candidates = (
+        CHECKPOINT.parent / "metadata.json",
+        CHECKPOINT.parent.parent / "metadata.json",
+    )
+    metadata_path = next((path for path in candidates if path.is_file()), None)
+    metadata = (
+        json.loads(metadata_path.read_text())
+        if metadata_path is not None
+        else {}
+    )
+    if metadata_path is None:
+        print(
+            "Checkpoint metadata: metadata.json was not found beside the "
+            "checkpoint directory."
+        )
+    else:
+        print(f"Checkpoint metadata ({metadata_path}):")
+
+    def print_values(value, prefix=""):
+        if isinstance(value, dict):
+            for name, nested_value in value.items():
+                if not prefix and name in {
+                    "tensorboard_dir",
+                    "test_metrics",
+                    "training_parameters",
+                    "training_parameters_file",
+                }:
+                    continue
+                nested_prefix = f"{prefix}.{name}" if prefix else name
+                print_values(nested_value, nested_prefix)
+        else:
+            print(f"{prefix}: {json.dumps(value, default=str)}")
+
+    print_values(metadata)
+    effective_inference = {
+        "checkpoint": str(CHECKPOINT),
+        "checkpoint_epoch": _checkpoint.get("epoch"),
+        "checkpoint_metadata_file": (
+            str(metadata_path) if metadata_path is not None else None
+        ),
+        "device": str(DEVICE),
+        "precision": PRECISION,
+        "site_packages": _SITE_PACKAGES,
+        "dns_path": str(DNS_PATH) if DNS_PATH is not None else None,
+        "dns_init": DNS_INIT,
+        "initial_state": initial_state,
+        "implicit": IMPLICIT,
+        "vorticity_mode": VORTICITY_MODE,
+        "learn_vorticity": LEARN_VORTICITY,
+        "vorticity_from_potential": VORTICITY_FROM_POTENTIAL,
+        "field_names": FIELD_NAMES,
+        "model_output_channels": OUTPUT_CHANNELS,
+        "fine_n": FINE_N,
+        "coarse_n": COARSE_N,
+        "lx": LX,
+        "ly": LY,
+        "alpha": ALPHA,
+        "base_channels": BASE_CHANNELS,
+        "inverse_cutoff_fraction": CUTOFF_FRACTION,
+        "inverse_cutoff_order": CUTOFF_ORDER,
+        "post_cutoff_fraction": POST_CUTOFF_FRACTION,
+        "post_cutoff_order": POST_CUTOFF_ORDER,
+    }
+    print_values(effective_inference, "effective_inference")
 
 
 _device_name = os.environ.get(
@@ -250,18 +321,25 @@ def _reconstruct_dns(coarse: torch.Tensor):
     else:
         uv = predicted * STD[:, :2] + MEAN[:, :2]
         filtered_fine = hw_fields_torch(uv[:, :1], uv[:, 1:2], LX, LY)
+    if VORTICITY_FROM_POTENTIAL:
+        filtered_fine = enforce_vorticity_from_potential_torch(
+            filtered_fine, LX, LY
+        )
     inverse_input = spectral_cutoff_torch(
         filtered_fine, LX, LY, CUTOFF_FRACTION, CUTOFF_ORDER
     )
+    if VORTICITY_FROM_POTENTIAL:
+        inverse_input = enforce_vorticity_from_potential_torch(
+            inverse_input, LX, LY
+        )
     dns = inverse_germano_torch(inverse_input, ALPHA, LX, LY)
+    if VORTICITY_FROM_POTENTIAL:
+        dns = enforce_vorticity_from_potential_torch(dns, LX, LY)
     dns = spectral_cutoff_torch(
         dns, LX, LY, POST_CUTOFF_FRACTION, POST_CUTOFF_ORDER
     )
     if VORTICITY_FROM_POTENTIAL:
-        vorticity = periodic_laplacian_4th_torch(
-            dns[:, 1:2], LX, LY
-        )
-        dns = torch.cat((dns[:, :2], vorticity), dim=1)
+        dns = enforce_vorticity_from_potential_torch(dns, LX, LY)
     return dns, inverse_input
 
 
@@ -677,31 +755,15 @@ def _save_initial_dns_fields(
     reference_fields: np.ndarray | None = None,
 ) -> tuple[Path, Path]:
     """Save DNS fields and their original/reconstructed spectra."""
-    output_dir = Path(f"results_StylES_{COARSE_N}x{COARSE_N}") / "fields"
+    output_dir = Path(f"results_StylES_{COARSE_N}x{COARSE_N}") / "images"
     output_dir.mkdir(parents=True, exist_ok=True)
     output_path = output_dir / "fields_DNS_time0000.png"
-    diagnostics = (
-        (fields[0], r"DNS density $U$"),
-        (fields[1], r"DNS electrostatic potential $V$"),
-        (fields[2], r"DNS vorticity $P$"),
+    save_field_images(
+        fields,
+        FIELD_NAMES,
+        output_path,
+        "Reconstructed DNS" if reference_fields is not None else "DNS",
     )
-
-    fig, axes = plt.subplots(1, 3, figsize=(17.5, 5.2))
-    for ax, (values, title) in zip(axes, diagnostics):
-        image = ax.imshow(
-            values.T,
-            origin="lower",
-            extent=(0, FINE_N, 0, FINE_N),
-            aspect="equal",
-            cmap="viridis",
-        )
-        ax.set_title(title)
-        ax.set_xlabel("x [pixels]")
-        ax.set_ylabel("y [pixels]")
-        fig.colorbar(image, ax=ax)
-    fig.tight_layout()
-    fig.savefig(output_path, dpi=180)
-    plt.close(fig)
 
     spectrum_path = output_dir / "fields_DNS_spectrum_time0000.png"
     spectrum_titles = (
@@ -876,8 +938,18 @@ def initFlow(npv):
     if results_dir.exists():
         shutil.rmtree(results_dir)
     results_dir.mkdir(parents=True)
+
+    initial_dir = Path(f"results_StylES_{COARSE_N}x{COARSE_N}") / "initial"
+    if initial_dir.exists():
+        shutil.rmtree(initial_dir)
+    initial_dir.mkdir(parents=True)
+
+    images_dir = Path(f"results_StylES_{COARSE_N}x{COARSE_N}") / "images"
+    if images_dir.exists():
+        shutil.rmtree(images_dir)
+    images_dir.mkdir(parents=True)
     time_step = 0
-    initial_output = results_dir / "fields_DNS_0000000.npz"
+    initial_output = initial_dir / "fields_DNS_initial.npz"
     np.savez_compressed(
         initial_output,
         pStep=np.asarray(0),
@@ -886,7 +958,8 @@ def initFlow(npv):
         V=initial_dns[1],
         P=initial_dns[2],
     )
-    initial_filtered_output = results_dir / "fields_fDNS_0000000.npz"
+
+    initial_filtered_output = initial_dir / "fields_fDNS_initial.npz"
     np.savez_compressed(
         initial_filtered_output,
         pStep=np.asarray(0),
@@ -895,26 +968,19 @@ def initFlow(npv):
         V=initial_fdns[1],
         P=initial_fdns[2],
     )
+
     fields_image_output, fields_spectrum_output = _save_initial_dns_fields(
         initial_dns, reference_dns
     )
+
     arakawa_image_output, arakawa_spectrum_output = (
         _save_initial_dns_arakawa(initial_dns, reference_dns)
     )
 
-    print(
-        f"Loaded BOUT++ U-Net checkpoint {CHECKPOINT} on {DEVICE};\n"
-        f"LES={COARSE_N}, DNS={FINE_N}, implicit={IMPLICIT};\n"
-        f"precision={PRECISION}, Lx={LX}, Ly={LY};\n"
-        f"vorticity_from_potential={VORTICITY_FROM_POTENTIAL};\n"
-        f"initial state={initial_state}; saved reconstruction={initial_output};\n"
-        f"saved U-Net output={initial_filtered_output};\n"
-        f"saved DNS fields image={fields_image_output};\n"
-        f"saved DNS fields spectrum={fields_spectrum_output};\n"
-        f"saved DNS Arakawa image={arakawa_image_output};\n"
-        f"saved DNS Arakawa spectrum={arakawa_spectrum_output}\n",
-        flush=True,
-    )
+    print("\n\n", flush=True)
+    print("------------------ U-net parameters---------------", flush=True)
+    _print_init_metadata(initial_state)
+    print("\n\n", flush=True)
 
     return fields.reshape(-1).astype(np.float64, copy=False)
 
@@ -963,18 +1029,31 @@ def findLESTerms(pLES):
             f"results_StylES_{COARSE_N}x{COARSE_N}"
         ) / "fields"
         results_dir.mkdir(parents=True, exist_ok=True)
+        images_dir = Path(
+            f"results_StylES_{COARSE_N}x{COARSE_N}"
+        ) / "images"
+        images_dir.mkdir(parents=True, exist_ok=True)
         dns_np = dns.detach().cpu().double().numpy()
         output_fields = (
             dns_np[0] if batch == 1 else dns_np.transpose(1, 0, 2, 3)
         )
         np.savez_compressed(
-            results_dir / f"fields_DNS_{(time_step+1):07d}.npz",
+            results_dir / f"fields_DNS_{time_step:07d}.npz",
             pStep=np.asarray(time_step),
             simtime=np.asarray(simtime),
             U=output_fields[0],
             V=output_fields[1],
             P=output_fields[2],
         )
+        for batch_index, reconstructed_fields in enumerate(dns_np):
+            batch_suffix = "" if batch == 1 else f"_batch{batch_index:03d}"
+            save_field_images(
+                reconstructed_fields,
+                FIELD_NAMES,
+                images_dir
+                / f"fields_DNS_{time_step:07d}{batch_suffix}.png",
+                f"Reconstructed DNS, step {time_step}, t={simtime:g}",
+            )
         filtered_np = filtered_fine.detach().cpu().double().numpy()
         filtered_output_fields = (
             filtered_np[0]
@@ -982,7 +1061,7 @@ def findLESTerms(pLES):
             else filtered_np.transpose(1, 0, 2, 3)
         )
         # np.savez_compressed(
-        #     results_dir / f"fields_fDNS_{(time_step+1):07d}.npz",
+        #     results_dir / f"fields_fDNS_{time_step:07d}.npz",
         #     pStep=np.asarray(time_step),
         #     simtime=np.asarray(simtime),
         #     U=filtered_output_fields[0],
@@ -993,7 +1072,9 @@ def findLESTerms(pLES):
     dx_dns = LX / FINE_N
     dy_dns = LY / FINE_N
     phi = dns[:, 1:2]
-    bracket_vort = _arakawa_bracket(phi, dns[:, 2:3], dx_dns, dy_dns)
+    bracket_vort = _arakawa_bracket(
+        phi, dns[:, 2:3], dx_dns, dy_dns
+    )
     bracket_n = _arakawa_bracket(phi, dns[:, 0:1], dx_dns, dy_dns)
     dns_bracket_vort = bracket_vort[:, 0]
     dns_bracket_n = bracket_n[:, 0]

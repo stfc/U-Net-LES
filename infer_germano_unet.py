@@ -34,6 +34,52 @@ def optional_environment_float(name, default):
     return float(value)
 
 
+def environment_bool(name, default=True):
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    return value.lower() not in {"0", "false", "no", "off"}
+
+
+def print_checkpoint_metadata(checkpoint_path, effective_inference):
+    """Load/print arbitrary training metadata and effective runtime overrides."""
+    candidates = (
+        checkpoint_path.parent / "metadata.json",
+        checkpoint_path.parent.parent / "metadata.json",
+    )
+    metadata_path = next((path for path in candidates if path.is_file()), None)
+    if metadata_path is None:
+        print(
+            "Checkpoint metadata: metadata.json was not found beside the "
+            "checkpoint directory."
+        )
+        for name, value in effective_inference.items():
+            print(f"effective_inference.{name}: {json.dumps(value)}")
+        return None, {}
+
+    metadata = json.loads(metadata_path.read_text())
+    print(f"Checkpoint metadata ({metadata_path}):")
+
+    def print_values(value, prefix=""):
+        if isinstance(value, dict):
+            for name, nested_value in value.items():
+                if not prefix and name in {
+                    "tensorboard_dir",
+                    "test_metrics",
+                    "training_parameters",
+                    "training_parameters_file",
+                }:
+                    continue
+                nested_prefix = f"{prefix}.{name}" if prefix else name
+                print_values(nested_value, nested_prefix)
+        else:
+            print(f"{prefix}: {json.dumps(value)}")
+
+    print_values(metadata)
+    print_values(effective_inference, "effective_inference")
+    return metadata_path, metadata
+
+
 def save_dns_centerline_plots(source, fields, dns, reconstructed, output_dir):
     """Plot DNS and reconstructed values along y = N_DNS // 2."""
     center_y = dns.shape[-1] // 2
@@ -103,7 +149,6 @@ def main():
     )
     torch_dtype = getattr(torch, precision)
     numpy_dtype = getattr(np, precision)
-    print(f"Device: {device}; precision: {precision}")
     fields = c["field_names"]
     fine_n = int(c["fine_n"])
     coarse_n = int(c["coarse_n"])
@@ -139,6 +184,17 @@ def main():
     post_cutoff_order = float(
         os.environ.get("PBOUT_UNET_POST_CUTOFF_ORDER", 8.0)
     )
+    requested_vorticity_from_potential = environment_bool(
+        "PBOUT_UNET_VORTICITY_FROM_POTENTIAL", True
+    )
+    vorticity_from_potential = requested_vorticity_from_potential
+    if not learn_vorticity and not requested_vorticity_from_potential:
+        print(
+            "PBOUT_UNET_VORTICITY_FROM_POTENTIAL=0 cannot provide an "
+            "independently learned W with this potential-laplacian checkpoint; "
+            "W will still be reconstructed from V."
+        )
+        vorticity_from_potential = True
     if cutoff_fraction is not None and not 0 < cutoff_fraction <= 1:
         raise ValueError(
             "PBOUT_UNET_INVERSE_CUTOFF_FRACTION must be in (0, 1]."
@@ -151,11 +207,28 @@ def main():
         raise ValueError("PBOUT_UNET_INVERSE_CUTOFF_ORDER must be positive.")
     if post_cutoff_order <= 0:
         raise ValueError("PBOUT_UNET_POST_CUTOFF_ORDER must be positive.")
-    print(
-        "Cutoffs: "
-        f"inverse_fraction={cutoff_fraction}, inverse_order={cutoff_order}; "
-        f"post_fraction={post_cutoff_fraction}, post_order={post_cutoff_order}"
-    )
+    effective_inference = {
+        "checkpoint": str(a.checkpoint),
+        "checkpoint_epoch": c.get("epoch"),
+        "input": str(a.input),
+        "device": str(device),
+        "precision": precision,
+        "physics_dtype": precision,
+        "inverse_input": a.inverse_input,
+        "inverse_cutoff_fraction": cutoff_fraction,
+        "inverse_cutoff_order": cutoff_order,
+        "post_cutoff_fraction": post_cutoff_fraction,
+        "post_cutoff_order": post_cutoff_order,
+        "cutoff_application": {
+            "inverse": "inverse_input_before_inverse_germano",
+            "post": "reconstructed_dns_after_inverse_germano",
+        },
+        "requested_vorticity_from_potential": (
+            requested_vorticity_from_potential
+        ),
+        "vorticity_from_potential": vorticity_from_potential,
+        "vorticity_mode": vorticity_mode,
+    }
     model = ResidualUNetSR(
         len(fields),
         base_channels,
@@ -171,6 +244,10 @@ def main():
     files = [a.input] if a.input.is_file() else recursive_npz_files(a.input)
     if not files:
         raise ValueError("No NPZ snapshots found.")
+    effective_inference["snapshots_processed"] = len(files)
+    checkpoint_metadata_path, checkpoint_metadata = print_checkpoint_metadata(
+        a.checkpoint, effective_inference
+    )
     rows = []
     for i, p in enumerate(files, 1):
         dns = load_dns_snapshot(
@@ -197,6 +274,8 @@ def main():
                     )
             else:
                 pf = torch.from_numpy(fine[None]).to(device)
+            if vorticity_from_potential:
+                pf = enforce_vorticity_from_potential_torch(pf, lx, ly)
             pf = spectral_cutoff_torch(
                 pf,
                 lx,
@@ -204,12 +283,18 @@ def main():
                 cutoff_fraction,
                 cutoff_order,
             )
+            if vorticity_from_potential:
+                pf = enforce_vorticity_from_potential_torch(pf, lx, ly)
             pd_unconstrained = inverse_germano_torch(
                 pf,
                 alpha,
                 lx,
                 ly,
             )
+            if vorticity_from_potential:
+                pd_unconstrained = enforce_vorticity_from_potential_torch(
+                    pd_unconstrained, lx, ly
+                )
             pd_unconstrained = spectral_cutoff_torch(
                 pd_unconstrained,
                 lx,
@@ -217,13 +302,12 @@ def main():
                 post_cutoff_fraction,
                 post_cutoff_order,
             )
-            if learn_vorticity:
-                pd = pd_unconstrained
-            else:
-                vorticity = periodic_laplacian_4th_torch(
-                    pd_unconstrained[:, 1:2], lx, ly
+            if vorticity_from_potential:
+                pd = enforce_vorticity_from_potential_torch(
+                    pd_unconstrained, lx, ly
                 )
-                pd = torch.cat((pd_unconstrained[:, :2], vorticity), dim=1)
+            else:
+                pd = pd_unconstrained
         pf_np, pd_np = pf[0].cpu().numpy(), pd[0].cpu().numpy()
         out = a.output_dir / p.stem
         out.mkdir(parents=True, exist_ok=True)
@@ -338,29 +422,17 @@ def main():
         w = csv.DictWriter(f, fieldnames=list(rows[0]))
         w.writeheader()
         w.writerows(rows)
+    effective_inference["checkpoint_metadata_file"] = (
+        str(checkpoint_metadata_path)
+        if checkpoint_metadata_path is not None
+        else None
+    )
+    metadata = {
+        "checkpoint_metadata": checkpoint_metadata,
+        "effective_inference": effective_inference,
+    }
     (a.output_dir / "inference_metadata.json").write_text(
-        json.dumps(
-            {
-                "checkpoint": str(a.checkpoint),
-                "checkpoint_epoch": int(c["epoch"]),
-                "input": str(a.input),
-                "snapshots_processed": len(files),
-                "device": str(device),
-                "inverse_input": a.inverse_input,
-                "precision": precision,
-                "physics_dtype": precision,
-                "inverse_cutoff_fraction": cutoff_fraction,
-                "inverse_cutoff_order": cutoff_order,
-                "post_cutoff_fraction": post_cutoff_fraction,
-                "post_cutoff_order": post_cutoff_order,
-                "cutoff_application": {
-                    "inverse": "inverse_input_before_inverse_germano",
-                    "post": "reconstructed_dns_after_inverse_germano",
-                },
-                "vorticity_mode": vorticity_mode,
-            },
-            indent=2,
-        )
+        json.dumps(metadata, indent=2)
     )
 
 
