@@ -491,7 +491,7 @@ def _save_initial_dns_fields(
     """Save DNS fields and their original/reconstructed spectra."""
     output_dir = Path(f"results_Unet_{COARSE_N}x{COARSE_N}") / "images"
     output_dir.mkdir(parents=True, exist_ok=True)
-    output_path = output_dir / "field_DNS_initial.png"
+    output_path = output_dir / "fields_DNS_initial.png"
     save_field_images(
         fields,
         FIELD_NAMES,
@@ -673,17 +673,12 @@ def initFlow(npv):
         shutil.rmtree(results_dir)
     results_dir.mkdir(parents=True)
 
-    initial_dir = Path(f"results_Unet_{COARSE_N}x{COARSE_N}") / "initial"
-    if initial_dir.exists():
-        shutil.rmtree(initial_dir)
-    initial_dir.mkdir(parents=True)
-
     images_dir = Path(f"results_Unet_{COARSE_N}x{COARSE_N}") / "images"
     if images_dir.exists():
         shutil.rmtree(images_dir)
     images_dir.mkdir(parents=True)
     time_step = 0
-    initial_output = initial_dir / "fields_DNS_initial.npz"
+    initial_output = results_dir / "fields_DNS_initial.npz"
     np.savez_compressed(
         initial_output,
         pStep=np.asarray(0),
@@ -693,15 +688,15 @@ def initFlow(npv):
         P=initial_dns[2],
     )
 
-    initial_filtered_output = initial_dir / "fields_fDNS_initial.npz"
-    np.savez_compressed(
-        initial_filtered_output,
-        pStep=np.asarray(0),
-        simtime=np.asarray(0.0),
-        U=initial_fdns[0],
-        V=initial_fdns[1],
-        P=initial_fdns[2],
-    )
+    # initial_filtered_output = results_dir / "fields_fDNS_initial.npz"
+    # np.savez_compressed(
+    #     initial_filtered_output,
+    #     pStep=np.asarray(0),
+    #     simtime=np.asarray(0.0),
+    #     U=initial_fdns[0],
+    #     V=initial_fdns[1],
+    #     P=initial_fdns[2],
+    # )
 
     fields_image_output, fields_spectrum_output = _save_initial_dns_fields(
         initial_dns, reference_dns
