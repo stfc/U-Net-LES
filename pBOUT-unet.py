@@ -13,9 +13,11 @@ not need an argument parser::
   PBOUT_UNET_DNS_PATH=/path/to/dns_snapshot.npz
   PBOUT_UNET_ALPHA=10                    # same units as --alpha-factor
   PBOUT_UNET_DNS_INIT=1                  # full-resolution, inverse-only DNS mode
+  PBOUT_UNET_DNS_INIT_DOWNSAMPLE=1       # downsample fine state and call U-Net
   PBOUT_UNET_DEVICE=cuda                 # or cpu; default is automatic
   PBOUT_UNET_IMPLICIT=1                  # return -(DNS-LES) brackets
   PBOUT_UNET_VORTICITY_FROM_POTENTIAL=1  # enforce vort = Laplacian(phi)
+  PBOUT_UNET_LAPLACIAN_ORDER=2            # override checkpoint order (2 or 4)
   PBOUT_UNET_INVERSE_CUTOFF_FRACTION=0.75
   PBOUT_UNET_INVERSE_CUTOFF_ORDER=8
   PBOUT_UNET_POST_CUTOFF_FRACTION=0.5    # suppress post-inversion noise
@@ -32,6 +34,7 @@ import re
 import site
 import sys
 import json
+import shutil
 import warnings
 
 from pathlib import Path
@@ -103,6 +106,13 @@ DNS_PATH = Path(_dns_path).expanduser() if _dns_path else None
 DNS_INIT = os.environ.get("PBOUT_UNET_DNS_INIT", "0").lower() not in {
     "0", "false", "no", "off"
 }
+DNS_INIT_DOWNSAMPLE = os.environ.get(
+    "PBOUT_UNET_DNS_INIT_DOWNSAMPLE", "0"
+).lower() not in {"0", "false", "no", "off"}
+if DNS_INIT_DOWNSAMPLE and not DNS_INIT:
+    raise ValueError(
+        "PBOUT_UNET_DNS_INIT_DOWNSAMPLE requires PBOUT_UNET_DNS_INIT=1"
+    )
 BOUT_INPUT = Path(
     os.environ.get("PBOUT_UNET_BOUT_INP", "data/BOUT.inp")
 ).expanduser()
@@ -229,9 +239,13 @@ def _print_init_metadata(initial_state: str) -> None:
         "site_packages": _SITE_PACKAGES,
         "dns_path": str(DNS_PATH) if DNS_PATH is not None else None,
         "dns_init": DNS_INIT,
+        "dns_init_downsample": DNS_INIT_DOWNSAMPLE,
         "initial_state": initial_state,
         "implicit": IMPLICIT,
         "vorticity_mode": VORTICITY_MODE,
+        "vorticity_operator": VORTICITY_OPERATOR,
+        "checkpoint_laplacian_order": CHECKPOINT_LAPLACIAN_ORDER,
+        "laplacian_order": LAPLACIAN_ORDER,
         "learn_vorticity": LEARN_VORTICITY,
         "vorticity_from_potential": VORTICITY_FROM_POTENTIAL,
         "field_names": FIELD_NAMES,
@@ -291,6 +305,23 @@ if PRECISION not in ("float32", "float64"):
 TORCH_DTYPE = getattr(torch, PRECISION)
 NUMPY_DTYPE = getattr(np, PRECISION)
 VORTICITY_MODE = _checkpoint.get("vorticity_mode", "potential_laplacian")
+VORTICITY_OPERATOR = _checkpoint.get(
+    "vorticity_operator",
+    _checkpoint.get("training_parameters", {}).get(
+        "vorticity_operator", "fourth_order_periodic_laplacian"
+    ),
+)
+CHECKPOINT_LAPLACIAN_ORDER = int(
+    _checkpoint.get(
+        "laplacian_order",
+        2 if VORTICITY_OPERATOR == "second_order_periodic_laplacian" else 4,
+    )
+)
+LAPLACIAN_ORDER = int(
+    os.environ.get("PBOUT_UNET_LAPLACIAN_ORDER", CHECKPOINT_LAPLACIAN_ORDER)
+)
+if LAPLACIAN_ORDER not in (2, 4):
+    raise ValueError("PBOUT_UNET_LAPLACIAN_ORDER must be 2 or 4")
 LEARN_VORTICITY = VORTICITY_MODE == "learned_channel"
 OUTPUT_CHANNELS = int(
     _checkpoint.get("model_output_channels", 3 if LEARN_VORTICITY else 2)
@@ -299,7 +330,7 @@ if FINE_N % COARSE_N:
     raise ValueError("Checkpoint fine_n must be divisible by coarse_n")
 
 MODEL = None
-if not DNS_INIT:
+if not DNS_INIT or DNS_INIT_DOWNSAMPLE:
     MODEL = ResidualUNetSR(
         len(FIELD_NAMES), BASE_CHANNELS, FINE_N // COARSE_N, OUTPUT_CHANNELS
     ).to(device=DEVICE, dtype=TORCH_DTYPE)
@@ -410,7 +441,8 @@ def _reconstruct_dns(coarse: torch.Tensor):
     """Return reconstructed DNS fields and the cutoff-filtered U-Net output."""
     if MODEL is None:
         raise RuntimeError(
-            "U-Net reconstruction is disabled in PBOUT_UNET_DNS_INIT mode"
+            "U-Net reconstruction is disabled in inverse-only "
+            "PBOUT_UNET_DNS_INIT mode"
         )
     normalised = (coarse - MEAN) / STD
     predicted = MODEL(normalised)
@@ -418,26 +450,33 @@ def _reconstruct_dns(coarse: torch.Tensor):
         filtered_fine = predicted * STD + MEAN
     else:
         uv = predicted * STD[:, :2] + MEAN[:, :2]
-        filtered_fine = hw_fields_torch(uv[:, :1], uv[:, 1:2], LX, LY)
+        filtered_fine = hw_fields_torch(
+            uv[:, :1], uv[:, 1:2], LX, LY,
+            laplacian_order=LAPLACIAN_ORDER
+        )
     if VORTICITY_FROM_POTENTIAL:
         filtered_fine = enforce_vorticity_from_potential_torch(
-            filtered_fine, LX, LY
+            filtered_fine, LX, LY, LAPLACIAN_ORDER
         )
     inverse_input = spectral_cutoff_torch(
         filtered_fine, LX, LY, CUTOFF_FRACTION, CUTOFF_ORDER
     )
     if VORTICITY_FROM_POTENTIAL:
         inverse_input = enforce_vorticity_from_potential_torch(
-            inverse_input, LX, LY
+            inverse_input, LX, LY, LAPLACIAN_ORDER
         )
     dns = inverse_germano_torch(inverse_input, ALPHA, LX, LY)
     if VORTICITY_FROM_POTENTIAL:
-        dns = enforce_vorticity_from_potential_torch(dns, LX, LY)
+        dns = enforce_vorticity_from_potential_torch(
+            dns, LX, LY, LAPLACIAN_ORDER
+        )
     dns = spectral_cutoff_torch(
         dns, LX, LY, POST_CUTOFF_FRACTION, POST_CUTOFF_ORDER
     )
     if VORTICITY_FROM_POTENTIAL:
-        dns = enforce_vorticity_from_potential_torch(dns, LX, LY)
+        dns = enforce_vorticity_from_potential_torch(
+            dns, LX, LY, LAPLACIAN_ORDER
+        )
     return dns, inverse_input
 
 
@@ -446,8 +485,58 @@ def _inverse_germano_only(filtered_fields: torch.Tensor) -> torch.Tensor:
     """Reconstruct DNS fields directly, without the U-Net or grid resizing."""
     dns = inverse_germano_torch(filtered_fields, ALPHA, LX, LY)
     if VORTICITY_FROM_POTENTIAL:
-        dns = enforce_vorticity_from_potential_torch(dns, LX, LY)
+        dns = enforce_vorticity_from_potential_torch(
+            dns, LX, LY, LAPLACIAN_ORDER
+        )
     return dns
+
+
+def _save_dns_init_unet_validation(
+    time_step: int,
+    simtime: float,
+    incoming_filtered: torch.Tensor,
+    coarse: torch.Tensor,
+    predicted_filtered: torch.Tensor,
+    reconstructed_dns: torch.Tensor,
+) -> Path:
+    """Save paired fine-grid references and U-Net results during integration."""
+    reference_dns = _inverse_germano_only(incoming_filtered)
+    arrays = {
+        "incoming_filtered_fine": incoming_filtered,
+        "downsampled_coarse": coarse,
+        "unet_filtered_fine": predicted_filtered,
+        "inverse_only_reference_dns": reference_dns,
+        "unet_reconstructed_dns": reconstructed_dns,
+    }
+    numpy_arrays = {
+        name: value.detach().cpu().double().numpy()
+        for name, value in arrays.items()
+    }
+
+    def relative_l2(reference, prediction):
+        axes = tuple(range(2, reference.ndim))
+        numerator = np.sqrt(np.sum((prediction - reference) ** 2, axis=axes))
+        denominator = np.sqrt(np.sum(reference**2, axis=axes))
+        return numerator / np.maximum(denominator, np.finfo(np.float64).tiny)
+
+    output_dir = Path("results_U-Net") / "validation"
+    output_dir.mkdir(parents=True, exist_ok=True)
+    output_path = output_dir / f"unet_validation_{time_step:07d}.npz"
+    np.savez_compressed(
+        output_path,
+        pStep=np.asarray(time_step),
+        simtime=np.asarray(simtime),
+        filtered_relative_l2=relative_l2(
+            numpy_arrays["incoming_filtered_fine"],
+            numpy_arrays["unet_filtered_fine"],
+        ),
+        dns_relative_l2=relative_l2(
+            numpy_arrays["inverse_only_reference_dns"],
+            numpy_arrays["unet_reconstructed_dns"],
+        ),
+        **numpy_arrays,
+    )
+    return output_path
 
 
 def _validate_les_spacing(
@@ -507,6 +596,9 @@ def initFlow(npv):
     Germano filter, and spectrally resize them to the LES grid.  Otherwise,
     preserve the initial fields supplied by BOUT++.
     """
+    output_dir = Path("results_U-Net")
+    if output_dir.exists():
+        shutil.rmtree(output_dir)
 
     if DNS_INIT:
         if DNS_PATH is None:
@@ -532,6 +624,7 @@ def initFlow(npv):
             LX,
             LY,
             dtype=NUMPY_DTYPE,
+            laplacian_order=LAPLACIAN_ORDER,
         )
 
         fields_output, fields_spectrum_output = save_initial_dns_fields(
@@ -554,12 +647,18 @@ def initFlow(npv):
             spectrum_stem="arakawa_DNS_spectrum_initial.png",
         )
 
+        integration_mode = (
+            "incoming states will be downsampled and reconstructed by "
+            "the U-Net during time integration;\n"
+            if DNS_INIT_DOWNSAMPLE
+            else "U-Net reconstruction is disabled;\n"
+        )
         print(
             f"Initialized BOUT++ from filtered DNS snapshot {DNS_PATH};\n"
             f"resolution={FINE_N}, Lx={LX}, Ly={LY};\n"
             f"differential filter alpha-factor={ALPHA_FACTOR:g} "
             f"(physical alpha={ALPHA:g}); fields were not resized "
-            "and U-Net was not called;\n"
+            f"during initialization; {integration_mode}"
             f"saved filtered and original DNS fields to {fields_output};\n"
             f"saved their spectra to {fields_spectrum_output};\n"
             f"saved DNS Arakawa terms to {arakawa_output};\n"
@@ -652,7 +751,13 @@ def findLESTerms(pLES):
     simulation_fields = torch.from_numpy(fields[:, :3]).to(
         device=DEVICE, dtype=TORCH_DTYPE
     )
-    if DNS_INIT:
+    coarse_fields = None
+    if DNS_INIT_DOWNSAMPLE:
+        coarse_fields = _spectral_resize_torch(
+            simulation_fields, COARSE_N
+        )
+        dns, filtered_fine = _reconstruct_dns(coarse_fields)
+    elif DNS_INIT:
         filtered_fine = simulation_fields
         dns = _inverse_germano_only(filtered_fine)
     else:
@@ -666,6 +771,15 @@ def findLESTerms(pLES):
             simtime,
             Path("results_U-Net"),
         )
+        if DNS_INIT_DOWNSAMPLE:
+            _save_dns_init_unet_validation(
+                time_step,
+                simtime,
+                simulation_fields,
+                coarse_fields,
+                filtered_fine,
+                dns,
+            )
 
     dx_dns = LX / FINE_N
     dy_dns = LY / FINE_N

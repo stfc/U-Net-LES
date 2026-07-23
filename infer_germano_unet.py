@@ -133,6 +133,15 @@ def parse_args():
         default="checkpoint",
         help="U-Net and physics precision (default: use checkpoint precision)",
     )
+    p.add_argument(
+        "--laplacian-order",
+        choices=("checkpoint", "2", "4"),
+        default="checkpoint",
+        help=(
+            "Vorticity Laplacian order; use 2 or 4 to override the checkpoint "
+            "(default: checkpoint)"
+        ),
+    )
     return p.parse_args()
 
 
@@ -157,6 +166,23 @@ def main():
     alpha = float(c["alpha"])
     base_channels = int(c["base_channels"])
     vorticity_mode = c.get("vorticity_mode", "potential_laplacian")
+    vorticity_operator = c.get(
+        "vorticity_operator",
+        c.get("training_parameters", {}).get(
+            "vorticity_operator", "fourth_order_periodic_laplacian"
+        ),
+    )
+    checkpoint_laplacian_order = int(
+        c.get(
+            "laplacian_order",
+            2 if vorticity_operator == "second_order_periodic_laplacian" else 4,
+        )
+    )
+    laplacian_order = (
+        checkpoint_laplacian_order
+        if a.laplacian_order == "checkpoint"
+        else int(a.laplacian_order)
+    )
     learn_vorticity = vorticity_mode == "learned_channel"
     model_output_channels = int(
         c.get("model_output_channels", 3 if learn_vorticity else 2)
@@ -233,6 +259,9 @@ def main():
         ),
         "vorticity_from_potential": vorticity_from_potential,
         "vorticity_mode": vorticity_mode,
+        "vorticity_operator": vorticity_operator,
+        "checkpoint_laplacian_order": checkpoint_laplacian_order,
+        "laplacian_order": laplacian_order,
     }
     model = ResidualUNetSR(
         len(fields),
@@ -256,10 +285,12 @@ def main():
     rows = []
     for i, p in enumerate(files, 1):
         dns = load_dns_snapshot(
-            p, fields, fine_n, lx, ly, dtype=numpy_dtype
+            p, fields, fine_n, lx, ly, dtype=numpy_dtype,
+            laplacian_order=laplacian_order
         )
         coarse, fine = filter_snapshot(
-            dns, alpha, lx, ly, coarse_n, dtype=numpy_dtype
+            dns, alpha, lx, ly, coarse_n, dtype=numpy_dtype,
+            laplacian_order=laplacian_order
         )
         x = (
             torch.from_numpy(((coarse - mean_np[0]) / std_np[0])[None])
@@ -275,12 +306,15 @@ def main():
                         predicted * std[:, :2] + mean[:, :2]
                     )
                     pf = hw_fields_torch(
-                        predicted_uv[:, :1], predicted_uv[:, 1:2], lx, ly
+                        predicted_uv[:, :1], predicted_uv[:, 1:2], lx, ly,
+                        laplacian_order=laplacian_order
                     )
             else:
                 pf = torch.from_numpy(fine[None]).to(device)
             if vorticity_from_potential:
-                pf = enforce_vorticity_from_potential_torch(pf, lx, ly)
+                pf = enforce_vorticity_from_potential_torch(
+                    pf, lx, ly, laplacian_order
+                )
             pf = spectral_cutoff_torch(
                 pf,
                 lx,
@@ -289,7 +323,9 @@ def main():
                 cutoff_order,
             )
             if vorticity_from_potential:
-                pf = enforce_vorticity_from_potential_torch(pf, lx, ly)
+                pf = enforce_vorticity_from_potential_torch(
+                    pf, lx, ly, laplacian_order
+                )
             pd_unconstrained = inverse_germano_torch(
                 pf,
                 alpha,
@@ -298,7 +334,7 @@ def main():
             )
             if vorticity_from_potential:
                 pd_unconstrained = enforce_vorticity_from_potential_torch(
-                    pd_unconstrained, lx, ly
+                    pd_unconstrained, lx, ly, laplacian_order
                 )
             pd_unconstrained = spectral_cutoff_torch(
                 pd_unconstrained,
@@ -309,7 +345,7 @@ def main():
             )
             if vorticity_from_potential:
                 pd = enforce_vorticity_from_potential_torch(
-                    pd_unconstrained, lx, ly
+                    pd_unconstrained, lx, ly, laplacian_order
                 )
             else:
                 pd = pd_unconstrained

@@ -67,6 +67,7 @@ def run_epoch(
     inverse_cutoff_fraction,
     inverse_cutoff_order,
     learn_vorticity,
+    laplacian_order,
     optimizer=None,
 ):
     training = optimizer is not None
@@ -116,6 +117,7 @@ def run_epoch(
                 inverse_cutoff_fraction,
                 inverse_cutoff_order,
                 learn_vorticity,
+                laplacian_order,
             )
             if training:
                 loss.backward()
@@ -244,6 +246,16 @@ def parse_args():
             "instead of deriving it as the Laplacian of potential"
         ),
     )
+    p.add_argument(
+        "--laplacian-order",
+        type=int,
+        choices=(2, 4),
+        default=2,
+        help=(
+            "Centered periodic Laplacian order used to derive vorticity "
+            "from potential (default: 2)"
+        ),
+    )
     p.add_argument("--lambda-dns", type=float, default=0.05)
     p.add_argument("--lambda-spectrum", type=float, default=0.02)
     p.add_argument(
@@ -305,6 +317,7 @@ def run_training(a):
             a.lx,
             a.ly,
             dtype=numpy_dtype,
+            laplacian_order=a.laplacian_order,
         )
     else:
         statistics_shape = (1, len(a.fields), 1, 1)
@@ -327,6 +340,7 @@ def run_training(a):
             a.ly,
             mean_np,
             std_np,
+            a.laplacian_order,
         )
 
     train_ds, val_ds, test_ds = ds(tr), ds(va), ds(te)
@@ -370,6 +384,24 @@ def run_training(a):
         if checkpoint_learns_vorticity != a.learn_vorticity:
             raise ValueError(
                 "--learn-vorticity must match the resumed checkpoint."
+            )
+        checkpoint_operator = c.get(
+            "vorticity_operator",
+            c.get("training_parameters", {}).get(
+                "vorticity_operator", "fourth_order_periodic_laplacian"
+            ),
+        )
+        checkpoint_order = (
+            int(c["laplacian_order"])
+            if "laplacian_order" in c
+            else 2
+            if checkpoint_operator == "second_order_periodic_laplacian"
+            else 4
+        )
+        if not a.learn_vorticity and checkpoint_order != a.laplacian_order:
+            raise ValueError(
+                f"--laplacian-order {a.laplacian_order} does not match "
+                f"resumed checkpoint order {checkpoint_order}."
             )
         checkpoint_precision = c.get("precision", "float32")
         if checkpoint_precision != a.precision:
@@ -419,6 +451,8 @@ def run_training(a):
         vorticity_operator=(
             "learned_independent_channel"
             if a.learn_vorticity
+            else "second_order_periodic_laplacian"
+            if a.laplacian_order == 2
             else "fourth_order_periodic_laplacian"
         ),
         vorticity_mode=(
@@ -464,6 +498,7 @@ def run_training(a):
             inverse_cutoff_fraction,
             a.inverse_cutoff_order,
             a.learn_vorticity,
+            a.laplacian_order,
             opt,
         )
         vm = run_epoch(
@@ -481,6 +516,7 @@ def run_training(a):
             inverse_cutoff_fraction,
             a.inverse_cutoff_order,
             a.learn_vorticity,
+            a.laplacian_order,
         )
         row = {
             "epoch": epoch,
@@ -510,8 +546,11 @@ def run_training(a):
             "vorticity_operator": (
                 "learned_independent_channel"
                 if a.learn_vorticity
+                else "second_order_periodic_laplacian"
+                if a.laplacian_order == 2
                 else "fourth_order_periodic_laplacian"
             ),
+            "laplacian_order": a.laplacian_order,
             "vorticity_mode": (
                 "learned_channel"
                 if a.learn_vorticity
@@ -563,6 +602,7 @@ def run_training(a):
         inverse_cutoff_fraction,
         a.inverse_cutoff_order,
         a.learn_vorticity,
+        a.laplacian_order,
     )
     for name, value in test.items():
         writer.add_scalar(f"metrics/test/{name}", value, int(c["epoch"]))
