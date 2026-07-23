@@ -14,6 +14,7 @@ not need an argument parser::
   PBOUT_UNET_ALPHA=10                    # same units as --alpha-factor
   PBOUT_UNET_DNS_INIT=1                  # full-resolution, inverse-only DNS mode
   PBOUT_UNET_DNS_INIT_DOWNSAMPLE=1       # downsample fine state and call U-Net
+  PBOUT_UNET_RECONSTRUCT_CHANNELS=U,V,W   # U-Net channels; others stay incoming
   PBOUT_UNET_DEVICE=cuda                 # or cpu; default is automatic
   PBOUT_UNET_IMPLICIT=1                  # return -(DNS-LES) brackets
   PBOUT_UNET_VORTICITY_FROM_POTENTIAL=1  # enforce vort = Laplacian(phi)
@@ -98,7 +99,7 @@ from visualization_common import (
 _HERE = Path(__file__).resolve().parent
 _DEFAULT_CHECKPOINT = (
     _HERE
-    / "results/germano_training_output_32_v4/checkpoints/best.pt"
+    / "results/germano_training_output_32_v6/checkpoints/best.pt"
 )
 CHECKPOINT = Path(os.environ.get("PBOUT_UNET_CHECKPOINT", _DEFAULT_CHECKPOINT))
 _dns_path = os.environ.get("PBOUT_UNET_DNS_PATH")
@@ -249,6 +250,7 @@ def _print_init_metadata(initial_state: str) -> None:
         "learn_vorticity": LEARN_VORTICITY,
         "vorticity_from_potential": VORTICITY_FROM_POTENTIAL,
         "field_names": FIELD_NAMES,
+        "reconstruct_channels": RECONSTRUCT_CHANNELS,
         "model_output_channels": OUTPUT_CHANNELS,
         "fine_n": FINE_N,
         "coarse_n": COARSE_N,
@@ -284,6 +286,28 @@ NORMALIZATION_ENABLED = _checkpoint.get(
 )
 NO_NORMALIZE = not NORMALIZATION_ENABLED
 FIELD_NAMES = tuple(_checkpoint["field_names"])
+_reconstruct_channels_value = os.environ.get(
+    "PBOUT_UNET_RECONSTRUCT_CHANNELS", "all"
+)
+if _reconstruct_channels_value.strip().lower() == "all":
+    RECONSTRUCT_CHANNELS = FIELD_NAMES
+elif _reconstruct_channels_value.strip().lower() in {"none", "off"}:
+    RECONSTRUCT_CHANNELS = ()
+else:
+    requested_channels = tuple(
+        name.strip().upper()
+        for name in _reconstruct_channels_value.split(",")
+        if name.strip()
+    )
+    unknown_channels = sorted(set(requested_channels) - set(FIELD_NAMES))
+    if unknown_channels:
+        raise ValueError(
+            "PBOUT_UNET_RECONSTRUCT_CHANNELS contains unknown channels "
+            f"{unknown_channels}; choose from {FIELD_NAMES}, 'all', or 'none'"
+        )
+    RECONSTRUCT_CHANNELS = tuple(
+        name for name in FIELD_NAMES if name in requested_channels
+    )
 FINE_N = int(_checkpoint["fine_n"])
 COARSE_N = int(_checkpoint["coarse_n"])
 LX = float(_checkpoint["lx"])
@@ -437,7 +461,10 @@ def _decode_fields(
 
 
 @torch.inference_mode()
-def _reconstruct_dns(coarse: torch.Tensor):
+def _reconstruct_dns(
+    coarse: torch.Tensor,
+    incoming_filtered_fine: torch.Tensor | None = None,
+):
     """Return reconstructed DNS fields and the cutoff-filtered U-Net output."""
     if MODEL is None:
         raise RuntimeError(
@@ -461,6 +488,24 @@ def _reconstruct_dns(coarse: torch.Tensor):
     inverse_input = spectral_cutoff_torch(
         filtered_fine, LX, LY, CUTOFF_FRACTION, CUTOFF_ORDER
     )
+    if incoming_filtered_fine is not None:
+        if incoming_filtered_fine.shape != inverse_input.shape:
+            raise ValueError(
+                "Incoming fine LES fields and U-Net reconstruction have "
+                f"different shapes: {incoming_filtered_fine.shape} and "
+                f"{inverse_input.shape}"
+            )
+        reconstruct_mask = torch.tensor(
+            [name in RECONSTRUCT_CHANNELS for name in FIELD_NAMES],
+            dtype=torch.bool,
+            device=inverse_input.device,
+        ).view(1, -1, 1, 1)
+        inverse_input = torch.where(
+            reconstruct_mask, inverse_input, incoming_filtered_fine
+        )
+    # Vorticity enforcement is authoritative. Channel selection chooses the
+    # effective U and V fields, but W is always derived from that effective V
+    # when PBOUT_UNET_VORTICITY_FROM_POTENTIAL is enabled.
     if VORTICITY_FROM_POTENTIAL:
         inverse_input = enforce_vorticity_from_potential_torch(
             inverse_input, LX, LY, LAPLACIAN_ORDER
@@ -665,6 +710,13 @@ def initFlow(npv):
             f"saved their spectra to {arakawa_spectrum_output}\n",
             flush=True,
         )
+
+        print("\n\n", flush=True)
+        print("------------------ U-Net parameters---------------", flush=True)
+        initial_state = f"filtered DNS snapshot {DNS_PATH}"
+        _print_init_metadata(initial_state)
+        print("\n\n", flush=True)
+
         return fields.reshape(-1).astype(np.float64, copy=False)
 
     reference_dns = None
@@ -756,7 +808,9 @@ def findLESTerms(pLES):
         coarse_fields = _spectral_resize_torch(
             simulation_fields, COARSE_N
         )
-        dns, filtered_fine = _reconstruct_dns(coarse_fields)
+        dns, filtered_fine = _reconstruct_dns(
+            coarse_fields, incoming_filtered_fine=simulation_fields
+        )
     elif DNS_INIT:
         filtered_fine = simulation_fields
         dns = _inverse_germano_only(filtered_fine)
