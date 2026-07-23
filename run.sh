@@ -16,15 +16,16 @@ conda activate py311
 
 python train_germano_unet.py \
   --dataset ../../data/BOUT_runs/HW_2D/Papers/PoP23/HW_N256/fields/ \
-  --output-dir germano_training_output_32_v6 \
+  --output-dir germano_training_output_32_v7 \
   --epochs 300 \
   --batch-size 4 \
   --coarse-n 32 \
-  --alpha-factor 10.0 \
+  --alpha-factor 8.0 \
   --precision float64 \
   --lx 50.176 \
   --ly 50.176 \
-  --lambda-spectrum 1.0 \
-  --no-normalize 
+  --lambda-spectrum 10.0 \
+  --no-normalize \
+  --learn-vorticity
 
 #python infer_germano_unet.py --checkpoint germano_training_output_32_v3/checkpoints/best.pt --input fields_HW_run0_time501.npz --output-dir inference_output

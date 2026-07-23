@@ -64,6 +64,7 @@ def run_epoch(
     ly,
     lambda_dns,
     lambda_spectrum,
+    lambda_laplacian,
     inverse_cutoff_fraction,
     inverse_cutoff_order,
     learn_vorticity,
@@ -77,6 +78,7 @@ def run_epoch(
         "filtered",
         "dns",
         "spectrum",
+        "laplacian",
         "dns_U",
         "dns_V",
         "dns_W",
@@ -114,6 +116,7 @@ def run_epoch(
                 ly,
                 lambda_dns,
                 lambda_spectrum,
+                lambda_laplacian,
                 inverse_cutoff_fraction,
                 inverse_cutoff_order,
                 learn_vorticity,
@@ -149,7 +152,7 @@ def configure_tensorboard(writer, normalize):
                     "Multiline",
                     [f"metrics/train/{name}", f"metrics/validation/{name}"],
                 ]
-                for name in ("total", "filtered", "dns", "spectrum")
+                for name in ("total", "filtered", "dns", "spectrum", "laplacian")
             },
             "Relative L2": {
                 name.replace("_", " ").title(): [
@@ -258,6 +261,15 @@ def parse_args():
     )
     p.add_argument("--lambda-dns", type=float, default=0.05)
     p.add_argument("--lambda-spectrum", type=float, default=0.02)
+    p.add_argument(
+        "--lambda-laplacian",
+        type=float,
+        default=0.05,
+        help=(
+            "Weight for the normalized L1 loss between predicted and target "
+            "Laplacians of potential (default: 0.05)"
+        ),
+    )
     p.add_argument(
         "--inverse-cutoff-fraction",
         type=float,
@@ -495,6 +507,7 @@ def run_training(a):
             a.ly,
             a.lambda_dns,
             a.lambda_spectrum,
+            a.lambda_laplacian,
             inverse_cutoff_fraction,
             a.inverse_cutoff_order,
             a.learn_vorticity,
@@ -513,6 +526,7 @@ def run_training(a):
             a.ly,
             a.lambda_dns,
             a.lambda_spectrum,
+            a.lambda_laplacian,
             inverse_cutoff_fraction,
             a.inverse_cutoff_order,
             a.learn_vorticity,
@@ -565,6 +579,7 @@ def run_training(a):
             "base_channels": a.base_channels,
             "lambda_dns": a.lambda_dns,
             "lambda_spectrum": a.lambda_spectrum,
+            "lambda_laplacian": a.lambda_laplacian,
             "inverse_cutoff_fraction": inverse_cutoff_fraction,
             "inverse_cutoff_order": a.inverse_cutoff_order,
             "precision": a.precision,

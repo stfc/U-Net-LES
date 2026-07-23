@@ -99,7 +99,7 @@ from visualization_common import (
 _HERE = Path(__file__).resolve().parent
 _DEFAULT_CHECKPOINT = (
     _HERE
-    / "results/germano_training_output_32_v6/checkpoints/best.pt"
+    / "results/germano_training_output_32_v7/checkpoints/best.pt"
 )
 CHECKPOINT = Path(os.environ.get("PBOUT_UNET_CHECKPOINT", _DEFAULT_CHECKPOINT))
 _dns_path = os.environ.get("PBOUT_UNET_DNS_PATH")

@@ -571,6 +571,7 @@ def calculate_losses(
     ly,
     lambda_dns,
     lambda_spectrum,
+    lambda_laplacian,
     inverse_cutoff_fraction,
     inverse_cutoff_order,
     learn_vorticity=False,
@@ -614,8 +615,23 @@ def calculate_losses(
     ls = nn.functional.l1_loss(
         torch.log1p(predicted_energy), torch.log1p(target_energy)
     )
+    laplacian = {
+        2: periodic_laplacian_2nd_torch,
+        4: periodic_laplacian_4th_torch,
+    }[laplacian_order]
+    predicted_laplacian = laplacian(pf[:, 1:2], lx, ly)
+    target_laplacian = laplacian(filtered_target[:, 1:2], lx, ly)
+    ll = nn.functional.l1_loss(
+        predicted_laplacian / dns_std[:, 2:3],
+        target_laplacian / dns_std[:, 2:3],
+    )
     spectrum_relative_l2 = relative_l2(target_energy, predicted_energy)
-    total = lf + lambda_dns * ld + lambda_spectrum * ls
+    total = (
+        lf
+        + lambda_dns * ld
+        + lambda_spectrum * ls
+        + lambda_laplacian * ll
+    )
     return (
         total,
         {
@@ -623,6 +639,7 @@ def calculate_losses(
             "filtered": lf,
             "dns": ld,
             "spectrum": ls,
+            "laplacian": ll,
             "spectrum_relative_l2": spectrum_relative_l2,
             "dns_U": dns_absolute_error[:, 0].mean(),
             "dns_V": dns_absolute_error[:, 1].mean(),
