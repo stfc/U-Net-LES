@@ -11,7 +11,7 @@ not need an argument parser::
 
   PBOUT_UNET_CHECKPOINT=/path/to/best.pt
   PBOUT_UNET_DNS_PATH=/path/to/dns_snapshot.npz
-  PBOUT_UNET_DNS_INIT=1                  # run BOUT++ from provided DNS fields
+  PBOUT_UNET_DNS_INIT=1                  # full-resolution, inverse-only DNS mode
   PBOUT_UNET_DEVICE=cuda                 # or cpu; default is automatic
   PBOUT_UNET_IMPLICIT=1                  # return -(DNS-LES) brackets
   PBOUT_UNET_VORTICITY_FROM_POTENTIAL=1  # enforce vort = Laplacian(phi)
@@ -71,7 +71,9 @@ import matplotlib.pyplot as plt
 from germano_common import (
     ResidualUNetSR,
     filter_snapshot,
+    germano_filter,
     enforce_vorticity_from_potential_torch,
+    hw_fields_numpy,
     hw_fields_torch,
     inverse_germano_torch,
     isotropic_spectrum,
@@ -84,6 +86,7 @@ from germano_common import (
 )
 from visualization_common import (
     arakawa_bracket as shared_arakawa_bracket,
+    save_arakawa_closure_comparison,
     save_arakawa_comparison,
     save_arakawa_diagnostics,
     save_arakawa_implementation_comparison,
@@ -226,12 +229,14 @@ OUTPUT_CHANNELS = int(
 if FINE_N % COARSE_N:
     raise ValueError("Checkpoint fine_n must be divisible by coarse_n")
 
-MODEL = ResidualUNetSR(
-    len(FIELD_NAMES), BASE_CHANNELS, FINE_N // COARSE_N, OUTPUT_CHANNELS
-).to(device=DEVICE, dtype=TORCH_DTYPE)
-MODEL.load_state_dict(_checkpoint["model"])
-MODEL.eval()
-MODEL.requires_grad_(False)
+MODEL = None
+if not DNS_INIT:
+    MODEL = ResidualUNetSR(
+        len(FIELD_NAMES), BASE_CHANNELS, FINE_N // COARSE_N, OUTPUT_CHANNELS
+    ).to(device=DEVICE, dtype=TORCH_DTYPE)
+    MODEL.load_state_dict(_checkpoint["model"])
+    MODEL.eval()
+    MODEL.requires_grad_(False)
 
 MEAN = torch.as_tensor(_checkpoint["mean"], dtype=TORCH_DTYPE, device=DEVICE)
 STD = torch.as_tensor(_checkpoint["std"], dtype=TORCH_DTYPE, device=DEVICE)
@@ -301,29 +306,43 @@ def _spectral_resize_torch(field: torch.Tensor, target_n: int) -> torch.Tensor:
     ).real
 
 
-def _decode_fields(values: np.ndarray, offset: int, required_channels: int):
+def _decode_fields(
+    values: np.ndarray,
+    offset: int,
+    required_channels: int,
+    grid_n: int = COARSE_N,
+):
     payload = values[offset:]
-    plane = COARSE_N * COARSE_N
+    plane = grid_n * grid_n
     # The current hw.cxx always allocates five blocks, even in explicit mode;
     # also accept a future compact three-block explicit payload.
     stored_channels = 5 if payload.size % (5 * plane) == 0 else 3
-    if stored_channels < required_channels or payload.size % (stored_channels * plane):
+    if (
+        stored_channels < required_channels
+        or payload.size % (stored_channels * plane)
+    ):
         raise ValueError(
             f"BOUT payload has {payload.size} values; expected a multiple of "
-            f"{required_channels * plane} for a {COARSE_N}x{COARSE_N} grid"
+            f"{required_channels * plane} for a {grid_n}x{grid_n} grid"
         )
     batch = payload.size // (stored_channels * plane)
     arrays = []
     for channel in range(required_channels):
-        block = payload[channel * batch * plane:(channel + 1) * batch * plane]
+        block = payload[
+            channel * batch * plane:(channel + 1) * batch * plane
+        ]
         # C++ block order is (x, batch/y, z).
-        arrays.append(block.reshape(COARSE_N, batch, COARSE_N).transpose(1, 0, 2))
+        arrays.append(block.reshape(grid_n, batch, grid_n).transpose(1, 0, 2))
     return np.stack(arrays, axis=1), batch
 
 
 @torch.inference_mode()
 def _reconstruct_dns(coarse: torch.Tensor):
     """Return reconstructed DNS fields and the cutoff-filtered U-Net output."""
+    if MODEL is None:
+        raise RuntimeError(
+            "U-Net reconstruction is disabled in PBOUT_UNET_DNS_INIT mode"
+        )
     normalised = (coarse - MEAN) / STD
     predicted = MODEL(normalised)
     if LEARN_VORTICITY:
@@ -353,10 +372,21 @@ def _reconstruct_dns(coarse: torch.Tensor):
     return dns, inverse_input
 
 
-def _validate_les_spacing(dx: float, dy: float) -> None:
+@torch.inference_mode()
+def _inverse_germano_only(filtered_fields: torch.Tensor) -> torch.Tensor:
+    """Reconstruct DNS fields directly, without the U-Net or grid resizing."""
+    dns = inverse_germano_torch(filtered_fields, ALPHA, LX, LY)
+    if VORTICITY_FROM_POTENTIAL:
+        dns = enforce_vorticity_from_potential_torch(dns, LX, LY)
+    return dns
+
+
+def _validate_les_spacing(
+    dx: float, dy: float, grid_n: int = COARSE_N
+) -> None:
     """Ensure BOUT++ and the trained checkpoint describe the same domain."""
-    bout_lx = dx * COARSE_N
-    bout_ly = dy * COARSE_N
+    bout_lx = dx * grid_n
+    bout_ly = dy * grid_n
     if not np.isclose(bout_lx, LX, rtol=1e-10, atol=1e-12) or not np.isclose(
         bout_ly, LY, rtol=1e-10, atol=1e-12
     ):
@@ -576,9 +606,9 @@ def initFlow(npv):
     """Return initial LES fields, optionally derived from a DNS snapshot.
 
     If ``PBOUT_UNET_DNS_INIT`` is enabled, ``PBOUT_UNET_DNS_PATH`` must point
-    to a snapshot at the checkpoint's DNS resolution.  Its U, V, and P fields
-    are returned unchanged so BOUT++ can run at DNS resolution, without
-    calling the U-Net.
+    to a snapshot at the checkpoint's DNS resolution.  Its U and V fields are
+    differentially filtered, P is recomputed from the filtered V field, and
+    the result is returned at DNS resolution without calling the U-Net.
 
     If ``PBOUT_UNET_DNS_PATH`` is set, load the ``U`` (density) and ``V``
     (potential) arrays from that ``.npz`` DNS snapshot, apply the checkpoint's
@@ -597,18 +627,34 @@ def initFlow(npv):
                 f"DNS snapshot not found: {DNS_PATH}. "
                 "Set PBOUT_UNET_DNS_PATH to an existing .npz file."
             )
-        fields = _load_dns_uvp(DNS_PATH)
+        reference_fields = _load_dns_uvp(DNS_PATH)
+        filtered_density = germano_filter(
+            reference_fields[0], ALPHA, LX, LY
+        )
+        filtered_potential = germano_filter(
+            reference_fields[1], ALPHA, LX, LY
+        )
+        fields = hw_fields_numpy(
+            filtered_density,
+            filtered_potential,
+            LX,
+            LY,
+            dtype=NUMPY_DTYPE,
+        )
 
-        fields_output, fields_spectrum_output = _save_initial_dns_fields(fields)
+        fields_output, fields_spectrum_output = _save_initial_dns_fields(
+            fields, reference_fields
+        )
         arakawa_output, arakawa_spectrum_output = (
-            _save_initial_dns_arakawa(fields)
+            _save_initial_dns_arakawa(fields, reference_fields)
         )
 
         print(
-            f"Initialized BOUT++ directly from DNS snapshot {DNS_PATH};\n"
+            f"Initialized BOUT++ from filtered DNS snapshot {DNS_PATH};\n"
             f"resolution={FINE_N}, Lx={LX}, Ly={LY};\n"
-            "fields were not filtered or resized and U-Net was not called;\n"
-            f"saved DNS fields to {fields_output};\n"
+            f"differential filter alpha={ALPHA:g}; fields were not resized "
+            "and U-Net was not called;\n"
+            f"saved filtered and original DNS fields to {fields_output};\n"
             f"saved their spectra to {fields_spectrum_output};\n"
             f"saved DNS Arakawa terms to {arakawa_output};\n"
             f"saved their spectra to {arakawa_spectrum_output}\n",
@@ -706,14 +752,21 @@ def findLESTerms(pLES):
     time_step = int(values[0])
     simtime = float(values[3])
     dx_les = float(values[2])
-    _validate_les_spacing(dx_les, dx_les)
+    simulation_n = FINE_N if DNS_INIT else COARSE_N
+    _validate_les_spacing(dx_les, dx_les, simulation_n)
     required_channels = 5 if IMPLICIT else 3
-    fields, batch = _decode_fields(values, 4, required_channels)
+    fields, batch = _decode_fields(
+        values, 4, required_channels, simulation_n
+    )
 
-    coarse = torch.from_numpy(fields[:, :3]).to(
+    simulation_fields = torch.from_numpy(fields[:, :3]).to(
         device=DEVICE, dtype=TORCH_DTYPE
     )
-    dns, filtered_fine = _reconstruct_dns(coarse)
+    if DNS_INIT:
+        filtered_fine = simulation_fields
+        dns = _inverse_germano_only(filtered_fine)
+    else:
+        dns, filtered_fine = _reconstruct_dns(simulation_fields)
     if time_step % 100 == 0:
         results_dir = Path(
             f"results_Unet_{COARSE_N}x{COARSE_N}"
@@ -769,35 +822,32 @@ def findLESTerms(pLES):
     dns_bracket_vort = bracket_vort[:, 0]
     dns_bracket_n = bracket_n[:, 0]
 
-    dx_les_checkpoint = LX / COARSE_N
-    dy_les_checkpoint = LY / COARSE_N
-    les_phi = coarse[:, 1:2]
+    dx_les_checkpoint = LX / simulation_n
+    dy_les_checkpoint = LY / simulation_n
+    les_phi = simulation_fields[:, 1:2]
     les_bracket_vort = _arakawa_bracket(
-        les_phi, coarse[:, 2:3], dx_les_checkpoint, dy_les_checkpoint
+        les_phi,
+        simulation_fields[:, 2:3],
+        dx_les_checkpoint,
+        dy_les_checkpoint,
     )[:, 0]
     les_bracket_n = _arakawa_bracket(
-        les_phi, coarse[:, 0:1], dx_les_checkpoint, dy_les_checkpoint
+        les_phi,
+        simulation_fields[:, 0:1],
+        dx_les_checkpoint,
+        dy_les_checkpoint,
     )[:, 0]
 
     # misc_styles.find_bracket filters the fine-grid bracket before returning it
-    # to LES.  Use the same Germano operator and the training spectral coarsening.
-    bracket_vort = _spectral_resize_torch(
-        _germano_filter_torch(bracket_vort), COARSE_N
-    )[:, 0]
-    bracket_n = _spectral_resize_torch(
-        _germano_filter_torch(bracket_n), COARSE_N
-    )[:, 0]
-
-    # if time_step % 1 == 0:
-    #     _save_arakawa_images(
-    #         time_step,
-    #         les_bracket_vort,
-    #         les_bracket_n,
-    #         dns_bracket_vort,
-    #         dns_bracket_n,
-    #         bracket_vort,
-    #         bracket_n,
-    #     )
+    # to BOUT++.  Full-resolution DNS mode keeps that filtering step but does
+    # not resize; standard U-Net mode returns terms on the checkpoint LES grid.
+    bracket_vort = _germano_filter_torch(bracket_vort)
+    bracket_n = _germano_filter_torch(bracket_n)
+    if not DNS_INIT:
+        bracket_vort = _spectral_resize_torch(bracket_vort, COARSE_N)
+        bracket_n = _spectral_resize_torch(bracket_n, COARSE_N)
+    bracket_vort = bracket_vort[:, 0]
+    bracket_n = bracket_n[:, 0]
 
     if IMPLICIT:
         les_vort = torch.from_numpy(fields[:, 3]).to(
@@ -806,16 +856,34 @@ def findLESTerms(pLES):
         les_n = torch.from_numpy(fields[:, 4]).to(
             device=DEVICE, dtype=TORCH_DTYPE
         )
-        # if time_step % 1000 == 0:
-        #     _save_les_bout_arakawa_comparison(
-        #         time_step,
-        #         les_bracket_vort,
-        #         les_bracket_n,
-        #         les_vort,
-        #         les_n,
-        #     )
-        bracket_vort = -(bracket_vort - les_vort)
-        bracket_n = -(bracket_n - les_n)
+
+        filtered_vort = bracket_vort
+        filtered_n = bracket_n
+        bracket_vort = les_vort - filtered_vort
+        bracket_n = les_n - filtered_n
+
+        if time_step % 100 == -1:
+            save_arakawa_closure_comparison(
+                time_step,
+                simtime,
+                (
+                    filtered_vort.detach().cpu().double().numpy(),
+                    filtered_n.detach().cpu().double().numpy(),
+                ),
+                (
+                    les_vort.detach().cpu().double().numpy(),
+                    les_n.detach().cpu().double().numpy(),
+                ),
+                (
+                    les_bracket_vort.detach().cpu().double().numpy(),
+                    les_bracket_n.detach().cpu().double().numpy(),
+                ),
+                (
+                    bracket_vort.detach().cpu().double().numpy(),
+                    bracket_n.detach().cpu().double().numpy(),
+                ),
+                Path(f"results_Unet_{COARSE_N}x{COARSE_N}") / "arakawa",
+            )
 
     # Back to (x, batch/y, z), then C-order flattening expected by hw.cxx.
     out_vort = bracket_vort.permute(1, 0, 2).reshape(-1)

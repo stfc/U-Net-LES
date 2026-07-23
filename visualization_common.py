@@ -231,6 +231,64 @@ def save_arakawa_diagnostics(
             )
 
 
+def save_arakawa_closure_comparison(
+    time_step: int,
+    simtime: float,
+    filtered_terms: tuple[np.ndarray, np.ndarray],
+    bout_terms: tuple[np.ndarray, np.ndarray],
+    calculated_les_terms: tuple[np.ndarray, np.ndarray],
+    returned_terms: tuple[np.ndarray, np.ndarray],
+    output_dir: Path,
+) -> None:
+    """Compare filtered, BOUT++, calculated LES, and returned brackets."""
+    output_dir.mkdir(parents=True, exist_ok=True)
+    row_titles = (r"$J(\phi,\omega)$", r"$J(\phi,n)$")
+    column_titles = (
+        "Filtered Arakawa",
+        "Arakawa provided by BOUT++",
+        "Arakawa calculated from LES fields",
+        r"Returned to BOUT++ (BOUT++ $-$ filtered)",
+    )
+    batch_count = filtered_terms[0].shape[0]
+    for batch_index in range(batch_count):
+        fig, axes = plt.subplots(2, 4, figsize=(20.5, 9.5))
+        for row, row_title in enumerate(row_titles):
+            row_fields = (
+                filtered_terms[row][batch_index],
+                bout_terms[row][batch_index],
+                calculated_les_terms[row][batch_index],
+                returned_terms[row][batch_index],
+            )
+            maximum = max(float(np.max(np.abs(field))) for field in row_fields)
+            limits = {"vmin": -maximum, "vmax": maximum} if maximum > 0 else {}
+            for column, (field, column_title) in enumerate(
+                zip(row_fields, column_titles)
+            ):
+                image = axes[row, column].imshow(
+                    field.T,
+                    origin="lower",
+                    extent=(0, field.shape[0], 0, field.shape[1]),
+                    aspect="equal",
+                    cmap="coolwarm",
+                    **limits,
+                )
+                axes[row, column].set_title(f"{column_title}\n{row_title}")
+                axes[row, column].set_xlabel("x [pixels]")
+                axes[row, column].set_ylabel("y [pixels]")
+                fig.colorbar(image, ax=axes[row, column], shrink=0.82)
+        fig.suptitle(
+            f"Arakawa closure terms, step {time_step}, t={simtime:g}"
+        )
+        fig.tight_layout()
+        suffix = "" if batch_count == 1 else f"_batch{batch_index:03d}"
+        fig.savefig(
+            output_dir
+            / f"arakawa_closure_terms_time{time_step:07d}{suffix}.png",
+            dpi=180,
+        )
+        plt.close(fig)
+
+
 def save_arakawa_implementation_comparison(
     time_step: int,
     calculated_terms: tuple[np.ndarray, np.ndarray],
