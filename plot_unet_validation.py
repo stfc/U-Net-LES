@@ -48,6 +48,22 @@ def parse_args():
         default="png",
         help="Output image format (default: png)",
     )
+    parser.add_argument(
+        "--lx",
+        type=float,
+        help="Domain length Lx (overrides archive metadata)",
+    )
+    parser.add_argument(
+        "--ly",
+        type=float,
+        help="Domain length Ly (overrides archive metadata)",
+    )
+    parser.add_argument(
+        "--laplacian-order",
+        type=int,
+        choices=(2, 4),
+        help="Periodic Laplacian order (overrides archive metadata)",
+    )
     return parser.parse_args()
 
 
@@ -72,6 +88,11 @@ def load_validation(path: Path) -> dict[str, np.ndarray]:
         data = {name: np.asarray(archive[name]) for name in REQUIRED_ARRAYS}
         data["pStep"] = np.asarray(archive.get("pStep", -1)).item()
         data["simtime"] = np.asarray(archive.get("simtime", np.nan)).item()
+        data["lx"] = np.asarray(archive.get("lx", np.nan)).item()
+        data["ly"] = np.asarray(archive.get("ly", np.nan)).item()
+        data["laplacian_order"] = np.asarray(
+            archive.get("laplacian_order", -1)
+        ).item()
 
     fine_shape = data["incoming_filtered_fine"].shape
     if len(fine_shape) != 4 or fine_shape[1] != len(FIELD_NAMES):
@@ -109,6 +130,157 @@ def symmetric_limit(*arrays: np.ndarray) -> float:
     return limit if limit > 0 else 1.0
 
 
+def periodic_laplacian(
+    field: np.ndarray, lx: float, ly: float, order: int
+) -> np.ndarray:
+    """Return the selected centered periodic Laplacian."""
+    nx, ny = field.shape
+    dx = lx / nx
+    dy = ly / ny
+    if order == 2:
+        dxx = (
+            np.roll(field, 1, axis=0)
+            - 2 * field
+            + np.roll(field, -1, axis=0)
+        ) / dx**2
+        dyy = (
+            np.roll(field, 1, axis=1)
+            - 2 * field
+            + np.roll(field, -1, axis=1)
+        ) / dy**2
+    elif order == 4:
+        if nx < 5 or ny < 5:
+            raise ValueError("Fourth-order Laplacian requires at least 5 points")
+        dxx = (
+            -np.roll(field, 2, axis=0)
+            + 16 * np.roll(field, 1, axis=0)
+            - 30 * field
+            + 16 * np.roll(field, -1, axis=0)
+            - np.roll(field, -2, axis=0)
+        ) / (12 * dx**2)
+        dyy = (
+            -np.roll(field, 2, axis=1)
+            + 16 * np.roll(field, 1, axis=1)
+            - 30 * field
+            + 16 * np.roll(field, -1, axis=1)
+            - np.roll(field, -2, axis=1)
+        ) / (12 * dy**2)
+    else:
+        raise ValueError(f"Laplacian order must be 2 or 4, received {order}")
+    return dxx + dyy
+
+
+def periodic_derivative(
+    field: np.ndarray, spacing: float, axis: int, order: int
+) -> np.ndarray:
+    """Return a centered periodic first derivative."""
+    if order == 2:
+        return (
+            np.roll(field, -1, axis=axis)
+            - np.roll(field, 1, axis=axis)
+        ) / (2 * spacing)
+    if order == 4:
+        if field.shape[axis] < 5:
+            raise ValueError(
+                "Fourth-order derivative requires at least 5 points"
+            )
+        return (
+            np.roll(field, 2, axis=axis)
+            - 8 * np.roll(field, 1, axis=axis)
+            + 8 * np.roll(field, -1, axis=axis)
+            - np.roll(field, -2, axis=axis)
+        ) / (12 * spacing)
+    raise ValueError(f"Derivative order must be 2 or 4, received {order}")
+
+
+def periodic_location_shift(
+    first: tuple[int, int],
+    second: tuple[int, int],
+    shape: tuple[int, int],
+    lx: float,
+    ly: float,
+) -> float:
+    """Return the physical separation of two indices on a periodic domain."""
+    delta_x = min(
+        abs(first[0] - second[0]),
+        shape[0] - abs(first[0] - second[0]),
+    )
+    delta_y = min(
+        abs(first[1] - second[1]),
+        shape[1] - abs(first[1] - second[1]),
+    )
+    return float(
+        np.hypot(delta_x * lx / shape[0], delta_y * ly / shape[1])
+    )
+
+
+def vorticity_diagnostics(
+    reference_w: np.ndarray,
+    reconstructed_w: np.ndarray,
+    reconstructed_potential: np.ndarray,
+    lx: float,
+    ly: float,
+    order: int,
+) -> str:
+    """Summarize circulation, extrema/location, and divergence checks."""
+    nx, ny = reconstructed_w.shape
+    dx, dy = lx / nx, ly / ny
+
+    def circulation(field: np.ndarray) -> tuple[float, float, float]:
+        area = dx * dy
+        return (
+            float(np.sum(field) * area),
+            float(np.sum(np.maximum(field, 0)) * area),
+            float(np.sum(np.minimum(field, 0)) * area),
+        )
+
+    ref_circ = circulation(reference_w)
+    rec_circ = circulation(reconstructed_w)
+    ref_min = np.unravel_index(np.argmin(reference_w), reference_w.shape)
+    ref_max = np.unravel_index(np.argmax(reference_w), reference_w.shape)
+    rec_min = np.unravel_index(
+        np.argmin(reconstructed_w), reconstructed_w.shape
+    )
+    rec_max = np.unravel_index(
+        np.argmax(reconstructed_w), reconstructed_w.shape
+    )
+    min_shift = periodic_location_shift(
+        ref_min, rec_min, reconstructed_w.shape, lx, ly
+    )
+    max_shift = periodic_location_shift(
+        ref_max, rec_max, reconstructed_w.shape, lx, ly
+    )
+
+    # V is electrostatic potential. Its E×B velocity is
+    # (-dV/dy, dV/dx), which should be divergence-free.
+    velocity_x = -periodic_derivative(
+        reconstructed_potential, dy, axis=1, order=order
+    )
+    velocity_y = periodic_derivative(
+        reconstructed_potential, dx, axis=0, order=order
+    )
+    divergence = periodic_derivative(
+        velocity_x, dx, axis=0, order=order
+    ) + periodic_derivative(velocity_y, dy, axis=1, order=order)
+
+    return (
+        "Circulation Γ (total / positive / negative)\n"
+        f"ref: {ref_circ[0]:+.3e} / {ref_circ[1]:+.3e} / "
+        f"{ref_circ[2]:+.3e}\n"
+        f"rec: {rec_circ[0]:+.3e} / {rec_circ[1]:+.3e} / "
+        f"{rec_circ[2]:+.3e}\n\n"
+        "Extrema: value @ grid index (ix, iy)\n"
+        f"min ref: {reference_w[ref_min]:+.3e} @ {ref_min}\n"
+        f"min rec: {reconstructed_w[rec_min]:+.3e} @ {rec_min}\n"
+        f"max ref: {reference_w[ref_max]:+.3e} @ {ref_max}\n"
+        f"max rec: {reconstructed_w[rec_max]:+.3e} @ {rec_max}\n"
+        f"periodic shift min/max: {min_shift:.3e} / {max_shift:.3e}\n\n"
+        "div(E×B velocity), reconstructed V\n"
+        f"RMS: {np.sqrt(np.mean(divergence**2)):.3e}   "
+        f"max|.|: {np.max(np.abs(divergence)):.3e}"
+    )
+
+
 def plot_field(
     data: dict[str, np.ndarray],
     source: Path,
@@ -117,6 +289,9 @@ def plot_field(
     channel: int,
     dpi: int,
     image_format: str,
+    lx: float,
+    ly: float,
+    laplacian_order: int,
 ) -> Path:
     incoming = data["incoming_filtered_fine"][batch, channel]
     coarse = data["downsampled_coarse"][batch, channel]
@@ -149,7 +324,14 @@ def plot_field(
         ),
     )
 
-    fig, axes = plt.subplots(2, 4, figsize=(17, 8.5), constrained_layout=True)
+    is_vorticity = FIELD_NAMES[channel] == "W"
+    rows = 3 if is_vorticity else 2
+    fig, axes = plt.subplots(
+        rows,
+        4,
+        figsize=(17, 4.25 * rows),
+        constrained_layout=True,
+    )
     axes = axes.ravel()
     extent = (0, 1, 0, 1)
     for axis, (field, title, limit) in zip(axes, panels):
@@ -170,8 +352,8 @@ def plot_field(
 
     filtered_l2 = data["filtered_relative_l2"][batch, channel]
     dns_l2 = data["dns_relative_l2"][batch, channel]
-    axes[-1].axis("off")
-    axes[-1].text(
+    axes[7].axis("off")
+    axes[7].text(
         0.05,
         0.75,
         f"Filtered relative L2: {filtered_l2:.6e}\n"
@@ -182,6 +364,67 @@ def plot_field(
         family="monospace",
         fontsize=11,
     )
+    if is_vorticity:
+        reconstructed_vorticity = data["unet_reconstructed_dns"][batch, 2]
+        reconstructed_potential = data["unet_reconstructed_dns"][batch, 1]
+        potential_laplacian = periodic_laplacian(
+            reconstructed_potential, lx, ly, laplacian_order
+        )
+        consistency_error = reconstructed_vorticity - potential_laplacian
+        consistency_limit = symmetric_limit(
+            reconstructed_vorticity, potential_laplacian
+        )
+        consistency_panels = (
+            (reconstructed_vorticity, "Reconstructed W", consistency_limit),
+            (
+                potential_laplacian,
+                f"Laplacian(V), order {laplacian_order}",
+                consistency_limit,
+            ),
+            (
+                consistency_error,
+                "W - Laplacian(V)",
+                symmetric_limit(consistency_error),
+            ),
+        )
+        for axis, (field, title, limit) in zip(
+            axes[8:11], consistency_panels
+        ):
+            image = axis.imshow(
+                field.T,
+                origin="lower",
+                extent=extent,
+                cmap="RdBu_r",
+                vmin=-limit,
+                vmax=limit,
+                interpolation="nearest",
+                aspect="equal",
+            )
+            axis.set_title(title)
+            axis.set_xlabel("x / Lx")
+            axis.set_ylabel("z / Lz")
+            fig.colorbar(image, ax=axis, shrink=0.82)
+        relative_consistency = np.linalg.norm(consistency_error.ravel()) / max(
+            np.linalg.norm(reconstructed_vorticity.ravel()),
+            np.finfo(np.float64).tiny,
+        )
+        axes[11].axis("off")
+        axes[11].text(
+            0.01,
+            0.98,
+            f"W consistency relative L2:\n{relative_consistency:.6e}\n\n"
+            + vorticity_diagnostics(
+                reference_dns,
+                reconstructed_vorticity,
+                reconstructed_potential,
+                lx,
+                ly,
+                laplacian_order,
+            ),
+            va="top",
+            family="monospace",
+            fontsize=8,
+        )
     fig.suptitle(
         f"{FIELD_NAMES[channel]} reconstruction — step {data['pStep']}, "
         f"t={data['simtime']:g}, batch {batch}"
@@ -209,6 +452,22 @@ def main():
     images_written = 0
     for index, source in enumerate(files, 1):
         data = load_validation(source)
+        lx = args.lx if args.lx is not None else float(data["lx"])
+        ly = args.ly if args.ly is not None else float(data["ly"])
+        laplacian_order = (
+            args.laplacian_order
+            if args.laplacian_order is not None
+            else int(data["laplacian_order"])
+        )
+        if not np.isfinite(lx) or lx <= 0 or not np.isfinite(ly) or ly <= 0:
+            raise ValueError(
+                f"{source}: missing valid lx/ly metadata; provide --lx and --ly"
+            )
+        if laplacian_order not in (2, 4):
+            raise ValueError(
+                f"{source}: missing valid Laplacian order metadata; "
+                "provide --laplacian-order 2 or 4"
+            )
         for batch in range(data["incoming_filtered_fine"].shape[0]):
             for channel in range(len(FIELD_NAMES)):
                 plot_field(
@@ -219,6 +478,9 @@ def main():
                     channel,
                     args.dpi,
                     args.format,
+                    lx,
+                    ly,
+                    laplacian_order,
                 )
                 images_written += 1
         print(f"[{index}/{len(files)}] {source}")

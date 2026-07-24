@@ -32,7 +32,7 @@ from visualization_common import calculate_arakawa_terms
 
 HERE = Path(__file__).resolve().parent
 DEFAULT_CHECKPOINT = (
-    HERE / "germano_training_output_32_v7" / "checkpoints" / "best.pt"
+    HERE / "germano_training_output_32_v9" / "checkpoints" / "best.pt"
 )
 TERM_NAMES = ("J_V_W", "J_V_U")
 TERM_TITLES = (r"$J(\phi,\omega)$", r"$J(\phi,n)$")

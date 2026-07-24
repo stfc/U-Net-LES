@@ -67,6 +67,8 @@ def run_epoch(
     lambda_laplacian,
     inverse_cutoff_fraction,
     inverse_cutoff_order,
+    post_cutoff_fraction,
+    post_cutoff_order,
     learn_vorticity,
     laplacian_order,
     optimizer=None,
@@ -90,6 +92,7 @@ def run_epoch(
             "filtered_relative_l2",
             "dns_relative_l2",
             "spectrum_relative_l2",
+            "laplacian_relative_l2",
         ]
     }
     count = 0
@@ -119,6 +122,8 @@ def run_epoch(
                 lambda_laplacian,
                 inverse_cutoff_fraction,
                 inverse_cutoff_order,
+                post_cutoff_fraction,
+                post_cutoff_order,
                 learn_vorticity,
                 laplacian_order,
             )
@@ -132,6 +137,9 @@ def run_epoch(
                 totals[k] += vals[k].detach().item() * b
             totals["spectrum_relative_l2"] += (
                 vals["spectrum_relative_l2"].detach().item() * b
+            )
+            totals["laplacian_relative_l2"] += (
+                vals["laplacian_relative_l2"].detach().item() * b
             )
 
             totals["filtered_relative_l2"] += (
@@ -163,6 +171,7 @@ def configure_tensorboard(writer, normalize):
                     "filtered_relative_l2",
                     "dns_relative_l2",
                     "spectrum_relative_l2",
+                    "laplacian_relative_l2",
                 )
             },
             (
@@ -224,6 +233,18 @@ def parse_args():
     p.add_argument("--epochs", type=int, default=300)
     p.add_argument("--batch-size", type=int, default=4)
     p.add_argument("--learning-rate", type=float, default=2e-4)
+    p.add_argument(
+        "--learning-rate-step",
+        type=int,
+        default=25,
+        help="Epochs between stepwise learning-rate reductions (default: 25)",
+    )
+    p.add_argument(
+        "--learning-rate-gamma",
+        type=float,
+        default=0.5,
+        help="Learning-rate multiplier at each step (default: 0.5)",
+    )
     p.add_argument("--base-channels", type=int, default=24)
     p.add_argument(
         "--precision",
@@ -266,9 +287,30 @@ def parse_args():
         type=float,
         default=0.05,
         help=(
-            "Weight for the normalized L1 loss between predicted and target "
-            "Laplacians of potential (default: 0.05)"
+            "Weight for reconstructed-DNS relative-L2 consistency between W "
+            "and the Laplacian of V (default: 0.05)"
         ),
+    )
+    p.add_argument(
+        "--random-periodic-shift",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "Apply synchronized random periodic translations to training "
+            "U, V, and W fields (default: enabled)"
+        ),
+    )
+    p.add_argument(
+        "--periodic-x",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Declare the x direction periodic (default: enabled)",
+    )
+    p.add_argument(
+        "--periodic-y",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Declare the y direction periodic (default: enabled)",
     )
     p.add_argument(
         "--inverse-cutoff-fraction",
@@ -277,8 +319,23 @@ def parse_args():
         help="Smooth inverse cutoff as a fraction of Nyquist; 0 disables it",
     )
     p.add_argument("--inverse-cutoff-order", type=float, default=8.0)
+    p.add_argument(
+        "--post-cutoff-fraction",
+        type=float,
+        default=0.5,
+        help=(
+            "Post-inversion smooth cutoff as a fraction of Nyquist; "
+            "0 disables it (default: 0.5)"
+        ),
+    )
+    p.add_argument(
+        "--post-cutoff-order",
+        type=float,
+        default=8.0,
+        help="Post-inversion smooth cutoff order (default: 8)",
+    )
     p.add_argument("--num-workers", type=int, default=0)
-    p.add_argument("--save-every", type=int, default=50)
+    p.add_argument("--save-every", type=int, default=25)
     p.add_argument("--seed", type=int, default=7)
     p.add_argument("--resume", type=Path)
     p.add_argument(
@@ -306,7 +363,33 @@ def run_training(a):
         raise ValueError("inverse-cutoff-fraction must be in [0, 1].")
     if a.inverse_cutoff_order <= 0:
         raise ValueError("inverse-cutoff-order must be positive.")
+    if not 0 <= a.post_cutoff_fraction <= 1:
+        raise ValueError("post-cutoff-fraction must be in [0, 1].")
+    if a.post_cutoff_order <= 0:
+        raise ValueError("post-cutoff-order must be positive.")
+    if a.learning_rate_step <= 0:
+        raise ValueError("learning-rate-step must be positive.")
+    if not 0 < a.learning_rate_gamma <= 1:
+        raise ValueError("learning-rate-gamma must be in (0, 1].")
+    all_directions_periodic = a.periodic_x and a.periodic_y
+    use_random_periodic_shift = (
+        a.random_periodic_shift and all_directions_periodic
+    )
+    if a.random_periodic_shift and not all_directions_periodic:
+        nonperiodic = [
+            direction
+            for direction, periodic in (
+                ("x", a.periodic_x),
+                ("y", a.periodic_y),
+            )
+            if not periodic
+        ]
+        print(
+            "Random periodic shift disabled because not all directions are "
+            f"periodic (nonperiodic: {', '.join(nonperiodic)})."
+        )
     inverse_cutoff_fraction = a.inverse_cutoff_fraction or None
+    post_cutoff_fraction = a.post_cutoff_fraction or None
     a.output_dir.mkdir(parents=True, exist_ok=True)
     ckdir = a.output_dir / "checkpoints"
     ckdir.mkdir(exist_ok=True)
@@ -341,7 +424,7 @@ def run_training(a):
             "outputs, reconstructed DNS, and DNS losses use physical values."
         )
 
-    def ds(files):
+    def ds(files, random_periodic_shift=False):
         return GermanoSnapshotDataset(
             files,
             a.fields,
@@ -353,9 +436,12 @@ def run_training(a):
             mean_np,
             std_np,
             a.laplacian_order,
+            random_periodic_shift,
+            (a.periodic_x, a.periodic_y),
         )
 
-    train_ds, val_ds, test_ds = ds(tr), ds(va), ds(te)
+    train_ds = ds(tr, use_random_periodic_shift)
+    val_ds, test_ds = ds(va), ds(te)
     kw = dict(
         batch_size=a.batch_size,
         num_workers=a.num_workers,
@@ -380,6 +466,11 @@ def run_training(a):
     ).to(device=device, dtype=torch_dtype)
     opt = torch.optim.AdamW(
         model.parameters(), lr=a.learning_rate, weight_decay=1e-6
+    )
+    scheduler = torch.optim.lr_scheduler.StepLR(
+        opt,
+        step_size=a.learning_rate_step,
+        gamma=a.learning_rate_gamma,
     )
     mean = torch.from_numpy(mean_np).to(device)
     std = torch.from_numpy(std_np).to(device)
@@ -432,6 +523,18 @@ def run_training(a):
             )
         model.load_state_dict(c["model"])
         opt.load_state_dict(c["optimizer"])
+        if "scheduler" in c:
+            scheduler.load_state_dict(c["scheduler"])
+        else:
+            completed_epoch = int(c["epoch"])
+            resumed_lr = a.learning_rate * (
+                a.learning_rate_gamma
+                ** (completed_epoch // a.learning_rate_step)
+            )
+            for group in opt.param_groups:
+                group["lr"] = resumed_lr
+            scheduler.last_epoch = completed_epoch
+            scheduler._last_lr = [resumed_lr for _ in opt.param_groups]
         start = int(c["epoch"]) + 1
         best = float(c["validation_loss"])
         print("Resumed from epoch", start - 1)
@@ -446,6 +549,9 @@ def run_training(a):
         scale_factor=a.fine_n // a.coarse_n,
         optimizer="AdamW",
         optimizer_learning_rate=opt.param_groups[0]["lr"],
+        learning_rate_policy="StepLR",
+        learning_rate_step=a.learning_rate_step,
+        learning_rate_gamma=a.learning_rate_gamma,
         optimizer_weight_decay=opt.param_groups[0]["weight_decay"],
         optimizer_betas=opt.param_groups[0]["betas"],
         optimizer_epsilon=opt.param_groups[0]["eps"],
@@ -472,12 +578,24 @@ def run_training(a):
         ),
         convolution_padding="circular",
         interpolation_boundary="periodic",
+        periodic_directions={"x": a.periodic_x, "y": a.periodic_y},
+        all_directions_periodic=all_directions_periodic,
+        random_periodic_shift_requested=a.random_periodic_shift,
+        random_periodic_shift_enabled=use_random_periodic_shift,
+        training_augmentation=(
+            "synchronized_random_periodic_shift"
+            if use_random_periodic_shift
+            else "none"
+        ),
         inverse_regularization="smooth_exponential_cutoff",
         inverse_cutoff_wavenumber=(
             inverse_cutoff_fraction * np.pi / delta
             if inverse_cutoff_fraction is not None
             else None
         ),
+        post_filter="smooth_exponential_cutoff",
+        post_cutoff_fraction=post_cutoff_fraction,
+        post_cutoff_order=a.post_cutoff_order,
         physics_version=1,
         train_snapshots=len(tr),
         validation_snapshots=len(va),
@@ -510,6 +628,8 @@ def run_training(a):
             a.lambda_laplacian,
             inverse_cutoff_fraction,
             a.inverse_cutoff_order,
+            post_cutoff_fraction,
+            a.post_cutoff_order,
             a.learn_vorticity,
             a.laplacian_order,
             opt,
@@ -529,6 +649,8 @@ def run_training(a):
             a.lambda_laplacian,
             inverse_cutoff_fraction,
             a.inverse_cutoff_order,
+            post_cutoff_fraction,
+            a.post_cutoff_order,
             a.learn_vorticity,
             a.laplacian_order,
         )
@@ -545,10 +667,12 @@ def run_training(a):
             vm,
             opt.param_groups[0]["lr"],
         )
+        scheduler.step()
         c = {
             "epoch": epoch,
             "model": model.state_dict(),
             "optimizer": opt.state_dict(),
+            "scheduler": scheduler.state_dict(),
             "validation_loss": vm["total"],
             "alpha": alpha,
             "delta": delta,
@@ -580,8 +704,17 @@ def run_training(a):
             "lambda_dns": a.lambda_dns,
             "lambda_spectrum": a.lambda_spectrum,
             "lambda_laplacian": a.lambda_laplacian,
+            "learning_rate_step": a.learning_rate_step,
+            "learning_rate_gamma": a.learning_rate_gamma,
+            "periodic_x": a.periodic_x,
+            "periodic_y": a.periodic_y,
+            "all_directions_periodic": all_directions_periodic,
+            "random_periodic_shift_requested": a.random_periodic_shift,
+            "random_periodic_shift": use_random_periodic_shift,
             "inverse_cutoff_fraction": inverse_cutoff_fraction,
             "inverse_cutoff_order": a.inverse_cutoff_order,
+            "post_cutoff_fraction": post_cutoff_fraction,
+            "post_cutoff_order": a.post_cutoff_order,
             "precision": a.precision,
             "normalize": a.normalize,
         }
@@ -614,8 +747,11 @@ def run_training(a):
         a.ly,
         a.lambda_dns,
         a.lambda_spectrum,
+        a.lambda_laplacian,
         inverse_cutoff_fraction,
         a.inverse_cutoff_order,
+        post_cutoff_fraction,
+        a.post_cutoff_order,
         a.learn_vorticity,
         a.laplacian_order,
     )

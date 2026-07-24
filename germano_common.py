@@ -412,7 +412,8 @@ def calculate_training_statistics(
 class GermanoSnapshotDataset(Dataset):
     def __init__(
         self, files, field_names, fine_n, coarse_n, alpha, lx, ly, mean, std,
-        laplacian_order=2,
+        laplacian_order=2, random_periodic_shift=False,
+        periodic_directions=(True, True),
     ):
         self.files = list(files)
         self.field_names = tuple(field_names)
@@ -425,6 +426,13 @@ class GermanoSnapshotDataset(Dataset):
         self.std = std[0]
         self.dtype = mean.dtype
         self.laplacian_order = laplacian_order
+        self.periodic_directions = tuple(bool(v) for v in periodic_directions)
+        if len(self.periodic_directions) != 2:
+            raise ValueError("periodic_directions must contain x and y flags.")
+        self.random_periodic_shift = (
+            random_periodic_shift and all(self.periodic_directions)
+        )
+        self.scale_factor = fine_n // coarse_n
 
     def __len__(self):
         return len(self.files)
@@ -446,6 +454,17 @@ class GermanoSnapshotDataset(Dataset):
             self.coarse_n,
             dtype=self.dtype, laplacian_order=self.laplacian_order,
         )
+        if self.random_periodic_shift:
+            coarse_shift = tuple(
+                int(value)
+                for value in np.random.randint(0, self.coarse_n, size=2)
+            )
+            fine_shift = tuple(
+                value * self.scale_factor for value in coarse_shift
+            )
+            coarse = np.roll(coarse, coarse_shift, axis=(-2, -1))
+            fine = np.roll(fine, fine_shift, axis=(-2, -1))
+            dns = np.roll(dns, fine_shift, axis=(-2, -1))
         return (
             torch.from_numpy((coarse - self.mean) / self.std),
             torch.from_numpy((fine - self.mean) / self.std),
@@ -574,6 +593,8 @@ def calculate_losses(
     lambda_laplacian,
     inverse_cutoff_fraction,
     inverse_cutoff_order,
+    post_cutoff_fraction=0.5,
+    post_cutoff_order=8,
     learn_vorticity=False,
     laplacian_order=2,
 ):
@@ -606,6 +627,17 @@ def calculate_losses(
             pd_unconstrained[:, :1], pd_unconstrained[:, 1:2], lx, ly,
             laplacian_order=laplacian_order
         )
+    pd = spectral_cutoff_torch(
+        pd,
+        lx,
+        ly,
+        post_cutoff_fraction,
+        post_cutoff_order,
+    )
+    if not learn_vorticity:
+        pd = enforce_vorticity_from_potential_torch(
+            pd, lx, ly, laplacian_order
+        )
     lf = nn.functional.l1_loss(pn, filtered_target_normalised)
     dns_absolute_error = torch.abs((pd - dns_target) / dns_std)
     ld = dns_absolute_error.mean()
@@ -619,12 +651,8 @@ def calculate_losses(
         2: periodic_laplacian_2nd_torch,
         4: periodic_laplacian_4th_torch,
     }[laplacian_order]
-    predicted_laplacian = laplacian(pf[:, 1:2], lx, ly)
-    target_laplacian = laplacian(filtered_target[:, 1:2], lx, ly)
-    ll = nn.functional.l1_loss(
-        predicted_laplacian / dns_std[:, 2:3],
-        target_laplacian / dns_std[:, 2:3],
-    )
+    reconstructed_laplacian = laplacian(pd[:, 1:2], lx, ly)
+    ll = relative_l2(pd[:, 2:3], reconstructed_laplacian)
     spectrum_relative_l2 = relative_l2(target_energy, predicted_energy)
     total = (
         lf
@@ -640,6 +668,7 @@ def calculate_losses(
             "dns": ld,
             "spectrum": ls,
             "laplacian": ll,
+            "laplacian_relative_l2": ll,
             "spectrum_relative_l2": spectrum_relative_l2,
             "dns_U": dns_absolute_error[:, 0].mean(),
             "dns_V": dns_absolute_error[:, 1].mean(),

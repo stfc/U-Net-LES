@@ -2,6 +2,7 @@
 from __future__ import annotations
 import argparse, csv, json, os
 from pathlib import Path
+import matplotlib.pyplot as plt
 import numpy as np, torch
 from germano_common import *
 from visualization_common import (
@@ -114,6 +115,109 @@ def save_dns_centerline_plots(source, fields, dns, reconstructed, output_dir):
         plt.close(fig)
 
 
+def save_vorticity_consistency_plots(
+    source,
+    reconstructed,
+    lx,
+    ly,
+    laplacian_order,
+    output_dir,
+):
+    """Plot reconstructed W, Laplacian(V), and their consistency residual."""
+    laplacian = {
+        2: periodic_laplacian_2nd_numpy,
+        4: periodic_laplacian_4th_numpy,
+    }[laplacian_order]
+    vorticity = reconstructed[2]
+    potential_laplacian = laplacian(reconstructed[1], lx, ly)
+    difference = vorticity - potential_laplacian
+
+    field_limit = max(
+        float(np.max(np.abs(vorticity))),
+        float(np.max(np.abs(potential_laplacian))),
+    )
+    difference_limit = float(np.max(np.abs(difference)))
+    if field_limit == 0:
+        field_limit = 1.0
+    if difference_limit == 0:
+        difference_limit = np.finfo(difference.dtype).eps
+
+    fig, axes = plt.subplots(1, 3, figsize=(15.0, 4.5))
+    panels = (
+        (vorticity, r"Reconstructed $W$", field_limit),
+        (
+            potential_laplacian,
+            rf"$\nabla^2 V$ (order {laplacian_order})",
+            field_limit,
+        ),
+        (difference, r"$W-\nabla^2 V$", difference_limit),
+    )
+    for ax, (values, title, limit) in zip(axes, panels):
+        image = ax.imshow(
+            values.T,
+            origin="lower",
+            cmap="coolwarm",
+            vmin=-limit,
+            vmax=limit,
+            extent=(0, lx, 0, ly),
+            aspect="equal",
+        )
+        ax.set_title(title)
+        ax.set_xlabel("x")
+        ax.set_ylabel("y")
+        fig.colorbar(image, ax=ax, shrink=0.82)
+    fig.suptitle(f"Vorticity consistency: {source}")
+    fig.tight_layout()
+    fig.savefig(
+        output_dir / "W_Laplacian_V_difference.png",
+        dpi=180,
+        bbox_inches="tight",
+    )
+    plt.close(fig)
+
+    center_y = vorticity.shape[-1] // 2
+    x = np.arange(vorticity.shape[-2]) * lx / vorticity.shape[-2]
+    fig, axes = plt.subplots(2, 1, figsize=(9.0, 7.0), sharex=True)
+    axes[0].plot(
+        x,
+        vorticity[:, center_y],
+        linewidth=1.8,
+        label=r"Reconstructed $W$",
+    )
+    axes[0].plot(
+        x,
+        potential_laplacian[:, center_y],
+        "--",
+        linewidth=1.8,
+        label=rf"$\nabla^2 V$ (order {laplacian_order})",
+    )
+    axes[0].set_ylabel("vorticity")
+    axes[0].legend()
+    axes[1].plot(
+        x,
+        difference[:, center_y],
+        color="tab:red",
+        linewidth=1.8,
+        label=r"$W-\nabla^2 V$",
+    )
+    axes[1].axhline(0.0, color="black", linewidth=0.8, alpha=0.6)
+    axes[1].set_xlabel("x")
+    axes[1].set_ylabel("difference")
+    axes[1].legend()
+    for ax in axes:
+        ax.grid(True, alpha=0.3)
+    fig.suptitle(
+        f"Vorticity consistency centerline, y index {center_y}: {source}"
+    )
+    fig.tight_layout()
+    fig.savefig(
+        output_dir / "W_Laplacian_V_difference_centerlines.png",
+        dpi=180,
+        bbox_inches="tight",
+    )
+    plt.close(fig)
+
+
 def parse_args():
     p = argparse.ArgumentParser()
     p.add_argument("--checkpoint", type=Path, required=True)
@@ -205,10 +309,14 @@ def main():
         )
     )
     post_cutoff_fraction = optional_environment_float(
-        "PBOUT_UNET_POST_CUTOFF_FRACTION", 0.5
+        "PBOUT_UNET_POST_CUTOFF_FRACTION",
+        c.get("post_cutoff_fraction", 0.5),
     )
     post_cutoff_order = float(
-        os.environ.get("PBOUT_UNET_POST_CUTOFF_ORDER", 8.0)
+        os.environ.get(
+            "PBOUT_UNET_POST_CUTOFF_ORDER",
+            c.get("post_cutoff_order", 8.0),
+        )
     )
     requested_vorticity_from_potential = environment_bool(
         "PBOUT_UNET_VORTICITY_FROM_POTENTIAL", True
@@ -353,6 +461,14 @@ def main():
         out = a.output_dir / p.stem
         out.mkdir(parents=True, exist_ok=True)
         save_dns_centerline_plots(p.name, fields, dns, pd_np, out)
+        save_vorticity_consistency_plots(
+            p.name,
+            pd_np,
+            lx,
+            ly,
+            laplacian_order,
+            out,
+        )
         reconstruction = {
             "dns_256": dns,
             "filtered_256": fine,

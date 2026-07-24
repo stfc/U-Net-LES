@@ -99,7 +99,7 @@ from visualization_common import (
 _HERE = Path(__file__).resolve().parent
 _DEFAULT_CHECKPOINT = (
     _HERE
-    / "results/germano_training_output_32_v7/checkpoints/best.pt"
+    / "results/germano_training_output_v9/checkpoints/best.pt"
 )
 CHECKPOINT = Path(os.environ.get("PBOUT_UNET_CHECKPOINT", _DEFAULT_CHECKPOINT))
 _dns_path = os.environ.get("PBOUT_UNET_DNS_PATH")
@@ -375,10 +375,14 @@ CUTOFF_ORDER = float(
     )
 )
 POST_CUTOFF_FRACTION = _optional_float(
-    "PBOUT_UNET_POST_CUTOFF_FRACTION", 0.5
+    "PBOUT_UNET_POST_CUTOFF_FRACTION",
+    _checkpoint.get("post_cutoff_fraction", 0.5),
 )
 POST_CUTOFF_ORDER = float(
-    os.environ.get("PBOUT_UNET_POST_CUTOFF_ORDER", 8.0)
+    os.environ.get(
+        "PBOUT_UNET_POST_CUTOFF_ORDER",
+        _checkpoint.get("post_cutoff_order", 8.0),
+    )
 )
 
 def _arakawa_bracket(f: torch.Tensor, g: torch.Tensor, dx: float, dy: float):
@@ -571,6 +575,9 @@ def _save_dns_init_unet_validation(
         output_path,
         pStep=np.asarray(time_step),
         simtime=np.asarray(simtime),
+        lx=np.asarray(LX),
+        ly=np.asarray(LY),
+        laplacian_order=np.asarray(LAPLACIAN_ORDER),
         filtered_relative_l2=relative_l2(
             numpy_arrays["incoming_filtered_fine"],
             numpy_arrays["unet_filtered_fine"],

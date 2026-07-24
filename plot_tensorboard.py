@@ -19,6 +19,7 @@ PLOT_GROUPS = {
         "filtered_relative_l2",
         "dns_relative_l2",
         "spectrum_relative_l2",
+        "laplacian_relative_l2",
     ),
     "dns_field_losses": ("dns_U", "dns_V", "dns_W"),
 }
@@ -30,7 +31,7 @@ PANEL_LAYOUT = [
         "filtered_relative_l2",
         "dns_relative_l2",
         "spectrum_relative_l2",
-        ".",
+        "laplacian_relative_l2",
     ],
     [
         "dns_U",
@@ -117,6 +118,7 @@ def plot_all_metrics(
         "filtered_relative_l2",
         "dns_relative_l2",
         "spectrum_relative_l2",
+        "laplacian_relative_l2",
         "dns_U",
         "dns_V",
         "dns_W",
@@ -171,6 +173,10 @@ def plot_all_metrics(
         "\n\n"
         r"$L_{2,\mathrm{relative}}"
         r"=\dfrac{\|\hat{q}-q\|_2}{\|q\|_2}$"
+        "\n\n"
+        r"$\mathcal{L}_{\nabla^2\phi}"
+        r"=\dfrac{\|\nabla^2\hat{\phi}-\hat{\omega}\|_2}"
+        r"{\|\hat{\omega}\|_2}$"
         "\n\n"
         r"$\lambda_{filtered}=1$"
         "\n"
