@@ -131,7 +131,7 @@ def save_field_error_images(
     reference: np.ndarray,
     field_names,
     output_path: Path,
-    title_prefix: str = "Reconstructed DNS − target DNS",
+    title_prefix: str = "Unet − DNS",
 ) -> Path:
     """Save per-channel signed-error images with symmetric color limits."""
     error = reconstructed - reference

@@ -440,8 +440,21 @@ def parse_args():
         "--output-dir", type=Path, default=Path("germano_training_output")
     )
     p.add_argument("--fields", nargs=3, default=list(HW_FIELD_NAMES))
-    p.add_argument("--fine-n", type=int, default=256)
-    p.add_argument("--coarse-n", type=int, default=32)
+    p.add_argument(
+        "--fine-n",
+        type=int,
+        default=256,
+        help="DNS grid resolution per direction (default: 256)",
+    )
+    p.add_argument(
+        "--coarse-n",
+        type=int,
+        default=64,
+        help=(
+            "LES grid resolution per direction; must divide --fine-n "
+            "(default: 64)"
+        ),
+    )
     p.add_argument("--lx", type=float, default=2 * np.pi)
     p.add_argument("--ly", type=float, default=2 * np.pi)
     p.add_argument(
@@ -560,8 +573,7 @@ def run_training(a):
     numpy_dtype = getattr(np, a.precision)
     if tuple(a.fields) != HW_FIELD_NAMES:
         raise ValueError(f"Hasegawa-Wakatani fields must be {HW_FIELD_NAMES}.")
-    if a.fine_n != 8 * a.coarse_n:
-        raise ValueError("Current model requires fine_n = 8 * coarse_n.")
+    scale_factor = validate_grid_pair(a.fine_n, a.coarse_n)
     if a.alpha is not None and (not np.isfinite(a.alpha) or a.alpha < 0):
         raise ValueError("alpha must be finite and non-negative.")
     if not 0 <= a.inverse_cutoff_fraction <= 1:
@@ -664,7 +676,7 @@ def run_training(a):
     model = ResidualUNetSR(
         len(a.fields),
         a.base_channels,
-        a.fine_n // a.coarse_n,
+        scale_factor,
         model_output_channels,
     ).to(device=device, dtype=torch_dtype)
     opt = torch.optim.AdamW(
@@ -723,7 +735,7 @@ def run_training(a):
         a,
         alpha=alpha,
         grid_spacing=delta,
-        scale_factor=a.fine_n // a.coarse_n,
+        scale_factor=scale_factor,
         optimizer="AdamW",
         optimizer_learning_rate=opt.param_groups[0]["lr"],
         learning_rate_policy="StepLR",

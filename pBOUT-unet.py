@@ -79,6 +79,7 @@ from germano_common import (
     load_checkpoint,
     spectral_cutoff_torch,
     validate_hw_checkpoint,
+    validate_grid_pair,
 )
 from visualization_common import (
     arakawa_bracket as shared_arakawa_bracket,
@@ -316,13 +317,12 @@ NUMPY_DTYPE = getattr(np, PRECISION)
 VORTICITY_MODE = "learned_channel"
 DNS_VORTICITY_MODE = "independent_channel"
 OUTPUT_CHANNELS = int(_checkpoint["model_output_channels"])
-if FINE_N % COARSE_N:
-    raise ValueError("Checkpoint fine_n must be divisible by coarse_n")
+SCALE_FACTOR = validate_grid_pair(FINE_N, COARSE_N)
 
 MODEL = None
 if not DNS_INIT or DNS_INIT_DOWNSAMPLE:
     MODEL = ResidualUNetSR(
-        len(FIELD_NAMES), BASE_CHANNELS, FINE_N // COARSE_N, OUTPUT_CHANNELS
+        len(FIELD_NAMES), BASE_CHANNELS, SCALE_FACTOR, OUTPUT_CHANNELS
     ).to(device=DEVICE, dtype=TORCH_DTYPE)
     MODEL.load_state_dict(_checkpoint["model"])
     MODEL.eval()

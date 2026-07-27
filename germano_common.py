@@ -44,6 +44,27 @@ def validate_hw_checkpoint(checkpoint: dict) -> None:
         )
     if checkpoint.get("model_output_channels") != 3:
         raise ValueError("Independent-P checkpoints require three model outputs.")
+    validate_grid_pair(
+        int(checkpoint["fine_n"]),
+        int(checkpoint["coarse_n"]),
+    )
+
+
+def validate_grid_pair(fine_n: int, coarse_n: int) -> int:
+    """Validate a DNS/LES grid pair and return its refinement ratio."""
+    if fine_n <= 0 or coarse_n <= 0:
+        raise ValueError("DNS fine_n and LES coarse_n must be positive.")
+    if coarse_n > fine_n:
+        raise ValueError("LES coarse_n cannot exceed DNS fine_n.")
+    if fine_n % coarse_n:
+        raise ValueError(
+            "DNS fine_n must be an integer multiple of LES coarse_n."
+        )
+    if fine_n % 8:
+        raise ValueError(
+            "DNS fine_n must be divisible by 8 for the three-level U-Net."
+        )
+    return fine_n // coarse_n
 
 
 def set_seed(seed: int) -> None:
