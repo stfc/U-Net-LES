@@ -16,18 +16,16 @@ conda activate py311
 
 python train_germano_unet.py \
   --dataset ../../data/BOUT_runs/HW_2D/Papers/PoP23/HW_N256/fields/ \
-  --output-dir germano_training_output_32_v10 \
+  --output-dir germano_training_output_32_v11 \
   --epochs 300 \
   --batch-size 4 \
   --coarse-n 32 \
-  --alpha-factor 8.0 \
+  --alpha 1.568 \
   --precision float64 \
   --lx 50.176 \
   --ly 50.176 \
   --lambda-spectrum 10.0 \
-  --lambda-laplacian 1 \
   --no-normalize \
-  --post-cutoff-fraction 0.4 \
-  --invert-derived-vorticity
+  --save-every 5
 
 #python infer_germano_unet.py --checkpoint germano_training_output_32_v3/checkpoints/best.pt --input fields_HW_run0_time501.npz --output-dir inference_output

@@ -11,17 +11,15 @@ not need an argument parser::
 
   PBOUT_UNET_CHECKPOINT=/path/to/best.pt
   PBOUT_UNET_DNS_PATH=/path/to/dns_snapshot.npz
-  PBOUT_UNET_ALPHA=10                    # same units as --alpha-factor
+  PBOUT_UNET_ALPHA=0.25                  # physical Germano filter width
   PBOUT_UNET_DNS_INIT=1                  # full-resolution, inverse-only DNS mode
   PBOUT_UNET_DNS_INIT_DOWNSAMPLE=1       # downsample fine state and call U-Net
-  PBOUT_UNET_RECONSTRUCT_CHANNELS=U,V,W   # U-Net channels; others stay incoming
+  PBOUT_UNET_RECONSTRUCT_CHANNELS=U,V,P   # U-Net channels; others stay incoming
   PBOUT_UNET_DEVICE=cuda                 # or cpu; default is automatic
   PBOUT_UNET_IMPLICIT=1                  # return -(DNS-LES) brackets
-  PBOUT_UNET_VORTICITY_FROM_POTENTIAL=1  # enforce vort = Laplacian(phi)
-  PBOUT_UNET_LAPLACIAN_ORDER=2            # override checkpoint order (2 or 4)
-  PBOUT_UNET_INVERSE_CUTOFF_FRACTION=0.75
+  PBOUT_UNET_INVERSE_CUTOFF_FRACTION=none
   PBOUT_UNET_INVERSE_CUTOFF_ORDER=8
-  PBOUT_UNET_POST_CUTOFF_FRACTION=0.5    # suppress post-inversion noise
+  PBOUT_UNET_POST_CUTOFF_FRACTION=none
   PBOUT_UNET_POST_CUTOFF_ORDER=8
 
 The cutoff variables override checkpoint values.  Set the fraction to ``none``
@@ -76,9 +74,6 @@ from germano_common import (
     ResidualUNetSR,
     filter_snapshot,
     germano_filter,
-    enforce_vorticity_from_potential_torch,
-    hw_fields_numpy,
-    hw_fields_torch,
     inverse_germano_torch,
     load_dns_snapshot,
     load_checkpoint,
@@ -120,10 +115,6 @@ BOUT_INPUT = Path(
 IMPLICIT = os.environ.get("PBOUT_UNET_IMPLICIT", "1").lower() not in {
     "0", "false", "no", "off"
 }
-VORTICITY_FROM_POTENTIAL = os.environ.get(
-    "PBOUT_UNET_VORTICITY_FROM_POTENTIAL", "1"
-).lower() not in {"0", "false", "no", "off"}
-
 _BOUT_OUTPUT_TIMESTEP = None
 _LAST_FIELD_OUTPUT_INDEX = -1
 
@@ -245,12 +236,7 @@ def _print_init_metadata(initial_state: str) -> None:
         "implicit": IMPLICIT,
         "vorticity_mode": VORTICITY_MODE,
         "dns_vorticity_mode": DNS_VORTICITY_MODE,
-        "invert_derived_vorticity": INVERT_DERIVED_VORTICITY,
-        "vorticity_operator": VORTICITY_OPERATOR,
-        "checkpoint_laplacian_order": CHECKPOINT_LAPLACIAN_ORDER,
-        "laplacian_order": LAPLACIAN_ORDER,
-        "learn_vorticity": LEARN_VORTICITY,
-        "vorticity_from_potential": VORTICITY_FROM_POTENTIAL,
+        "vorticity_operator": "learned_independent_channel",
         "field_names": FIELD_NAMES,
         "reconstruct_channels": RECONSTRUCT_CHANNELS,
         "model_output_channels": OUTPUT_CHANNELS,
@@ -258,8 +244,7 @@ def _print_init_metadata(initial_state: str) -> None:
         "coarse_n": COARSE_N,
         "lx": LX,
         "ly": LY,
-        "alpha_factor": ALPHA_FACTOR,
-        "alpha_physical": ALPHA,
+        "alpha": ALPHA,
         "base_channels": BASE_CHANNELS,
         "inverse_cutoff_fraction": CUTOFF_FRACTION,
         "inverse_cutoff_order": CUTOFF_ORDER,
@@ -314,15 +299,13 @@ FINE_N = int(_checkpoint["fine_n"])
 COARSE_N = int(_checkpoint["coarse_n"])
 LX = float(_checkpoint["lx"])
 LY = float(_checkpoint["ly"])
-DNS_GRID_SPACING = LX / FINE_N
-_alpha_factor_override = os.environ.get("PBOUT_UNET_ALPHA")
-if _alpha_factor_override is None:
-    ALPHA = float(_checkpoint["alpha"])
-    ALPHA_FACTOR = ALPHA / DNS_GRID_SPACING
-else:
-    ALPHA_FACTOR = float(_alpha_factor_override)
-    ALPHA = ALPHA_FACTOR * DNS_GRID_SPACING
-if not np.isfinite(ALPHA_FACTOR) or ALPHA_FACTOR < 0:
+_alpha_override = os.environ.get("PBOUT_UNET_ALPHA")
+ALPHA = (
+    float(_checkpoint["alpha"])
+    if _alpha_override is None
+    else float(_alpha_override)
+)
+if not np.isfinite(ALPHA) or ALPHA < 0:
     raise ValueError("PBOUT_UNET_ALPHA must be finite and non-negative")
 BASE_CHANNELS = int(_checkpoint["base_channels"])
 PRECISION = _checkpoint.get("precision", "float32")
@@ -330,55 +313,9 @@ if PRECISION not in ("float32", "float64"):
     raise ValueError(f"Unsupported checkpoint precision: {PRECISION}")
 TORCH_DTYPE = getattr(torch, PRECISION)
 NUMPY_DTYPE = getattr(np, PRECISION)
-VORTICITY_MODE = _checkpoint.get("vorticity_mode", "potential_laplacian")
-INVERT_DERIVED_VORTICITY = bool(
-    _checkpoint.get(
-        "invert_derived_vorticity",
-        _checkpoint.get("training_parameters", {}).get(
-            "invert_derived_vorticity", False
-        ),
-    )
-)
-DNS_VORTICITY_MODE = _checkpoint.get(
-    "dns_vorticity_mode",
-    _checkpoint.get("training_parameters", {}).get(
-        "dns_vorticity_mode",
-        "inverse_filtered_potential_laplacian"
-        if INVERT_DERIVED_VORTICITY
-        else VORTICITY_MODE,
-    ),
-)
-VORTICITY_OPERATOR = _checkpoint.get(
-    "vorticity_operator",
-    _checkpoint.get("training_parameters", {}).get(
-        "vorticity_operator", "fourth_order_periodic_laplacian"
-    ),
-)
-CHECKPOINT_LAPLACIAN_ORDER = int(
-    _checkpoint.get(
-        "laplacian_order",
-        2 if VORTICITY_OPERATOR == "second_order_periodic_laplacian" else 4,
-    )
-)
-LAPLACIAN_ORDER = int(
-    os.environ.get("PBOUT_UNET_LAPLACIAN_ORDER", CHECKPOINT_LAPLACIAN_ORDER)
-)
-if LAPLACIAN_ORDER not in (2, 4):
-    raise ValueError("PBOUT_UNET_LAPLACIAN_ORDER must be 2 or 4")
-LEARN_VORTICITY = VORTICITY_MODE == "learned_channel"
-if LEARN_VORTICITY and INVERT_DERIVED_VORTICITY:
-    raise ValueError(
-        "Checkpoint cannot both learn W independently and request inversion "
-        "of W derived from filtered V."
-    )
-if (
-    "PBOUT_UNET_VORTICITY_FROM_POTENTIAL" not in os.environ
-    and INVERT_DERIVED_VORTICITY
-):
-    VORTICITY_FROM_POTENTIAL = False
-OUTPUT_CHANNELS = int(
-    _checkpoint.get("model_output_channels", 3 if LEARN_VORTICITY else 2)
-)
+VORTICITY_MODE = "learned_channel"
+DNS_VORTICITY_MODE = "independent_channel"
+OUTPUT_CHANNELS = int(_checkpoint["model_output_channels"])
 if FINE_N % COARSE_N:
     raise ValueError("Checkpoint fine_n must be divisible by coarse_n")
 
@@ -395,7 +332,7 @@ MEAN = torch.as_tensor(_checkpoint["mean"], dtype=TORCH_DTYPE, device=DEVICE)
 STD = torch.as_tensor(_checkpoint["std"], dtype=TORCH_DTYPE, device=DEVICE)
 CUTOFF_FRACTION = _optional_float(
     "PBOUT_UNET_INVERSE_CUTOFF_FRACTION",
-    _checkpoint.get("inverse_cutoff_fraction", 0.75),
+    _checkpoint.get("inverse_cutoff_fraction"),
 )
 CUTOFF_ORDER = float(
     os.environ.get(
@@ -405,7 +342,7 @@ CUTOFF_ORDER = float(
 )
 POST_CUTOFF_FRACTION = _optional_float(
     "PBOUT_UNET_POST_CUTOFF_FRACTION",
-    _checkpoint.get("post_cutoff_fraction", 0.5),
+    _checkpoint.get("post_cutoff_fraction"),
 )
 POST_CUTOFF_ORDER = float(
     os.environ.get(
@@ -506,18 +443,7 @@ def _reconstruct_dns(
         )
     normalised = (coarse - MEAN) / STD
     predicted = MODEL(normalised)
-    if LEARN_VORTICITY:
-        filtered_fine = predicted * STD + MEAN
-    else:
-        uv = predicted * STD[:, :2] + MEAN[:, :2]
-        filtered_fine = hw_fields_torch(
-            uv[:, :1], uv[:, 1:2], LX, LY,
-            laplacian_order=LAPLACIAN_ORDER
-        )
-    if VORTICITY_FROM_POTENTIAL:
-        filtered_fine = enforce_vorticity_from_potential_torch(
-            filtered_fine, LX, LY, LAPLACIAN_ORDER
-        )
+    filtered_fine = predicted * STD + MEAN
     inverse_input = spectral_cutoff_torch(
         filtered_fine, LX, LY, CUTOFF_FRACTION, CUTOFF_ORDER
     )
@@ -536,25 +462,10 @@ def _reconstruct_dns(
         inverse_input = torch.where(
             reconstruct_mask, inverse_input, incoming_filtered_fine
         )
-    # Vorticity enforcement is authoritative. Channel selection chooses the
-    # effective U and V fields, but W is always derived from that effective V
-    # when PBOUT_UNET_VORTICITY_FROM_POTENTIAL is enabled.
-    if VORTICITY_FROM_POTENTIAL:
-        inverse_input = enforce_vorticity_from_potential_torch(
-            inverse_input, LX, LY, LAPLACIAN_ORDER
-        )
     dns = inverse_germano_torch(inverse_input, ALPHA, LX, LY)
-    if VORTICITY_FROM_POTENTIAL:
-        dns = enforce_vorticity_from_potential_torch(
-            dns, LX, LY, LAPLACIAN_ORDER
-        )
     dns = spectral_cutoff_torch(
         dns, LX, LY, POST_CUTOFF_FRACTION, POST_CUTOFF_ORDER
     )
-    if VORTICITY_FROM_POTENTIAL:
-        dns = enforce_vorticity_from_potential_torch(
-            dns, LX, LY, LAPLACIAN_ORDER
-        )
     return dns, inverse_input
 
 
@@ -562,10 +473,6 @@ def _reconstruct_dns(
 def _inverse_germano_only(filtered_fields: torch.Tensor) -> torch.Tensor:
     """Reconstruct DNS fields directly, without the U-Net or grid resizing."""
     dns = inverse_germano_torch(filtered_fields, ALPHA, LX, LY)
-    if VORTICITY_FROM_POTENTIAL:
-        dns = enforce_vorticity_from_potential_torch(
-            dns, LX, LY, LAPLACIAN_ORDER
-        )
     return dns
 
 
@@ -606,8 +513,6 @@ def _save_dns_init_unet_validation(
         simtime=np.asarray(simtime),
         lx=np.asarray(LX),
         ly=np.asarray(LY),
-        laplacian_order=np.asarray(LAPLACIAN_ORDER),
-        invert_derived_vorticity=np.asarray(INVERT_DERIVED_VORTICITY),
         dns_vorticity_mode=np.asarray(DNS_VORTICITY_MODE),
         filtered_relative_l2=relative_l2(
             numpy_arrays["incoming_filtered_fine"],
@@ -671,8 +576,8 @@ def initFlow(npv):
 
     If ``PBOUT_UNET_DNS_INIT`` is enabled, ``PBOUT_UNET_DNS_PATH`` must point
     to a snapshot at the checkpoint's DNS resolution.  Its U and V fields are
-    differentially filtered, P is recomputed from the filtered V field, and
-    the result is returned at DNS resolution without calling the U-Net.
+    independently differentially filtered and returned at DNS resolution
+    without calling the U-Net.
 
     If ``PBOUT_UNET_DNS_PATH`` is set, load the ``U`` (density) and ``V``
     (potential) arrays from that ``.npz`` DNS snapshot, apply the checkpoint's
@@ -695,20 +600,12 @@ def initFlow(npv):
                 "Set PBOUT_UNET_DNS_PATH to an existing .npz file."
             )
         reference_fields = _load_dns_uvp(DNS_PATH)
-        filtered_density = germano_filter(
-            reference_fields[0], ALPHA, LX, LY
-        )
-        filtered_potential = germano_filter(
-            reference_fields[1], ALPHA, LX, LY
-        )
-        fields = hw_fields_numpy(
-            filtered_density,
-            filtered_potential,
-            LX,
-            LY,
-            dtype=NUMPY_DTYPE,
-            laplacian_order=LAPLACIAN_ORDER,
-        )
+        fields = np.stack(
+            [
+                germano_filter(channel, ALPHA, LX, LY)
+                for channel in reference_fields
+            ]
+        ).astype(NUMPY_DTYPE)
 
         fields_output, fields_spectrum_output = save_initial_dns_fields(
             fields,
@@ -739,8 +636,7 @@ def initFlow(npv):
         print(
             f"Initialized BOUT++ from filtered DNS snapshot {DNS_PATH};\n"
             f"resolution={FINE_N}, Lx={LX}, Ly={LY};\n"
-            f"differential filter alpha-factor={ALPHA_FACTOR:g} "
-            f"(physical alpha={ALPHA:g}); fields were not resized "
+            f"differential filter alpha={ALPHA:g}; fields were not resized "
             f"during initialization; {integration_mode}"
             f"saved filtered and original DNS fields to {fields_output};\n"
             f"saved their spectra to {fields_spectrum_output};\n"

@@ -23,7 +23,6 @@ import torch
 from germano_common import (
     HW_FIELD_NAMES,
     germano_filter,
-    hw_fields_numpy,
     load_checkpoint,
     load_dns_snapshot,
 )
@@ -129,14 +128,10 @@ def main() -> None:
         args.input, field_names, fine_n, lx, ly, dtype=dtype
     )
 
-    # Filter the primitive DNS fields and reconstruct vorticity at the same N.
-    filtered_dns = hw_fields_numpy(
-        germano_filter(dns[0], alpha, lx, ly),
-        germano_filter(dns[1], alpha, lx, ly),
-        lx,
-        ly,
-        dtype=dtype,
-    )
+    # Filter all DNS fields independently at the same resolution.
+    filtered_dns = np.stack(
+        [germano_filter(channel, alpha, lx, ly) for channel in dns]
+    ).astype(dtype)
     dns_terms = calculate_arakawa_terms(dns, lx, ly)
     from_filtered_fields = calculate_arakawa_terms(filtered_dns, lx, ly)
     filtered_dns_terms = tuple(

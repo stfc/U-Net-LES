@@ -10,6 +10,12 @@ import numpy as np, torch
 from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
 from germano_common import *
+from visualization_common import (
+    save_field_centerline_comparison,
+    save_field_error_images,
+    save_field_images,
+    save_field_spectrum_comparison,
+)
 
 
 def save_training_sample_diagnostics(
@@ -21,7 +27,6 @@ def save_training_sample_diagnostics(
     lx,
     ly,
     dtype,
-    laplacian_order,
     output_dir,
 ):
     """Save one deterministic DNS/filter/downsampling training example."""
@@ -32,7 +37,6 @@ def save_training_sample_diagnostics(
         lx,
         ly,
         dtype=dtype,
-        laplacian_order=laplacian_order,
     )
     coarse, filtered = filter_snapshot(
         dns,
@@ -41,7 +45,6 @@ def save_training_sample_diagnostics(
         ly,
         coarse_n,
         dtype=dtype,
-        laplacian_order=laplacian_order,
     )
     output_dir.mkdir(parents=True, exist_ok=True)
     stages = (
@@ -64,7 +67,7 @@ def save_training_sample_diagnostics(
                 origin="lower",
                 extent=(0.0, lx, 0.0, ly),
                 aspect="equal",
-                cmap={"U": "Blues", "V": "RdBu_r", "W": "hot"}.get(
+                cmap={"U": "Blues", "V": "RdBu_r", "P": "hot"}.get(
                     name, "viridis"
                 ),
             )
@@ -148,6 +151,100 @@ def save_training_sample_diagnostics(
     return fields_path, centerline_path, spectra_path
 
 
+@torch.inference_mode()
+def save_epoch_diagnostics(
+    epoch,
+    model,
+    dataset,
+    device,
+    mean,
+    std,
+    dns_std,
+    alpha,
+    lx,
+    ly,
+    lambda_dns,
+    lambda_spectrum,
+    inverse_cutoff_fraction,
+    inverse_cutoff_order,
+    post_cutoff_fraction,
+    post_cutoff_order,
+    field_names,
+    output_root,
+):
+    """Save model and DNS diagnostics for a fixed validation snapshot."""
+    coarse, filtered_target, dns_target = dataset[0]
+    coarse_batch = coarse.unsqueeze(0).to(device)
+    filtered_batch = filtered_target.unsqueeze(0).to(device)
+    dns_batch = dns_target.unsqueeze(0).to(device)
+    model.eval()
+    _, _, predicted_filtered, reconstructed_dns = calculate_losses(
+        model,
+        coarse_batch,
+        filtered_batch,
+        dns_batch,
+        mean,
+        std,
+        dns_std,
+        alpha,
+        lx,
+        ly,
+        lambda_dns,
+        lambda_spectrum,
+        inverse_cutoff_fraction,
+        inverse_cutoff_order,
+        post_cutoff_fraction,
+        post_cutoff_order,
+    )
+    coarse_physical = (coarse_batch * std + mean)[0].cpu().numpy()
+    predicted_filtered = predicted_filtered[0].cpu().numpy()
+    reconstructed_dns = reconstructed_dns[0].cpu().numpy()
+    dns_target = dns_batch[0].cpu().numpy()
+
+    output_dir = output_root / f"epoch_{epoch:05d}"
+    output_dir.mkdir(parents=True, exist_ok=True)
+    save_field_images(
+        coarse_physical,
+        field_names,
+        output_dir / "unet_input.png",
+        "U-Net input",
+    )
+    save_field_images(
+        predicted_filtered,
+        field_names,
+        output_dir / "unet_output.png",
+        "U-Net output",
+    )
+    save_field_images(
+        reconstructed_dns,
+        field_names,
+        output_dir / "reconstructed_dns.png",
+        "Reconstructed DNS",
+    )
+    save_field_error_images(
+        reconstructed_dns,
+        dns_target,
+        field_names,
+        output_dir / "dns_error.png",
+    )
+    save_field_centerline_comparison(
+        reconstructed_dns,
+        dns_target,
+        field_names,
+        output_dir / "dns_centerlines.png",
+    )
+    save_field_spectrum_comparison(
+        reconstructed_dns,
+        dns_target,
+        field_names,
+        lx,
+        ly,
+        output_dir / "dns_spectra.png",
+        post_cutoff_fraction,
+    )
+    print(f"Saved epoch {epoch} validation images to {output_dir}.")
+
+
 class Tee:
     """Write a text stream to both the terminal and a log file."""
 
@@ -201,14 +298,10 @@ def run_epoch(
     ly,
     lambda_dns,
     lambda_spectrum,
-    lambda_laplacian,
     inverse_cutoff_fraction,
     inverse_cutoff_order,
     post_cutoff_fraction,
     post_cutoff_order,
-    learn_vorticity,
-    laplacian_order,
-    invert_derived_vorticity,
     optimizer=None,
 ):
     training = optimizer is not None
@@ -218,10 +311,9 @@ def run_epoch(
         "filtered",
         "dns",
         "spectrum",
-        "laplacian",
         "dns_U",
         "dns_V",
-        "dns_W",
+        "dns_P",
     ]
     totals = {
         name: 0.0
@@ -230,7 +322,6 @@ def run_epoch(
             "filtered_relative_l2",
             "dns_relative_l2",
             "spectrum_relative_l2",
-            "laplacian_relative_l2",
         ]
     }
     count = 0
@@ -257,14 +348,10 @@ def run_epoch(
                 ly,
                 lambda_dns,
                 lambda_spectrum,
-                lambda_laplacian,
                 inverse_cutoff_fraction,
                 inverse_cutoff_order,
                 post_cutoff_fraction,
                 post_cutoff_order,
-                learn_vorticity,
-                laplacian_order,
-                invert_derived_vorticity,
             )
             if training:
                 loss.backward()
@@ -276,9 +363,6 @@ def run_epoch(
                 totals[k] += vals[k].detach().item() * b
             totals["spectrum_relative_l2"] += (
                 vals["spectrum_relative_l2"].detach().item() * b
-            )
-            totals["laplacian_relative_l2"] += (
-                vals["laplacian_relative_l2"].detach().item() * b
             )
 
             totals["filtered_relative_l2"] += (
@@ -299,7 +383,7 @@ def configure_tensorboard(writer, normalize):
                     "Multiline",
                     [f"metrics/train/{name}", f"metrics/validation/{name}"],
                 ]
-                for name in ("total", "filtered", "dns", "spectrum", "laplacian")
+                for name in ("total", "filtered", "dns", "spectrum")
             },
             "Relative L2": {
                 name.replace("_", " ").title(): [
@@ -310,7 +394,6 @@ def configure_tensorboard(writer, normalize):
                     "filtered_relative_l2",
                     "dns_relative_l2",
                     "spectrum_relative_l2",
-                    "laplacian_relative_l2",
                 )
             },
             (
@@ -361,9 +444,14 @@ def parse_args():
     p.add_argument("--coarse-n", type=int, default=32)
     p.add_argument("--lx", type=float, default=2 * np.pi)
     p.add_argument("--ly", type=float, default=2 * np.pi)
-    g = p.add_mutually_exclusive_group()
-    g.add_argument("--alpha", type=float)
-    g.add_argument("--alpha-factor", type=float, default=1.0)
+    p.add_argument(
+        "--alpha",
+        type=float,
+        help=(
+            "Physical Germano filter width "
+            "(default: one fine-grid spacing, Lx/fine-n)"
+        ),
+    )
     p.add_argument(
         "--split-mode", choices=["sequential", "random"], default="sequential"
     )
@@ -401,51 +489,15 @@ def parse_args():
             "--no-normalize for physical values throughout)"
         ),
     )
-    p.add_argument(
-        "--learn-vorticity",
-        action="store_true",
-        help=(
-            "Predict vorticity as an independent third U-Net output channel "
-            "instead of deriving it as the Laplacian of potential"
-        ),
-    )
-    p.add_argument(
-        "--invert-derived-vorticity",
-        action="store_true",
-        help=(
-            "Predict filtered U and V, derive filtered W as Laplacian(V), "
-            "then retain the independently inverse-Germano-reconstructed W. "
-            "Without this option, DNS W is replaced by Laplacian(DNS V)."
-        ),
-    )
-    p.add_argument(
-        "--laplacian-order",
-        type=int,
-        choices=(2, 4),
-        default=2,
-        help=(
-            "Centered periodic Laplacian order used to derive vorticity "
-            "from potential (default: 2)"
-        ),
-    )
     p.add_argument("--lambda-dns", type=float, default=0.05)
     p.add_argument("--lambda-spectrum", type=float, default=0.02)
-    p.add_argument(
-        "--lambda-laplacian",
-        type=float,
-        default=0.05,
-        help=(
-            "Weight for reconstructed-DNS relative-L2 consistency between W "
-            "and the Laplacian of V (default: 0.05)"
-        ),
-    )
     p.add_argument(
         "--random-periodic-shift",
         action=argparse.BooleanOptionalAction,
         default=True,
         help=(
             "Apply synchronized random periodic translations to training "
-            "U, V, and W fields (default: enabled)"
+            "U, V, and P fields (default: enabled)"
         ),
     )
     p.add_argument(
@@ -463,17 +515,20 @@ def parse_args():
     p.add_argument(
         "--inverse-cutoff-fraction",
         type=float,
-        default=0.75,
-        help="Smooth inverse cutoff as a fraction of Nyquist; 0 disables it",
+        default=0.0,
+        help=(
+            "Smooth inverse cutoff as a fraction of Nyquist "
+            "(default: disabled; 0 disables it)"
+        ),
     )
     p.add_argument("--inverse-cutoff-order", type=float, default=8.0)
     p.add_argument(
         "--post-cutoff-fraction",
         type=float,
-        default=0.5,
+        default=0.0,
         help=(
             "Post-inversion smooth cutoff as a fraction of Nyquist; "
-            "0 disables it (default: 0.5)"
+            "0 disables it (default: disabled)"
         ),
     )
     p.add_argument(
@@ -501,17 +556,14 @@ def parse_args():
 
 def run_training(a):
     set_seed(a.seed)
-    if a.learn_vorticity and a.invert_derived_vorticity:
-        raise ValueError(
-            "--invert-derived-vorticity cannot be combined with "
-            "--learn-vorticity; it derives filtered W from predicted V."
-        )
     torch_dtype = getattr(torch, a.precision)
     numpy_dtype = getattr(np, a.precision)
     if tuple(a.fields) != HW_FIELD_NAMES:
         raise ValueError(f"Hasegawa-Wakatani fields must be {HW_FIELD_NAMES}.")
     if a.fine_n != 8 * a.coarse_n:
         raise ValueError("Current model requires fine_n = 8 * coarse_n.")
+    if a.alpha is not None and (not np.isfinite(a.alpha) or a.alpha < 0):
+        raise ValueError("alpha must be finite and non-negative.")
     if not 0 <= a.inverse_cutoff_fraction <= 1:
         raise ValueError("inverse-cutoff-fraction must be in [0, 1].")
     if a.inverse_cutoff_order <= 0:
@@ -554,7 +606,7 @@ def run_training(a):
         a.dataset, a.validation_fraction, a.test_fraction, a.split_mode, a.seed
     )
     delta = a.lx / a.fine_n
-    alpha = a.alpha if a.alpha is not None else a.alpha_factor * delta
+    alpha = a.alpha if a.alpha is not None else delta
     if a.normalize:
         mean_np, std_np, dns_std_np = calculate_training_statistics(
             tr,
@@ -565,7 +617,6 @@ def run_training(a):
             a.lx,
             a.ly,
             dtype=numpy_dtype,
-            laplacian_order=a.laplacian_order,
         )
     else:
         statistics_shape = (1, len(a.fields), 1, 1)
@@ -588,25 +639,12 @@ def run_training(a):
             a.ly,
             mean_np,
             std_np,
-            a.laplacian_order,
             random_periodic_shift,
             (a.periodic_x, a.periodic_y),
         )
 
     train_ds = ds(tr, use_random_periodic_shift)
     val_ds, test_ds = ds(va), ds(te)
-    save_training_sample_diagnostics(
-        tr[0],
-        a.fields,
-        a.fine_n,
-        a.coarse_n,
-        alpha,
-        a.lx,
-        a.ly,
-        numpy_dtype,
-        a.laplacian_order,
-        a.output_dir / "training_sample_diagnostics",
-    )
     kw = dict(
         batch_size=a.batch_size,
         num_workers=a.num_workers,
@@ -622,7 +660,7 @@ def run_training(a):
     if device.type == "cuda":
         print("GPU:", torch.cuda.get_device_name(0))
         torch.backends.cudnn.benchmark = True
-    model_output_channels = 3 if a.learn_vorticity else 2
+    model_output_channels = 3
     model = ResidualUNetSR(
         len(a.fields),
         a.base_channels,
@@ -645,47 +683,6 @@ def run_training(a):
     if a.resume:
         c = load_checkpoint(a.resume, device)
         validate_hw_checkpoint(c)
-        checkpoint_learns_vorticity = (
-            c.get("vorticity_mode", "potential_laplacian")
-            == "learned_channel"
-        )
-        if checkpoint_learns_vorticity != a.learn_vorticity:
-            raise ValueError(
-                "--learn-vorticity must match the resumed checkpoint."
-            )
-        checkpoint_inverts_derived_vorticity = bool(
-            c.get(
-                "invert_derived_vorticity",
-                c.get("training_parameters", {}).get(
-                    "invert_derived_vorticity", False
-                ),
-            )
-        )
-        if (
-            checkpoint_inverts_derived_vorticity
-            != a.invert_derived_vorticity
-        ):
-            raise ValueError(
-                "--invert-derived-vorticity must match the resumed checkpoint."
-            )
-        checkpoint_operator = c.get(
-            "vorticity_operator",
-            c.get("training_parameters", {}).get(
-                "vorticity_operator", "fourth_order_periodic_laplacian"
-            ),
-        )
-        checkpoint_order = (
-            int(c["laplacian_order"])
-            if "laplacian_order" in c
-            else 2
-            if checkpoint_operator == "second_order_periodic_laplacian"
-            else 4
-        )
-        if not a.learn_vorticity and checkpoint_order != a.laplacian_order:
-            raise ValueError(
-                f"--laplacian-order {a.laplacian_order} does not match "
-                f"resumed checkpoint order {checkpoint_order}."
-            )
         checkpoint_precision = c.get("precision", "float32")
         if checkpoint_precision != a.precision:
             raise ValueError(
@@ -724,7 +721,7 @@ def run_training(a):
     print("TensorBoard logs:", tensorboard_dir)
     parameters = serialise_parameters(
         a,
-        effective_alpha=alpha,
+        alpha=alpha,
         grid_spacing=delta,
         scale_factor=a.fine_n // a.coarse_n,
         optimizer="AdamW",
@@ -746,23 +743,9 @@ def run_training(a):
         ),
         differential_filter="1 / (1 + alpha^2 k^2)",
         downsampling="centered Fourier-mode truncation",
-        vorticity_operator=(
-            "learned_independent_channel"
-            if a.learn_vorticity
-            else "second_order_periodic_laplacian"
-            if a.laplacian_order == 2
-            else "fourth_order_periodic_laplacian"
-        ),
-        vorticity_mode=(
-            "learned_channel" if a.learn_vorticity else "potential_laplacian"
-        ),
-        dns_vorticity_mode=(
-            "learned_channel"
-            if a.learn_vorticity
-            else "inverse_filtered_potential_laplacian"
-            if a.invert_derived_vorticity
-            else "potential_laplacian"
-        ),
+        vorticity_operator="learned_independent_channel",
+        vorticity_mode="learned_channel",
+        dns_vorticity_mode="independent_channel",
         convolution_padding="circular",
         interpolation_boundary="periodic",
         periodic_directions={"x": a.periodic_x, "y": a.periodic_y},
@@ -798,6 +781,27 @@ def run_training(a):
     parameters_path.write_text(
         json.dumps(parameters, indent=2, sort_keys=True)
     )
+    if start == 1:
+        save_epoch_diagnostics(
+            0,
+            model,
+            val_ds,
+            device,
+            mean,
+            std,
+            dns_std,
+            alpha,
+            a.lx,
+            a.ly,
+            a.lambda_dns,
+            a.lambda_spectrum,
+            inverse_cutoff_fraction,
+            a.inverse_cutoff_order,
+            post_cutoff_fraction,
+            a.post_cutoff_order,
+            a.fields,
+            a.output_dir / "training_diagnostics",
+        )
     history = []
     for epoch in range(start, a.epochs + 1):
         tm = run_epoch(
@@ -812,14 +816,10 @@ def run_training(a):
             a.ly,
             a.lambda_dns,
             a.lambda_spectrum,
-            a.lambda_laplacian,
             inverse_cutoff_fraction,
             a.inverse_cutoff_order,
             post_cutoff_fraction,
             a.post_cutoff_order,
-            a.learn_vorticity,
-            a.laplacian_order,
-            a.invert_derived_vorticity,
             opt,
         )
         vm = run_epoch(
@@ -834,14 +834,10 @@ def run_training(a):
             a.ly,
             a.lambda_dns,
             a.lambda_spectrum,
-            a.lambda_laplacian,
             inverse_cutoff_fraction,
             a.inverse_cutoff_order,
             post_cutoff_fraction,
             a.post_cutoff_order,
-            a.learn_vorticity,
-            a.laplacian_order,
-            a.invert_derived_vorticity,
         )
         row = {
             "epoch": epoch,
@@ -870,27 +866,9 @@ def run_training(a):
             "dns_std": dns_std_np,
             "field_names": list(a.fields),
             "physics_version": 1,
-            "vorticity_operator": (
-                "learned_independent_channel"
-                if a.learn_vorticity
-                else "second_order_periodic_laplacian"
-                if a.laplacian_order == 2
-                else "fourth_order_periodic_laplacian"
-            ),
-            "laplacian_order": a.laplacian_order,
-            "vorticity_mode": (
-                "learned_channel"
-                if a.learn_vorticity
-                else "potential_laplacian"
-            ),
-            "dns_vorticity_mode": (
-                "learned_channel"
-                if a.learn_vorticity
-                else "inverse_filtered_potential_laplacian"
-                if a.invert_derived_vorticity
-                else "potential_laplacian"
-            ),
-            "invert_derived_vorticity": a.invert_derived_vorticity,
+            "vorticity_operator": "learned_independent_channel",
+            "vorticity_mode": "learned_channel",
+            "dns_vorticity_mode": "independent_channel",
             "model_output_channels": model_output_channels,
             "training_parameters": parameters,
             "fine_n": a.fine_n,
@@ -900,7 +878,6 @@ def run_training(a):
             "base_channels": a.base_channels,
             "lambda_dns": a.lambda_dns,
             "lambda_spectrum": a.lambda_spectrum,
-            "lambda_laplacian": a.lambda_laplacian,
             "learning_rate_step": a.learning_rate_step,
             "learning_rate_gamma": a.learning_rate_gamma,
             "periodic_x": a.periodic_x,
@@ -921,6 +898,26 @@ def run_training(a):
             torch.save(c, ckdir / "best.pt")
         if a.save_every > 0 and epoch % a.save_every == 0:
             torch.save(c, ckdir / f"epoch_{epoch:05d}.pt")
+            save_epoch_diagnostics(
+                epoch,
+                model,
+                val_ds,
+                device,
+                mean,
+                std,
+                dns_std,
+                alpha,
+                a.lx,
+                a.ly,
+                a.lambda_dns,
+                a.lambda_spectrum,
+                inverse_cutoff_fraction,
+                a.inverse_cutoff_order,
+                post_cutoff_fraction,
+                a.post_cutoff_order,
+                a.fields,
+                a.output_dir / "training_diagnostics",
+            )
         with (a.output_dir / "training_history.csv").open("w", newline="") as f:
             w = csv.DictWriter(f, fieldnames=list(history[0]))
             w.writeheader()
@@ -944,14 +941,10 @@ def run_training(a):
         a.ly,
         a.lambda_dns,
         a.lambda_spectrum,
-        a.lambda_laplacian,
         inverse_cutoff_fraction,
         a.inverse_cutoff_order,
         post_cutoff_fraction,
         a.post_cutoff_order,
-        a.learn_vorticity,
-        a.laplacian_order,
-        a.invert_derived_vorticity,
     )
     for name, value in test.items():
         writer.add_scalar(f"metrics/test/{name}", value, int(c["epoch"]))

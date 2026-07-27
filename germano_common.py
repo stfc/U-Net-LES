@@ -11,11 +11,11 @@ import torch
 from torch import nn
 from torch.utils.data import Dataset
 
-HW_FIELD_NAMES = ("U", "V", "W")
+HW_FIELD_NAMES = ("U", "V", "P")
 HW_FIELD_LABELS = {
     "U": r"electron density $n_e$",
     "V": r"electrostatic potential $\phi$",
-    "W": r"vorticity $\omega = \nabla^2\phi$",
+    "P": r"vorticity $\omega$",
 }
 
 
@@ -34,24 +34,16 @@ def validate_hw_checkpoint(checkpoint: dict) -> None:
     if fields != HW_FIELD_NAMES or checkpoint.get("physics_version") != 1:
         raise ValueError(
             "This checkpoint predates the Hasegawa-Wakatani constraints. "
-            "Retrain it with fields U, V, W before inference or resuming."
+            "Retrain it with fields U, V, P before inference or resuming."
         )
-    mode = checkpoint.get("vorticity_mode", "potential_laplacian")
-    if mode not in ("potential_laplacian", "learned_channel"):
-        raise ValueError(f"Unsupported checkpoint vorticity mode: {mode}")
-    operator = checkpoint.get(
-        "vorticity_operator",
-        checkpoint.get("training_parameters", {}).get(
-            "vorticity_operator", "fourth_order_periodic_laplacian"
-        ),
-    )
-    supported = {
-        "learned_independent_channel",
-        "second_order_periodic_laplacian",
-        "fourth_order_periodic_laplacian",
-    }
-    if operator not in supported:
-        raise ValueError(f"Unsupported checkpoint vorticity operator: {operator}")
+    mode = checkpoint.get("vorticity_mode")
+    if mode != "learned_channel":
+        raise ValueError(
+            "This checkpoint does not learn P as an independent channel. "
+            "Retrain it with the current three-output model."
+        )
+    if checkpoint.get("model_output_channels") != 3:
+        raise ValueError("Independent-P checkpoints require three model outputs.")
 
 
 def set_seed(seed: int) -> None:
@@ -253,65 +245,6 @@ def periodic_laplacian_4th_torch(
     return dxx + dyy
 
 
-def enforce_vorticity_from_potential_torch(
-    fields: torch.Tensor, lx: float, ly: float, laplacian_order: int = 2
-) -> torch.Tensor:
-    """Replace W with the selected periodic Laplacian of potential V."""
-    if fields.shape[-3] < 2:
-        raise ValueError("Vorticity enforcement requires U and V channels.")
-    operators = {
-        2: periodic_laplacian_2nd_torch,
-        4: periodic_laplacian_4th_torch,
-    }
-    if laplacian_order not in operators:
-        raise ValueError("laplacian_order must be 2 or 4.")
-    vorticity = operators[laplacian_order](
-        fields[..., 1:2, :, :], lx, ly
-    )
-    return torch.cat((fields[..., :2, :, :], vorticity), dim=-3)
-
-
-def hw_fields_numpy(
-    density: np.ndarray,
-    potential: np.ndarray,
-    lx: float,
-    ly: float,
-    dtype=np.float32,
-    laplacian_order: int = 2,
-) -> np.ndarray:
-    """Apply HW constraints and derive vorticity from potential."""
-    density = density - density.mean(axis=(-2, -1), keepdims=True)
-    potential = potential - potential.mean(axis=(-2, -1), keepdims=True)
-    operators = {
-        2: periodic_laplacian_2nd_numpy,
-        4: periodic_laplacian_4th_numpy,
-    }
-    if laplacian_order not in operators:
-        raise ValueError("laplacian_order must be 2 or 4.")
-    vorticity = operators[laplacian_order](potential, lx, ly)
-    return np.stack((density, potential, vorticity), axis=-3).astype(dtype)
-
-
-def hw_fields_torch(
-    density: torch.Tensor,
-    potential: torch.Tensor,
-    lx: float,
-    ly: float,
-    laplacian_order: int = 2,
-) -> torch.Tensor:
-    """Differentiably apply HW constraints and derive vorticity."""
-    density = density - density.mean(dim=(-2, -1), keepdim=True)
-    potential = potential - potential.mean(dim=(-2, -1), keepdim=True)
-    operators = {
-        2: periodic_laplacian_2nd_torch,
-        4: periodic_laplacian_4th_torch,
-    }
-    if laplacian_order not in operators:
-        raise ValueError("laplacian_order must be 2 or 4.")
-    vorticity = operators[laplacian_order](potential, lx, ly)
-    return torch.cat((density, potential, vorticity), dim=-3)
-
-
 def load_dns_snapshot(
     path: Path,
     field_names: Sequence[str],
@@ -319,24 +252,20 @@ def load_dns_snapshot(
     lx: float,
     ly: float,
     dtype=np.float32,
-    laplacian_order: int = 2,
 ) -> np.ndarray:
     if tuple(field_names) != HW_FIELD_NAMES:
         raise ValueError(f"HW fields must be ordered as {HW_FIELD_NAMES}.")
     with np.load(path) as src:
-        missing = [name for name in ("U", "V") if name not in src]
+        missing = [name for name in field_names if name not in src]
         if missing:
             raise KeyError(f"{path} is missing fields: {missing}")
-        arrays = [np.asarray(src[name], dtype=dtype) for name in ("U", "V")]
-    for name, a in zip(("U", "V"), arrays):
+        arrays = [np.asarray(src[name], dtype=dtype) for name in field_names]
+    for name, a in zip(field_names, arrays):
         if a.shape != (expected_n, expected_n):
             raise ValueError(f"{path}: {name} has shape {a.shape}")
         if not np.all(np.isfinite(a)):
             raise ValueError(f"{path}: {name} contains NaN or Inf")
-    return hw_fields_numpy(
-        arrays[0], arrays[1], lx, ly,
-        dtype=dtype, laplacian_order=laplacian_order
-    )
+    return np.stack(arrays).astype(dtype, copy=False)
 
 
 def filter_snapshot(
@@ -346,20 +275,13 @@ def filter_snapshot(
     ly: float,
     coarse_n: int,
     dtype=np.float32,
-    laplacian_order: int = 2,
 ) -> tuple[np.ndarray, np.ndarray]:
-    filtered_density = germano_filter(dns[0], alpha, lx, ly)
-    filtered_potential = germano_filter(dns[1], alpha, lx, ly)
-    fine = hw_fields_numpy(
-        filtered_density, filtered_potential, lx, ly, dtype=dtype,
-        laplacian_order=laplacian_order
-    )
-    coarse_density = spectral_resize(fine[0], coarse_n)
-    coarse_potential = spectral_resize(fine[1], coarse_n)
-    coarse = hw_fields_numpy(
-        coarse_density, coarse_potential, lx, ly, dtype=dtype,
-        laplacian_order=laplacian_order
-    )
+    fine = np.stack(
+        [germano_filter(channel, alpha, lx, ly) for channel in dns]
+    ).astype(dtype)
+    coarse = np.stack(
+        [spectral_resize(channel, coarse_n) for channel in fine]
+    ).astype(dtype)
     return coarse, fine
 
 
@@ -372,7 +294,6 @@ def calculate_training_statistics(
     lx: float,
     ly: float,
     dtype=np.float32,
-    laplacian_order: int = 2,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     c = len(field_names)
     s = np.zeros(c)
@@ -382,12 +303,10 @@ def calculate_training_statistics(
     npts = 0
     for i, p in enumerate(files, 1):
         dns = load_dns_snapshot(
-            p, field_names, fine_n, lx, ly, dtype=dtype,
-            laplacian_order=laplacian_order
+            p, field_names, fine_n, lx, ly, dtype=dtype
         )
         _, fine = filter_snapshot(
-            dns, alpha, lx, ly, coarse_n, dtype=dtype,
-            laplacian_order=laplacian_order
+            dns, alpha, lx, ly, coarse_n, dtype=dtype
         )
         s += fine.sum((1, 2), dtype=np.float64)
         ss += np.square(fine, dtype=np.float64).sum((1, 2))
@@ -412,7 +331,7 @@ def calculate_training_statistics(
 class GermanoSnapshotDataset(Dataset):
     def __init__(
         self, files, field_names, fine_n, coarse_n, alpha, lx, ly, mean, std,
-        laplacian_order=2, random_periodic_shift=False,
+        random_periodic_shift=False,
         periodic_directions=(True, True),
     ):
         self.files = list(files)
@@ -425,7 +344,6 @@ class GermanoSnapshotDataset(Dataset):
         self.mean = mean[0]
         self.std = std[0]
         self.dtype = mean.dtype
-        self.laplacian_order = laplacian_order
         self.periodic_directions = tuple(bool(v) for v in periodic_directions)
         if len(self.periodic_directions) != 2:
             raise ValueError("periodic_directions must contain x and y flags.")
@@ -444,7 +362,7 @@ class GermanoSnapshotDataset(Dataset):
             self.fine_n,
             self.lx,
             self.ly,
-            dtype=self.dtype, laplacian_order=self.laplacian_order,
+            dtype=self.dtype,
         )
         coarse, fine = filter_snapshot(
             dns,
@@ -452,7 +370,7 @@ class GermanoSnapshotDataset(Dataset):
             self.lx,
             self.ly,
             self.coarse_n,
-            dtype=self.dtype, laplacian_order=self.laplacian_order,
+            dtype=self.dtype,
         )
         if self.random_periodic_shift:
             coarse_shift = tuple(
@@ -590,27 +508,12 @@ def calculate_losses(
     ly,
     lambda_dns,
     lambda_spectrum,
-    lambda_laplacian,
     inverse_cutoff_fraction,
     inverse_cutoff_order,
-    post_cutoff_fraction=0.5,
+    post_cutoff_fraction=None,
     post_cutoff_order=8,
-    learn_vorticity=False,
-    laplacian_order=2,
-    invert_derived_vorticity=False,
 ):
-    if learn_vorticity and invert_derived_vorticity:
-        raise ValueError(
-            "invert_derived_vorticity requires learn_vorticity=False"
-        )
-    if learn_vorticity:
-        pf = model(coarse) * std + mean
-    else:
-        predicted_uv = model(coarse) * std[:, :2] + mean[:, :2]
-        pf = hw_fields_torch(
-            predicted_uv[:, :1], predicted_uv[:, 1:2], lx, ly,
-            laplacian_order=laplacian_order
-        )
+    pf = model(coarse) * std + mean
     pn = (pf - mean) / std
     inverse_input = spectral_cutoff_torch(
         pf,
@@ -619,19 +522,12 @@ def calculate_losses(
         inverse_cutoff_fraction,
         inverse_cutoff_order,
     )
-    pd_unconstrained = inverse_germano_torch(
+    pd = inverse_germano_torch(
         inverse_input,
         alpha,
         lx,
         ly,
     )
-    if learn_vorticity or invert_derived_vorticity:
-        pd = pd_unconstrained
-    else:
-        pd = hw_fields_torch(
-            pd_unconstrained[:, :1], pd_unconstrained[:, 1:2], lx, ly,
-            laplacian_order=laplacian_order
-        )
     pd = spectral_cutoff_torch(
         pd,
         lx,
@@ -639,10 +535,6 @@ def calculate_losses(
         post_cutoff_fraction,
         post_cutoff_order,
     )
-    if not learn_vorticity and not invert_derived_vorticity:
-        pd = enforce_vorticity_from_potential_torch(
-            pd, lx, ly, laplacian_order
-        )
     lf = nn.functional.l1_loss(pn, filtered_target_normalised)
     dns_absolute_error = torch.abs((pd - dns_target) / dns_std)
     ld = dns_absolute_error.mean()
@@ -652,19 +544,8 @@ def calculate_losses(
     ls = nn.functional.l1_loss(
         torch.log1p(predicted_energy), torch.log1p(target_energy)
     )
-    laplacian = {
-        2: periodic_laplacian_2nd_torch,
-        4: periodic_laplacian_4th_torch,
-    }[laplacian_order]
-    reconstructed_laplacian = laplacian(pd[:, 1:2], lx, ly)
-    ll = relative_l2(pd[:, 2:3], reconstructed_laplacian)
     spectrum_relative_l2 = relative_l2(target_energy, predicted_energy)
-    total = (
-        lf
-        + lambda_dns * ld
-        + lambda_spectrum * ls
-        + lambda_laplacian * ll
-    )
+    total = lf + lambda_dns * ld + lambda_spectrum * ls
     return (
         total,
         {
@@ -672,12 +553,10 @@ def calculate_losses(
             "filtered": lf,
             "dns": ld,
             "spectrum": ls,
-            "laplacian": ll,
-            "laplacian_relative_l2": ll,
             "spectrum_relative_l2": spectrum_relative_l2,
             "dns_U": dns_absolute_error[:, 0].mean(),
             "dns_V": dns_absolute_error[:, 1].mean(),
-            "dns_W": dns_absolute_error[:, 2].mean(),
+            "dns_P": dns_absolute_error[:, 2].mean(),
         },
         pf,
         pd,

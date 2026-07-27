@@ -14,7 +14,6 @@ from germano_common import (
     HW_FIELD_LABELS,
     HW_FIELD_NAMES,
     filter_snapshot,
-    hw_fields_numpy,
     isotropic_spectrum,
     k2_numpy,
     load_dns_snapshot,
@@ -34,10 +33,10 @@ def parse_args():
     parser.add_argument(
         "--alpha",
         type=float,
-        default=1.0,
+        default=None,
         help=(
-            "Filter width in DNS grid spacings; use 0 to disable the "
-            "differential filter (default: 1.0)"
+            "Physical filter width; use 0 to disable the differential "
+            "filter (default: one fine-grid spacing)"
         ),
     )
     parser.add_argument("--coarse-n", type=int, default=32)
@@ -65,21 +64,11 @@ def gaussian_filter(field, alpha, lx, ly):
 
 
 def gaussian_filter_snapshot(dns, alpha, lx, ly, coarse_n):
-    filtered_density = gaussian_filter(dns[0], alpha, lx, ly)
-    filtered_potential = gaussian_filter(dns[1], alpha, lx, ly)
-    filtered = hw_fields_numpy(
-        filtered_density,
-        filtered_potential,
-        lx,
-        ly,
+    filtered = np.stack(
+        [gaussian_filter(channel, alpha, lx, ly) for channel in dns]
     )
-    coarse_density = spectral_resize(filtered[0], coarse_n)
-    coarse_potential = spectral_resize(filtered[1], coarse_n)
-    downsampled = hw_fields_numpy(
-        coarse_density,
-        coarse_potential,
-        lx,
-        ly,
+    downsampled = np.stack(
+        [spectral_resize(channel, coarse_n) for channel in filtered]
     )
     return downsampled, filtered
 
@@ -152,13 +141,15 @@ def main():
     args = parse_args()
     if args.alpha < 0:
         raise ValueError("alpha must be non-negative.")
-    if args.coarse_n < 5:
-        raise ValueError("coarse-n must be at least 5 for the W stencil.")
+    if args.coarse_n < 1:
+        raise ValueError("coarse-n must be positive.")
     fine_n = infer_dns_resolution(args.input)
     if args.coarse_n >= fine_n:
         raise ValueError("coarse-n must be smaller than the DNS resolution.")
     delta = args.lx / fine_n
-    effective_alpha = args.alpha * delta
+    effective_alpha = args.alpha if args.alpha is not None else delta
+    if not np.isfinite(effective_alpha) or effective_alpha < 0:
+        raise ValueError("alpha must be finite and non-negative.")
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
     dns = load_dns_snapshot(
@@ -183,7 +174,7 @@ def main():
         args.coarse_n,
     )
 
-    colormaps = {"U": "Blues", "V": "Reds_r", "W": "hot"}
+    colormaps = {"U": "Blues", "V": "Reds_r", "P": "hot"}
     for channel, name in enumerate(HW_FIELD_NAMES):
         label = HW_FIELD_LABELS[name]
         save_image(
@@ -241,9 +232,8 @@ def main():
     )
     metadata = {
         "input": str(args.input),
-        "alpha_factor": args.alpha,
         "delta": delta,
-        "effective_alpha": effective_alpha,
+        "alpha": effective_alpha,
         "differential_transfer": "1 / (1 + alpha^2 k^2)",
         "gaussian_transfer": "exp(-0.5 alpha^2 k^2)",
         "fine_n": fine_n,

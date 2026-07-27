@@ -10,7 +10,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 
-FIELD_NAMES = ("U", "V", "W")
+FIELD_NAMES = ("U", "V", "P")
 REQUIRED_ARRAYS = (
     "incoming_filtered_fine",
     "downsampled_coarse",
@@ -58,12 +58,6 @@ def parse_args():
         type=float,
         help="Domain length Ly (overrides archive metadata)",
     )
-    parser.add_argument(
-        "--laplacian-order",
-        type=int,
-        choices=(2, 4),
-        help="Periodic Laplacian order (overrides archive metadata)",
-    )
     return parser.parse_args()
 
 
@@ -90,9 +84,6 @@ def load_validation(path: Path) -> dict[str, np.ndarray]:
         data["simtime"] = np.asarray(archive.get("simtime", np.nan)).item()
         data["lx"] = np.asarray(archive.get("lx", np.nan)).item()
         data["ly"] = np.asarray(archive.get("ly", np.nan)).item()
-        data["laplacian_order"] = np.asarray(
-            archive.get("laplacian_order", -1)
-        ).item()
 
     fine_shape = data["incoming_filtered_fine"].shape
     if len(fine_shape) != 4 or fine_shape[1] != len(FIELD_NAMES):
@@ -128,46 +119,6 @@ def load_validation(path: Path) -> dict[str, np.ndarray]:
 def symmetric_limit(*arrays: np.ndarray) -> float:
     limit = max(float(np.max(np.abs(array))) for array in arrays)
     return limit if limit > 0 else 1.0
-
-
-def periodic_laplacian(
-    field: np.ndarray, lx: float, ly: float, order: int
-) -> np.ndarray:
-    """Return the selected centered periodic Laplacian."""
-    nx, ny = field.shape
-    dx = lx / nx
-    dy = ly / ny
-    if order == 2:
-        dxx = (
-            np.roll(field, 1, axis=0)
-            - 2 * field
-            + np.roll(field, -1, axis=0)
-        ) / dx**2
-        dyy = (
-            np.roll(field, 1, axis=1)
-            - 2 * field
-            + np.roll(field, -1, axis=1)
-        ) / dy**2
-    elif order == 4:
-        if nx < 5 or ny < 5:
-            raise ValueError("Fourth-order Laplacian requires at least 5 points")
-        dxx = (
-            -np.roll(field, 2, axis=0)
-            + 16 * np.roll(field, 1, axis=0)
-            - 30 * field
-            + 16 * np.roll(field, -1, axis=0)
-            - np.roll(field, -2, axis=0)
-        ) / (12 * dx**2)
-        dyy = (
-            -np.roll(field, 2, axis=1)
-            + 16 * np.roll(field, 1, axis=1)
-            - 30 * field
-            + 16 * np.roll(field, -1, axis=1)
-            - np.roll(field, -2, axis=1)
-        ) / (12 * dy**2)
-    else:
-        raise ValueError(f"Laplacian order must be 2 or 4, received {order}")
-    return dxx + dyy
 
 
 def periodic_derivative(
@@ -291,7 +242,6 @@ def plot_field(
     image_format: str,
     lx: float,
     ly: float,
-    laplacian_order: int,
 ) -> Path:
     incoming = data["incoming_filtered_fine"][batch, channel]
     coarse = data["downsampled_coarse"][batch, channel]
@@ -324,10 +274,8 @@ def plot_field(
         ),
     )
 
-    is_vorticity = FIELD_NAMES[channel] == "W"
-    rows = 3 if is_vorticity else 2
     fig, axes = plt.subplots(
-        rows,
+        2,
         4,
         figsize=(17, 4.25 * rows),
         constrained_layout=True,
@@ -364,67 +312,6 @@ def plot_field(
         family="monospace",
         fontsize=11,
     )
-    if is_vorticity:
-        reconstructed_vorticity = data["unet_reconstructed_dns"][batch, 2]
-        reconstructed_potential = data["unet_reconstructed_dns"][batch, 1]
-        potential_laplacian = periodic_laplacian(
-            reconstructed_potential, lx, ly, laplacian_order
-        )
-        consistency_error = reconstructed_vorticity - potential_laplacian
-        consistency_limit = symmetric_limit(
-            reconstructed_vorticity, potential_laplacian
-        )
-        consistency_panels = (
-            (reconstructed_vorticity, "Reconstructed W", consistency_limit),
-            (
-                potential_laplacian,
-                f"Laplacian(V), order {laplacian_order}",
-                consistency_limit,
-            ),
-            (
-                consistency_error,
-                "W - Laplacian(V)",
-                symmetric_limit(consistency_error),
-            ),
-        )
-        for axis, (field, title, limit) in zip(
-            axes[8:11], consistency_panels
-        ):
-            image = axis.imshow(
-                field.T,
-                origin="lower",
-                extent=extent,
-                cmap="RdBu_r",
-                vmin=-limit,
-                vmax=limit,
-                interpolation="nearest",
-                aspect="equal",
-            )
-            axis.set_title(title)
-            axis.set_xlabel("x / Lx")
-            axis.set_ylabel("z / Lz")
-            fig.colorbar(image, ax=axis, shrink=0.82)
-        relative_consistency = np.linalg.norm(consistency_error.ravel()) / max(
-            np.linalg.norm(reconstructed_vorticity.ravel()),
-            np.finfo(np.float64).tiny,
-        )
-        axes[11].axis("off")
-        axes[11].text(
-            0.01,
-            0.98,
-            f"W consistency relative L2:\n{relative_consistency:.6e}\n\n"
-            + vorticity_diagnostics(
-                reference_dns,
-                reconstructed_vorticity,
-                reconstructed_potential,
-                lx,
-                ly,
-                laplacian_order,
-            ),
-            va="top",
-            family="monospace",
-            fontsize=8,
-        )
     fig.suptitle(
         f"{FIELD_NAMES[channel]} reconstruction — step {data['pStep']}, "
         f"t={data['simtime']:g}, batch {batch}"
@@ -454,19 +341,9 @@ def main():
         data = load_validation(source)
         lx = args.lx if args.lx is not None else float(data["lx"])
         ly = args.ly if args.ly is not None else float(data["ly"])
-        laplacian_order = (
-            args.laplacian_order
-            if args.laplacian_order is not None
-            else int(data["laplacian_order"])
-        )
         if not np.isfinite(lx) or lx <= 0 or not np.isfinite(ly) or ly <= 0:
             raise ValueError(
                 f"{source}: missing valid lx/ly metadata; provide --lx and --ly"
-            )
-        if laplacian_order not in (2, 4):
-            raise ValueError(
-                f"{source}: missing valid Laplacian order metadata; "
-                "provide --laplacian-order 2 or 4"
             )
         for batch in range(data["incoming_filtered_fine"].shape[0]):
             for channel in range(len(FIELD_NAMES)):
@@ -480,7 +357,6 @@ def main():
                     args.format,
                     lx,
                     ly,
-                    laplacian_order,
                 )
                 images_written += 1
         print(f"[{index}/{len(files)}] {source}")

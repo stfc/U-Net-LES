@@ -12,7 +12,7 @@ import torch
 
 from germano_common import HW_FIELD_LABELS, isotropic_spectrum
 
-SPECTRUM_Y_MIN = 10e-10
+SPECTRUM_Y_MIN = 1e-12
 
 
 def save_field_images(
@@ -39,7 +39,6 @@ def save_field_images(
         cmap = {
             "U": "Blues",
             "V": "Reds_r",
-            "W": "hot",
             "P": "hot",
         }.get(name, "viridis")
         image = ax.imshow(
@@ -127,6 +126,86 @@ def save_field_spectrum_comparison(
     return output_path
 
 
+def save_field_error_images(
+    reconstructed: np.ndarray,
+    reference: np.ndarray,
+    field_names,
+    output_path: Path,
+    title_prefix: str = "Reconstructed DNS − target DNS",
+) -> Path:
+    """Save per-channel signed-error images with symmetric color limits."""
+    error = reconstructed - reference
+    count = len(field_names)
+    fig, axes = plt.subplots(
+        1, count, figsize=(5.8 * count, 5.2), squeeze=False
+    )
+    for channel, (ax, name) in enumerate(zip(axes[0], field_names)):
+        limit = float(np.max(np.abs(error[channel])))
+        if limit == 0:
+            limit = np.finfo(error.dtype).eps
+        image = ax.imshow(
+            error[channel].T,
+            origin="lower",
+            extent=(0, error.shape[-2], 0, error.shape[-1]),
+            aspect="equal",
+            cmap="RdBu_r",
+            vmin=-limit,
+            vmax=limit,
+        )
+        ax.set_title(f"{title_prefix}: {HW_FIELD_LABELS.get(name, name)}")
+        ax.set_xlabel("x [pixels]")
+        ax.set_ylabel("y [pixels]")
+        fig.colorbar(image, ax=ax)
+    fig.tight_layout()
+    fig.savefig(output_path, dpi=180)
+    plt.close(fig)
+    return output_path
+
+
+def save_field_centerline_comparison(
+    reconstructed: np.ndarray,
+    reference: np.ndarray,
+    field_names,
+    output_path: Path,
+    reconstructed_label: str = "Reconstructed DNS",
+    reference_label: str = "Target DNS",
+) -> Path:
+    """Compare reconstructed and reference horizontal centerlines."""
+    count = len(field_names)
+    center = reference.shape[-1] // 2
+    x = np.arange(reference.shape[-2])
+    fig, axes = plt.subplots(
+        1, count, figsize=(5.8 * count, 4.8), squeeze=False
+    )
+    for channel, (ax, name) in enumerate(zip(axes[0], field_names)):
+        ax.plot(
+            x,
+            reference[channel, :, center],
+            color="black",
+            linewidth=1.6,
+            label=reference_label,
+        )
+        ax.plot(
+            x,
+            reconstructed[channel, :, center],
+            color="tab:blue",
+            linestyle="--",
+            linewidth=1.6,
+            label=reconstructed_label,
+        )
+        ax.set_title(
+            f"{HW_FIELD_LABELS.get(name, name)} centerline, y={center}"
+        )
+        ax.set_xlabel("x [pixels]")
+        ax.set_ylabel(HW_FIELD_LABELS.get(name, name))
+        ax.grid(True, alpha=0.25)
+        ax.legend()
+    fig.tight_layout()
+    fig.savefig(output_path, dpi=180)
+    plt.close(fig)
+    return output_path
+
+
 def save_initial_dns_fields(
     fields: np.ndarray,
     reference_fields: np.ndarray | None,
@@ -200,7 +279,7 @@ def save_dns_snapshot(
     fields_dir.mkdir(parents=True, exist_ok=True)
     output_fields = dns[0] if len(dns) == 1 else dns.transpose(1, 0, 2, 3)
     snapshot_path = fields_dir / f"fields_DNS_{time_step:07d}.npz"
-    archive_names = tuple("P" if name == "W" else name for name in field_names)
+    archive_names = tuple(field_names)
     np.savez_compressed(
         snapshot_path,
         pStep=np.asarray(time_step),
@@ -227,7 +306,7 @@ def save_dns_snapshot(
 def calculate_arakawa_terms(
     fields: np.ndarray, lx: float, ly: float
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Calculate J(phi, omega) and J(phi, density) for U,V,W fields."""
+    """Calculate J(phi, omega) and J(phi, density) for U,V,P fields."""
     tensor = torch.as_tensor(fields[None])
     potential = tensor[:, 1:2]
     dx, dy = lx / fields.shape[-2], ly / fields.shape[-1]
@@ -524,7 +603,7 @@ def save_arakawa_comparison(
     reference = (
         calculate_arakawa_terms(dns, lx, ly) if dns is not None else None
     )
-    titles = (r"$J(V,W)$", r"$J(V,U)$")
+    titles = (r"$J(V,P)$", r"$J(V,U)$")
     nx, ny = reconstructed.shape[-2:]
 
     field_path = output_dir / f"{stem}.png"

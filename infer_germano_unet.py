@@ -35,13 +35,6 @@ def optional_environment_float(name, default):
     return float(value)
 
 
-def environment_bool(name, default=True):
-    value = os.environ.get(name)
-    if value is None:
-        return default
-    return value.lower() not in {"0", "false", "no", "off"}
-
-
 def print_checkpoint_metadata(checkpoint_path, effective_inference):
     """Load/print arbitrary training metadata and effective runtime overrides."""
     candidates = (
@@ -115,109 +108,6 @@ def save_dns_centerline_plots(source, fields, dns, reconstructed, output_dir):
         plt.close(fig)
 
 
-def save_vorticity_consistency_plots(
-    source,
-    reconstructed,
-    lx,
-    ly,
-    laplacian_order,
-    output_dir,
-):
-    """Plot reconstructed W, Laplacian(V), and their consistency residual."""
-    laplacian = {
-        2: periodic_laplacian_2nd_numpy,
-        4: periodic_laplacian_4th_numpy,
-    }[laplacian_order]
-    vorticity = reconstructed[2]
-    potential_laplacian = laplacian(reconstructed[1], lx, ly)
-    difference = vorticity - potential_laplacian
-
-    field_limit = max(
-        float(np.max(np.abs(vorticity))),
-        float(np.max(np.abs(potential_laplacian))),
-    )
-    difference_limit = float(np.max(np.abs(difference)))
-    if field_limit == 0:
-        field_limit = 1.0
-    if difference_limit == 0:
-        difference_limit = np.finfo(difference.dtype).eps
-
-    fig, axes = plt.subplots(1, 3, figsize=(15.0, 4.5))
-    panels = (
-        (vorticity, r"Reconstructed $W$", field_limit),
-        (
-            potential_laplacian,
-            rf"$\nabla^2 V$ (order {laplacian_order})",
-            field_limit,
-        ),
-        (difference, r"$W-\nabla^2 V$", difference_limit),
-    )
-    for ax, (values, title, limit) in zip(axes, panels):
-        image = ax.imshow(
-            values.T,
-            origin="lower",
-            cmap="coolwarm",
-            vmin=-limit,
-            vmax=limit,
-            extent=(0, lx, 0, ly),
-            aspect="equal",
-        )
-        ax.set_title(title)
-        ax.set_xlabel("x")
-        ax.set_ylabel("y")
-        fig.colorbar(image, ax=ax, shrink=0.82)
-    fig.suptitle(f"Vorticity consistency: {source}")
-    fig.tight_layout()
-    fig.savefig(
-        output_dir / "W_Laplacian_V_difference.png",
-        dpi=180,
-        bbox_inches="tight",
-    )
-    plt.close(fig)
-
-    center_y = vorticity.shape[-1] // 2
-    x = np.arange(vorticity.shape[-2]) * lx / vorticity.shape[-2]
-    fig, axes = plt.subplots(2, 1, figsize=(9.0, 7.0), sharex=True)
-    axes[0].plot(
-        x,
-        vorticity[:, center_y],
-        linewidth=1.8,
-        label=r"Reconstructed $W$",
-    )
-    axes[0].plot(
-        x,
-        potential_laplacian[:, center_y],
-        "--",
-        linewidth=1.8,
-        label=rf"$\nabla^2 V$ (order {laplacian_order})",
-    )
-    axes[0].set_ylabel("vorticity")
-    axes[0].legend()
-    axes[1].plot(
-        x,
-        difference[:, center_y],
-        color="tab:red",
-        linewidth=1.8,
-        label=r"$W-\nabla^2 V$",
-    )
-    axes[1].axhline(0.0, color="black", linewidth=0.8, alpha=0.6)
-    axes[1].set_xlabel("x")
-    axes[1].set_ylabel("difference")
-    axes[1].legend()
-    for ax in axes:
-        ax.grid(True, alpha=0.3)
-    fig.suptitle(
-        f"Vorticity consistency centerline, y index {center_y}: {source}"
-    )
-    fig.tight_layout()
-    fig.savefig(
-        output_dir / "W_Laplacian_V_difference_centerlines.png",
-        dpi=180,
-        bbox_inches="tight",
-    )
-    plt.close(fig)
-
-
 def parse_args():
     p = argparse.ArgumentParser()
     p.add_argument("--checkpoint", type=Path, required=True)
@@ -236,15 +126,6 @@ def parse_args():
         choices=("checkpoint", "float32", "float64"),
         default="checkpoint",
         help="U-Net and physics precision (default: use checkpoint precision)",
-    )
-    p.add_argument(
-        "--laplacian-order",
-        choices=("checkpoint", "2", "4"),
-        default="checkpoint",
-        help=(
-            "Vorticity Laplacian order; use 2 or 4 to override the checkpoint "
-            "(default: checkpoint)"
-        ),
     )
     return p.parse_args()
 
@@ -269,60 +150,10 @@ def main():
     ly = float(c["ly"])
     alpha = float(c["alpha"])
     base_channels = int(c["base_channels"])
-    vorticity_mode = c.get("vorticity_mode", "potential_laplacian")
-    invert_derived_vorticity = bool(
-        c.get(
-            "invert_derived_vorticity",
-            c.get("training_parameters", {}).get(
-                "invert_derived_vorticity", False
-            ),
-        )
-    )
-    dns_vorticity_mode = c.get(
-        "dns_vorticity_mode",
-        c.get("training_parameters", {}).get(
-            "dns_vorticity_mode",
-            "inverse_filtered_potential_laplacian"
-            if invert_derived_vorticity
-            else vorticity_mode,
-        ),
-    )
-    vorticity_operator = c.get(
-        "vorticity_operator",
-        c.get("training_parameters", {}).get(
-            "vorticity_operator", "fourth_order_periodic_laplacian"
-        ),
-    )
-    checkpoint_laplacian_order = int(
-        c.get(
-            "laplacian_order",
-            2 if vorticity_operator == "second_order_periodic_laplacian" else 4,
-        )
-    )
-    laplacian_order = (
-        checkpoint_laplacian_order
-        if a.laplacian_order == "checkpoint"
-        else int(a.laplacian_order)
-    )
-    learn_vorticity = vorticity_mode == "learned_channel"
-    if learn_vorticity and invert_derived_vorticity:
-        raise ValueError(
-            "Checkpoint cannot both learn W independently and request "
-            "inversion of W derived from filtered V."
-        )
-    model_output_channels = int(
-        c.get("model_output_channels", 3 if learn_vorticity else 2)
-    )
-    expected_output_channels = 3 if learn_vorticity else 2
-    if model_output_channels != expected_output_channels:
-        raise ValueError(
-            f"Checkpoint vorticity mode {vorticity_mode!r} requires "
-            f"{expected_output_channels} model outputs, but metadata specifies "
-            f"{model_output_channels}."
-        )
+    model_output_channels = int(c["model_output_channels"])
     cutoff_fraction = optional_environment_float(
         "PBOUT_UNET_INVERSE_CUTOFF_FRACTION",
-        c.get("inverse_cutoff_fraction", 0.75),
+        c.get("inverse_cutoff_fraction"),
     )
     cutoff_order = float(
         os.environ.get(
@@ -332,7 +163,7 @@ def main():
     )
     post_cutoff_fraction = optional_environment_float(
         "PBOUT_UNET_POST_CUTOFF_FRACTION",
-        c.get("post_cutoff_fraction", 0.5),
+        c.get("post_cutoff_fraction"),
     )
     post_cutoff_order = float(
         os.environ.get(
@@ -340,22 +171,6 @@ def main():
             c.get("post_cutoff_order", 8.0),
         )
     )
-    requested_vorticity_from_potential = environment_bool(
-        "PBOUT_UNET_VORTICITY_FROM_POTENTIAL",
-        not invert_derived_vorticity,
-    )
-    vorticity_from_potential = requested_vorticity_from_potential
-    if (
-        not learn_vorticity
-        and not invert_derived_vorticity
-        and not requested_vorticity_from_potential
-    ):
-        print(
-            "PBOUT_UNET_VORTICITY_FROM_POTENTIAL=0 cannot provide an "
-            "independently learned W with this potential-laplacian checkpoint; "
-            "W will still be reconstructed from V."
-        )
-        vorticity_from_potential = True
     if cutoff_fraction is not None and not 0 < cutoff_fraction <= 1:
         raise ValueError(
             "PBOUT_UNET_INVERSE_CUTOFF_FRACTION must be in (0, 1]."
@@ -389,16 +204,8 @@ def main():
             "inverse": "inverse_input_before_inverse_germano",
             "post": "reconstructed_dns_after_inverse_germano",
         },
-        "requested_vorticity_from_potential": (
-            requested_vorticity_from_potential
-        ),
-        "vorticity_from_potential": vorticity_from_potential,
-        "vorticity_mode": vorticity_mode,
-        "dns_vorticity_mode": dns_vorticity_mode,
-        "invert_derived_vorticity": invert_derived_vorticity,
-        "vorticity_operator": vorticity_operator,
-        "checkpoint_laplacian_order": checkpoint_laplacian_order,
-        "laplacian_order": laplacian_order,
+        "vorticity_mode": "learned_channel",
+        "dns_vorticity_mode": "independent_channel",
     }
     model = ResidualUNetSR(
         len(fields),
@@ -422,12 +229,10 @@ def main():
     rows = []
     for i, p in enumerate(files, 1):
         dns = load_dns_snapshot(
-            p, fields, fine_n, lx, ly, dtype=numpy_dtype,
-            laplacian_order=laplacian_order
+            p, fields, fine_n, lx, ly, dtype=numpy_dtype
         )
         coarse, fine = filter_snapshot(
-            dns, alpha, lx, ly, coarse_n, dtype=numpy_dtype,
-            laplacian_order=laplacian_order
+            dns, alpha, lx, ly, coarse_n, dtype=numpy_dtype
         )
         x = (
             torch.from_numpy(((coarse - mean_np[0]) / std_np[0])[None])
@@ -435,23 +240,9 @@ def main():
         )
         with torch.no_grad():
             if a.inverse_input == "unet":
-                predicted = model(x)
-                if learn_vorticity:
-                    pf = predicted * std + mean
-                else:
-                    predicted_uv = (
-                        predicted * std[:, :2] + mean[:, :2]
-                    )
-                    pf = hw_fields_torch(
-                        predicted_uv[:, :1], predicted_uv[:, 1:2], lx, ly,
-                        laplacian_order=laplacian_order
-                    )
+                pf = model(x) * std + mean
             else:
                 pf = torch.from_numpy(fine[None]).to(device)
-            if vorticity_from_potential:
-                pf = enforce_vorticity_from_potential_torch(
-                    pf, lx, ly, laplacian_order
-                )
             pf = spectral_cutoff_torch(
                 pf,
                 lx,
@@ -459,20 +250,12 @@ def main():
                 cutoff_fraction,
                 cutoff_order,
             )
-            if vorticity_from_potential:
-                pf = enforce_vorticity_from_potential_torch(
-                    pf, lx, ly, laplacian_order
-                )
             pd_unconstrained = inverse_germano_torch(
                 pf,
                 alpha,
                 lx,
                 ly,
             )
-            if vorticity_from_potential:
-                pd_unconstrained = enforce_vorticity_from_potential_torch(
-                    pd_unconstrained, lx, ly, laplacian_order
-                )
             pd_unconstrained = spectral_cutoff_torch(
                 pd_unconstrained,
                 lx,
@@ -480,34 +263,18 @@ def main():
                 post_cutoff_fraction,
                 post_cutoff_order,
             )
-            if vorticity_from_potential:
-                pd = enforce_vorticity_from_potential_torch(
-                    pd_unconstrained, lx, ly, laplacian_order
-                )
-            else:
-                pd = pd_unconstrained
+            pd = pd_unconstrained
         pf_np, pd_np = pf[0].cpu().numpy(), pd[0].cpu().numpy()
         out = a.output_dir / p.stem
         out.mkdir(parents=True, exist_ok=True)
         save_dns_centerline_plots(p.name, fields, dns, pd_np, out)
-        save_vorticity_consistency_plots(
-            p.name,
-            pd_np,
-            lx,
-            ly,
-            laplacian_order,
-            out,
-        )
         reconstruction = {
             "dns_256": dns,
             "filtered_256": fine,
             "filtered_32": coarse,
             "inverse_input_256": pf_np,
             "inverse_input_mode": np.asarray(a.inverse_input),
-            "invert_derived_vorticity": np.asarray(
-                invert_derived_vorticity
-            ),
-            "dns_vorticity_mode": np.asarray(dns_vorticity_mode),
+            "dns_vorticity_mode": np.asarray("independent_channel"),
             "reconstructed_dns_256": pd_np,
             "field_names": np.asarray(fields),
             "source_file": np.asarray(str(p)),
@@ -516,7 +283,7 @@ def main():
             reconstruction["unet_filtered_256"] = pf_np
         np.savez_compressed(out / "reconstruction.npz", **reconstruction)
         for ch, name in enumerate(fields):
-            cmap = {"U": "Blues", "V": "Reds_r", "W": "hot"}[name]
+            cmap = {"U": "Blues", "V": "Reds_r", "P": "hot"}[name]
             label = HW_FIELD_LABELS[name]
             de = pd_np[ch] - dns[ch]
             fe = pf_np[ch] - fine[ch]
