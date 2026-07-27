@@ -164,32 +164,28 @@ def plot_all_metrics(
     definition_ax = axes["definitions"]
     definition_ax.set_axis_off()
     definitions = (
-        "Definitions\n\n"
+        "Definitions\n"
         r"$\mathcal{L}_{total}"
         r"=\mathcal{L}_{filtered}"
         r"+\lambda_{DNS}\mathcal{L}_{DNS}"
         r"+\lambda_{spectrum}\mathcal{L}_{spectrum}"
         r"+\lambda_{\nabla^2\phi}\mathcal{L}_{\nabla^2\phi}$"
-        "\n\n"
+        "\n"
         r"$L_{2,\mathrm{relative}}"
         r"=\dfrac{\|\hat{q}-q\|_2}{\|q\|_2}$"
-        "\n\n"
+        "        "
         r"$\mathcal{L}_{\nabla^2\phi}"
         r"=\dfrac{\|\nabla^2\hat{\phi}-\hat{\omega}\|_2}"
         r"{\|\hat{\omega}\|_2}$"
-        "\n\n"
-        r"$\lambda_{filtered}=1$"
         "\n"
-        rf"$\lambda_{{DNS}}={format_weight(lambda_dns)}$"
+        r"$\lambda_{filtered}=1,\quad"
+        rf"\lambda_{{DNS}}={format_weight(lambda_dns)},\quad"
+        rf"\lambda_{{spectrum}}={format_weight(lambda_spectrum)},\quad"
+        rf"\lambda_{{\nabla^2\phi}}={format_weight(lambda_laplacian)}$"
         "\n"
-        rf"$\lambda_{{spectrum}}={format_weight(lambda_spectrum)}$"
-        "\n"
-        rf"$\lambda_{{\nabla^2\phi}}={format_weight(lambda_laplacian)}$"
-        "\n\n"
-        "Total: weighted loss\n"
-        "Component curves: unweighted losses\n\n"
+        "Total: weighted loss; component curves: unweighted losses\n"
         r"$\hat{q}$: prediction"
-        "\n"
+        "        "
         r"$q$: target"
     )
     definition_ax.text(
@@ -198,11 +194,11 @@ def plot_all_metrics(
         definitions,
         ha="center",
         va="center",
-        fontsize=13,
-        linespacing=1.5,
+        fontsize=11,
+        linespacing=1.25,
         transform=definition_ax.transAxes,
         bbox={
-            "boxstyle": "round,pad=1.0",
+            "boxstyle": "round,pad=0.6",
             "facecolor": "whitesmoke",
             "edgecolor": "0.35",
             "linewidth": 1.2,

@@ -597,7 +597,12 @@ def calculate_losses(
     post_cutoff_order=8,
     learn_vorticity=False,
     laplacian_order=2,
+    invert_derived_vorticity=False,
 ):
+    if learn_vorticity and invert_derived_vorticity:
+        raise ValueError(
+            "invert_derived_vorticity requires learn_vorticity=False"
+        )
     if learn_vorticity:
         pf = model(coarse) * std + mean
     else:
@@ -620,7 +625,7 @@ def calculate_losses(
         lx,
         ly,
     )
-    if learn_vorticity:
+    if learn_vorticity or invert_derived_vorticity:
         pd = pd_unconstrained
     else:
         pd = hw_fields_torch(
@@ -634,7 +639,7 @@ def calculate_losses(
         post_cutoff_fraction,
         post_cutoff_order,
     )
-    if not learn_vorticity:
+    if not learn_vorticity and not invert_derived_vorticity:
         pd = enforce_vorticity_from_potential_torch(
             pd, lx, ly, laplacian_order
         )

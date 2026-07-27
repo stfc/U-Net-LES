@@ -5,10 +5,147 @@ from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 import sys
 import traceback
+import matplotlib.pyplot as plt
 import numpy as np, torch
 from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
 from germano_common import *
+
+
+def save_training_sample_diagnostics(
+    source_path,
+    field_names,
+    fine_n,
+    coarse_n,
+    alpha,
+    lx,
+    ly,
+    dtype,
+    laplacian_order,
+    output_dir,
+):
+    """Save one deterministic DNS/filter/downsampling training example."""
+    dns = load_dns_snapshot(
+        source_path,
+        field_names,
+        fine_n,
+        lx,
+        ly,
+        dtype=dtype,
+        laplacian_order=laplacian_order,
+    )
+    coarse, filtered = filter_snapshot(
+        dns,
+        alpha,
+        lx,
+        ly,
+        coarse_n,
+        dtype=dtype,
+        laplacian_order=laplacian_order,
+    )
+    output_dir.mkdir(parents=True, exist_ok=True)
+    stages = (
+        ("DNS", dns),
+        (f"Filtered {fine_n}", filtered),
+        (f"Filtered and downsampled {coarse_n}", coarse),
+    )
+
+    fig, axes = plt.subplots(
+        len(stages),
+        len(field_names),
+        figsize=(5.2 * len(field_names), 4.5 * len(stages)),
+        squeeze=False,
+    )
+    for row, (stage, values) in enumerate(stages):
+        for channel, name in enumerate(field_names):
+            ax = axes[row, channel]
+            image = ax.imshow(
+                values[channel].T,
+                origin="lower",
+                extent=(0.0, lx, 0.0, ly),
+                aspect="equal",
+                cmap={"U": "Blues", "V": "RdBu_r", "W": "hot"}.get(
+                    name, "viridis"
+                ),
+            )
+            ax.set_title(f"{stage}: {HW_FIELD_LABELS.get(name, name)}")
+            ax.set_xlabel("x")
+            ax.set_ylabel("y")
+            fig.colorbar(image, ax=ax)
+    fig.suptitle(f"Training sample: {source_path}", fontsize=11)
+    fig.tight_layout()
+    fields_path = output_dir / "training_sample_fields.png"
+    fig.savefig(fields_path, dpi=180)
+    plt.close(fig)
+
+    fig, axes = plt.subplots(
+        1, len(field_names), figsize=(5.8 * len(field_names), 5.0),
+        squeeze=False,
+    )
+    for channel, (ax, name) in enumerate(zip(axes[0], field_names)):
+        for stage, values in stages:
+            nx, ny = values[channel].shape
+            x = np.arange(nx) * lx / nx
+            ax.plot(
+                x,
+                values[channel, :, ny // 2],
+                linewidth=1.4,
+                marker="o" if nx == coarse_n else None,
+                markersize=2.5,
+                label=f"{stage} (y={ly * (ny // 2) / ny:g})",
+            )
+        ax.set_title(f"{HW_FIELD_LABELS.get(name, name)} centerline")
+        ax.set_xlabel("x")
+        ax.set_ylabel(HW_FIELD_LABELS.get(name, name))
+        ax.grid(True, alpha=0.25)
+        ax.legend()
+    fig.tight_layout()
+    centerline_path = output_dir / "training_sample_centerlines.png"
+    fig.savefig(centerline_path, dpi=180)
+    plt.close(fig)
+
+    fig, axes = plt.subplots(
+        1, len(field_names), figsize=(5.8 * len(field_names), 5.0),
+        squeeze=False,
+    )
+    for channel, (ax, name) in enumerate(zip(axes[0], field_names)):
+        for stage, values in stages:
+            k, power = isotropic_spectrum(values[channel], lx, ly)
+            positive = (k > 0) & (power > 0)
+            ax.loglog(
+                k[positive],
+                power[positive],
+                linewidth=1.5,
+                marker="o" if values.shape[-1] == coarse_n else None,
+                markersize=3,
+                label=stage,
+            )
+        coarse_nyquist = min(
+            np.pi / (lx / coarse_n), np.pi / (ly / coarse_n)
+        )
+        ax.axvline(
+            coarse_nyquist,
+            color="0.4",
+            linestyle=":",
+            linewidth=1.2,
+            label=f"{coarse_n}-grid Nyquist",
+        )
+        ax.set_title(f"{HW_FIELD_LABELS.get(name, name)} spectrum")
+        ax.set_xlabel(r"wavenumber $k$")
+        ax.set_ylabel("shell-summed power")
+        ax.set_ylim(bottom=1e-12)
+        ax.grid(True, which="both", alpha=0.25)
+        ax.legend()
+    fig.tight_layout()
+    spectra_path = output_dir / "training_sample_spectra.png"
+    fig.savefig(spectra_path, dpi=180)
+    plt.close(fig)
+
+    print(
+        "Saved first training-sample fields, centerlines, and spectra to "
+        f"{output_dir} (source: {source_path})."
+    )
+    return fields_path, centerline_path, spectra_path
 
 
 class Tee:
@@ -71,6 +208,7 @@ def run_epoch(
     post_cutoff_order,
     learn_vorticity,
     laplacian_order,
+    invert_derived_vorticity,
     optimizer=None,
 ):
     training = optimizer is not None
@@ -126,6 +264,7 @@ def run_epoch(
                 post_cutoff_order,
                 learn_vorticity,
                 laplacian_order,
+                invert_derived_vorticity,
             )
             if training:
                 loss.backward()
@@ -271,6 +410,15 @@ def parse_args():
         ),
     )
     p.add_argument(
+        "--invert-derived-vorticity",
+        action="store_true",
+        help=(
+            "Predict filtered U and V, derive filtered W as Laplacian(V), "
+            "then retain the independently inverse-Germano-reconstructed W. "
+            "Without this option, DNS W is replaced by Laplacian(DNS V)."
+        ),
+    )
+    p.add_argument(
         "--laplacian-order",
         type=int,
         choices=(2, 4),
@@ -353,6 +501,11 @@ def parse_args():
 
 def run_training(a):
     set_seed(a.seed)
+    if a.learn_vorticity and a.invert_derived_vorticity:
+        raise ValueError(
+            "--invert-derived-vorticity cannot be combined with "
+            "--learn-vorticity; it derives filtered W from predicted V."
+        )
     torch_dtype = getattr(torch, a.precision)
     numpy_dtype = getattr(np, a.precision)
     if tuple(a.fields) != HW_FIELD_NAMES:
@@ -442,6 +595,18 @@ def run_training(a):
 
     train_ds = ds(tr, use_random_periodic_shift)
     val_ds, test_ds = ds(va), ds(te)
+    save_training_sample_diagnostics(
+        tr[0],
+        a.fields,
+        a.fine_n,
+        a.coarse_n,
+        alpha,
+        a.lx,
+        a.ly,
+        numpy_dtype,
+        a.laplacian_order,
+        a.output_dir / "training_sample_diagnostics",
+    )
     kw = dict(
         batch_size=a.batch_size,
         num_workers=a.num_workers,
@@ -487,6 +652,21 @@ def run_training(a):
         if checkpoint_learns_vorticity != a.learn_vorticity:
             raise ValueError(
                 "--learn-vorticity must match the resumed checkpoint."
+            )
+        checkpoint_inverts_derived_vorticity = bool(
+            c.get(
+                "invert_derived_vorticity",
+                c.get("training_parameters", {}).get(
+                    "invert_derived_vorticity", False
+                ),
+            )
+        )
+        if (
+            checkpoint_inverts_derived_vorticity
+            != a.invert_derived_vorticity
+        ):
+            raise ValueError(
+                "--invert-derived-vorticity must match the resumed checkpoint."
             )
         checkpoint_operator = c.get(
             "vorticity_operator",
@@ -576,6 +756,13 @@ def run_training(a):
         vorticity_mode=(
             "learned_channel" if a.learn_vorticity else "potential_laplacian"
         ),
+        dns_vorticity_mode=(
+            "learned_channel"
+            if a.learn_vorticity
+            else "inverse_filtered_potential_laplacian"
+            if a.invert_derived_vorticity
+            else "potential_laplacian"
+        ),
         convolution_padding="circular",
         interpolation_boundary="periodic",
         periodic_directions={"x": a.periodic_x, "y": a.periodic_y},
@@ -632,6 +819,7 @@ def run_training(a):
             a.post_cutoff_order,
             a.learn_vorticity,
             a.laplacian_order,
+            a.invert_derived_vorticity,
             opt,
         )
         vm = run_epoch(
@@ -653,6 +841,7 @@ def run_training(a):
             a.post_cutoff_order,
             a.learn_vorticity,
             a.laplacian_order,
+            a.invert_derived_vorticity,
         )
         row = {
             "epoch": epoch,
@@ -694,6 +883,14 @@ def run_training(a):
                 if a.learn_vorticity
                 else "potential_laplacian"
             ),
+            "dns_vorticity_mode": (
+                "learned_channel"
+                if a.learn_vorticity
+                else "inverse_filtered_potential_laplacian"
+                if a.invert_derived_vorticity
+                else "potential_laplacian"
+            ),
+            "invert_derived_vorticity": a.invert_derived_vorticity,
             "model_output_channels": model_output_channels,
             "training_parameters": parameters,
             "fine_n": a.fine_n,
@@ -754,6 +951,7 @@ def run_training(a):
         a.post_cutoff_order,
         a.learn_vorticity,
         a.laplacian_order,
+        a.invert_derived_vorticity,
     )
     for name, value in test.items():
         writer.add_scalar(f"metrics/test/{name}", value, int(c["epoch"]))

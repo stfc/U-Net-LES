@@ -99,7 +99,7 @@ from visualization_common import (
 _HERE = Path(__file__).resolve().parent
 _DEFAULT_CHECKPOINT = (
     _HERE
-    / "results/germano_training_output_v9/checkpoints/best.pt"
+    / "results/germano_training_output_v10/checkpoints/best.pt"
 )
 CHECKPOINT = Path(os.environ.get("PBOUT_UNET_CHECKPOINT", _DEFAULT_CHECKPOINT))
 _dns_path = os.environ.get("PBOUT_UNET_DNS_PATH")
@@ -244,6 +244,8 @@ def _print_init_metadata(initial_state: str) -> None:
         "initial_state": initial_state,
         "implicit": IMPLICIT,
         "vorticity_mode": VORTICITY_MODE,
+        "dns_vorticity_mode": DNS_VORTICITY_MODE,
+        "invert_derived_vorticity": INVERT_DERIVED_VORTICITY,
         "vorticity_operator": VORTICITY_OPERATOR,
         "checkpoint_laplacian_order": CHECKPOINT_LAPLACIAN_ORDER,
         "laplacian_order": LAPLACIAN_ORDER,
@@ -329,6 +331,23 @@ if PRECISION not in ("float32", "float64"):
 TORCH_DTYPE = getattr(torch, PRECISION)
 NUMPY_DTYPE = getattr(np, PRECISION)
 VORTICITY_MODE = _checkpoint.get("vorticity_mode", "potential_laplacian")
+INVERT_DERIVED_VORTICITY = bool(
+    _checkpoint.get(
+        "invert_derived_vorticity",
+        _checkpoint.get("training_parameters", {}).get(
+            "invert_derived_vorticity", False
+        ),
+    )
+)
+DNS_VORTICITY_MODE = _checkpoint.get(
+    "dns_vorticity_mode",
+    _checkpoint.get("training_parameters", {}).get(
+        "dns_vorticity_mode",
+        "inverse_filtered_potential_laplacian"
+        if INVERT_DERIVED_VORTICITY
+        else VORTICITY_MODE,
+    ),
+)
 VORTICITY_OPERATOR = _checkpoint.get(
     "vorticity_operator",
     _checkpoint.get("training_parameters", {}).get(
@@ -347,6 +366,16 @@ LAPLACIAN_ORDER = int(
 if LAPLACIAN_ORDER not in (2, 4):
     raise ValueError("PBOUT_UNET_LAPLACIAN_ORDER must be 2 or 4")
 LEARN_VORTICITY = VORTICITY_MODE == "learned_channel"
+if LEARN_VORTICITY and INVERT_DERIVED_VORTICITY:
+    raise ValueError(
+        "Checkpoint cannot both learn W independently and request inversion "
+        "of W derived from filtered V."
+    )
+if (
+    "PBOUT_UNET_VORTICITY_FROM_POTENTIAL" not in os.environ
+    and INVERT_DERIVED_VORTICITY
+):
+    VORTICITY_FROM_POTENTIAL = False
 OUTPUT_CHANNELS = int(
     _checkpoint.get("model_output_channels", 3 if LEARN_VORTICITY else 2)
 )
@@ -578,6 +607,8 @@ def _save_dns_init_unet_validation(
         lx=np.asarray(LX),
         ly=np.asarray(LY),
         laplacian_order=np.asarray(LAPLACIAN_ORDER),
+        invert_derived_vorticity=np.asarray(INVERT_DERIVED_VORTICITY),
+        dns_vorticity_mode=np.asarray(DNS_VORTICITY_MODE),
         filtered_relative_l2=relative_l2(
             numpy_arrays["incoming_filtered_fine"],
             numpy_arrays["unet_filtered_fine"],

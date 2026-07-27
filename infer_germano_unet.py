@@ -270,6 +270,23 @@ def main():
     alpha = float(c["alpha"])
     base_channels = int(c["base_channels"])
     vorticity_mode = c.get("vorticity_mode", "potential_laplacian")
+    invert_derived_vorticity = bool(
+        c.get(
+            "invert_derived_vorticity",
+            c.get("training_parameters", {}).get(
+                "invert_derived_vorticity", False
+            ),
+        )
+    )
+    dns_vorticity_mode = c.get(
+        "dns_vorticity_mode",
+        c.get("training_parameters", {}).get(
+            "dns_vorticity_mode",
+            "inverse_filtered_potential_laplacian"
+            if invert_derived_vorticity
+            else vorticity_mode,
+        ),
+    )
     vorticity_operator = c.get(
         "vorticity_operator",
         c.get("training_parameters", {}).get(
@@ -288,6 +305,11 @@ def main():
         else int(a.laplacian_order)
     )
     learn_vorticity = vorticity_mode == "learned_channel"
+    if learn_vorticity and invert_derived_vorticity:
+        raise ValueError(
+            "Checkpoint cannot both learn W independently and request "
+            "inversion of W derived from filtered V."
+        )
     model_output_channels = int(
         c.get("model_output_channels", 3 if learn_vorticity else 2)
     )
@@ -319,10 +341,15 @@ def main():
         )
     )
     requested_vorticity_from_potential = environment_bool(
-        "PBOUT_UNET_VORTICITY_FROM_POTENTIAL", True
+        "PBOUT_UNET_VORTICITY_FROM_POTENTIAL",
+        not invert_derived_vorticity,
     )
     vorticity_from_potential = requested_vorticity_from_potential
-    if not learn_vorticity and not requested_vorticity_from_potential:
+    if (
+        not learn_vorticity
+        and not invert_derived_vorticity
+        and not requested_vorticity_from_potential
+    ):
         print(
             "PBOUT_UNET_VORTICITY_FROM_POTENTIAL=0 cannot provide an "
             "independently learned W with this potential-laplacian checkpoint; "
@@ -367,6 +394,8 @@ def main():
         ),
         "vorticity_from_potential": vorticity_from_potential,
         "vorticity_mode": vorticity_mode,
+        "dns_vorticity_mode": dns_vorticity_mode,
+        "invert_derived_vorticity": invert_derived_vorticity,
         "vorticity_operator": vorticity_operator,
         "checkpoint_laplacian_order": checkpoint_laplacian_order,
         "laplacian_order": laplacian_order,
@@ -475,6 +504,10 @@ def main():
             "filtered_32": coarse,
             "inverse_input_256": pf_np,
             "inverse_input_mode": np.asarray(a.inverse_input),
+            "invert_derived_vorticity": np.asarray(
+                invert_derived_vorticity
+            ),
+            "dns_vorticity_mode": np.asarray(dns_vorticity_mode),
             "reconstructed_dns_256": pd_np,
             "field_names": np.asarray(fields),
             "source_file": np.asarray(str(p)),
