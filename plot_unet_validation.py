@@ -277,7 +277,7 @@ def plot_field(
     fig, axes = plt.subplots(
         2,
         4,
-        figsize=(17, 4.25 * rows),
+        figsize=(17, 8.5),
         constrained_layout=True,
     )
     axes = axes.ravel()

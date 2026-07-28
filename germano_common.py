@@ -2,7 +2,7 @@
 """Common components for Germano-filter U-Net training and inference."""
 
 from __future__ import annotations
-import math, random
+import math, os, random
 from pathlib import Path
 from typing import Sequence
 import matplotlib.pyplot as plt
@@ -10,6 +10,10 @@ import numpy as np
 import torch
 from torch import nn
 from torch.utils.data import Dataset
+
+SPECTRUM_Y_MIN = float(os.environ.get("SPECTRUM_Y_MIN", "1e-10"))
+if not math.isfinite(SPECTRUM_Y_MIN) or SPECTRUM_Y_MIN <= 0:
+    raise ValueError("SPECTRUM_Y_MIN must be finite and greater than zero")
 
 HW_FIELD_NAMES = ("U", "V", "P")
 HW_FIELD_LABELS = {
@@ -142,7 +146,13 @@ def inverse_germano_torch(
         mult = mult * torch.exp(
             -(torch.sqrt(k2) / cutoff_wavenumber) ** cutoff_order
         )
-    return torch.fft.ifft2(mult * fh, dim=(-2, -1)).real
+    reconstructed = torch.fft.ifft2(mult * fh, dim=(-2, -1)).real
+    return enforce_zero_spatial_mean(reconstructed)
+
+
+def enforce_zero_spatial_mean(fields: torch.Tensor) -> torch.Tensor:
+    """Project every batch/channel field onto the zero-spatial-mean subspace."""
+    return fields - fields.mean(dim=(-2, -1), keepdim=True)
 
 
 def spectral_cutoff_torch(
@@ -556,16 +566,34 @@ def calculate_losses(
         post_cutoff_fraction,
         post_cutoff_order,
     )
+    pd = enforce_zero_spatial_mean(pd)
     lf = nn.functional.l1_loss(pn, filtered_target_normalised)
     dns_absolute_error = torch.abs((pd - dns_target) / dns_std)
     ld = dns_absolute_error.mean()
-    filtered_target = filtered_target_normalised * std + mean
-    predicted_energy = hw_energy_spectrum_torch(pf, lx, ly)
-    target_energy = hw_energy_spectrum_torch(filtered_target, lx, ly)
-    ls = nn.functional.l1_loss(
-        torch.log1p(predicted_energy), torch.log1p(target_energy)
+    predicted_energy = hw_energy_spectrum_torch(pd, lx, ly)
+    target_energy = hw_energy_spectrum_torch(dns_target, lx, ly)
+    unresolved = above_les_cutoff_mask(
+        predicted_energy.shape[-2:],
+        coarse.shape[-2:],
+        lx,
+        ly,
+        predicted_energy.device,
+        predicted_energy.dtype,
     )
-    spectrum_relative_l2 = relative_l2(target_energy, predicted_energy)
+    predicted_unresolved_energy = predicted_energy[..., unresolved]
+    target_unresolved_energy = target_energy[..., unresolved]
+    if unresolved.any():
+        ls = nn.functional.l1_loss(
+            torch.log1p(predicted_unresolved_energy),
+            torch.log1p(target_unresolved_energy),
+        )
+        spectrum_relative_l2 = relative_l2(
+            target_unresolved_energy, predicted_unresolved_energy
+        )
+    else:
+        # There are no unresolved modes when the LES and DNS grids coincide.
+        ls = predicted_energy.sum() * 0.0
+        spectrum_relative_l2 = ls.detach()
     total = lf + lambda_dns * ld + lambda_spectrum * ls
     return (
         total,
@@ -609,6 +637,26 @@ def hw_energy_spectrum_torch(fields, lx, ly):
         + dphi_dx_hat.abs().square()
         + dphi_dy_hat.abs().square()
     ) / normalization
+
+
+def above_les_cutoff_mask(
+    fine_shape, coarse_shape, lx, ly, device=None, dtype=None
+):
+    """Select Fourier modes whose radial wavenumber exceeds LES Nyquist."""
+    fine_nx, fine_ny = fine_shape
+    coarse_nx, coarse_ny = coarse_shape
+    dtype = dtype or torch.get_default_dtype()
+    kx = 2 * math.pi * torch.fft.fftfreq(
+        fine_nx, d=lx / fine_nx, device=device, dtype=dtype
+    )
+    ky = 2 * math.pi * torch.fft.fftfreq(
+        fine_ny, d=ly / fine_ny, device=device, dtype=dtype
+    )
+    les_cutoff = min(
+        math.pi * coarse_nx / lx,
+        math.pi * coarse_ny / ly,
+    )
+    return torch.sqrt(kx[:, None].square() + ky[None, :].square()) > les_cutoff
 
 
 def relative_l2(reference, prediction):
@@ -741,7 +789,7 @@ def save_spectrum_plot(
     )
     ax.set_xlabel(r"$k$")
     ax.set_ylabel(r"Shell energy $E(k)$")
-    ax.set_ylim(bottom=10e-10)
+    ax.set_ylim(bottom=SPECTRUM_Y_MIN)
     ax.grid(True, which="both", alpha=0.3)
     ax.legend(numpoints=1)
     fig.tight_layout()

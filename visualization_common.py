@@ -9,10 +9,42 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
+from PIL import Image
 
-from germano_common import HW_FIELD_LABELS, isotropic_spectrum
+from germano_common import (
+    HW_FIELD_LABELS,
+    SPECTRUM_Y_MIN,
+    isotropic_spectrum,
+)
 
-SPECTRUM_Y_MIN = 1e-12
+
+def save_png_animation(
+    frame_paths,
+    output_path: Path,
+    fps: float = 5.0,
+) -> Path:
+    """Combine an ordered PNG sequence into an animated GIF."""
+    paths = sorted(Path(path) for path in frame_paths)
+    if not paths:
+        raise ValueError(f"No animation frames were provided for {output_path}")
+    duration_ms = max(1, round(1000.0 / fps))
+    frames = []
+    try:
+        for path in paths:
+            with Image.open(path) as image:
+                frames.append(image.convert("RGB").copy())
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        frames[0].save(
+            output_path,
+            save_all=True,
+            append_images=frames[1:],
+            duration=duration_ms,
+            loop=0,
+        )
+    finally:
+        for frame in frames:
+            frame.close()
+    return output_path
 
 
 def save_field_images(
@@ -101,15 +133,39 @@ def save_field_spectrum_comparison(
     ly: float,
     output_path: Path,
     cutoff_fraction: float | None = None,
+    les_input: np.ndarray | None = None,
+    unet_output: np.ndarray | None = None,
+    inverse_filtered_output: np.ndarray | None = None,
 ) -> Path:
-    """Plot every reconstructed field spectrum against DNS."""
+    """Plot reconstructed spectra against DNS and optional LES input."""
     count = len(field_names)
     fig, axes = plt.subplots(1, count, figsize=(5.8 * count, 5.2), squeeze=False)
     for channel, (ax, name) in enumerate(zip(axes[0], field_names)):
-        for values, label, color in (
+        plotted_fields = [
             (dns[channel], "DNS", "black"),
             (reconstructed[channel], "Reconstructed DNS", "tab:blue"),
-        ):
+        ]
+        if les_input is not None:
+            plotted_fields.insert(
+                1, (les_input[channel], "LES input", "tab:orange")
+            )
+        insert_at = 2 if les_input is not None else 1
+        if unet_output is not None:
+            plotted_fields.insert(
+                insert_at,
+                (unet_output[channel], "U-Net output", "tab:green"),
+            )
+            insert_at += 1
+        if inverse_filtered_output is not None:
+            plotted_fields.insert(
+                insert_at,
+                (
+                    inverse_filtered_output[channel],
+                    "Inverse-cutoff output",
+                    "tab:red",
+                ),
+            )
+        for values, label, color in plotted_fields:
             k, power = isotropic_spectrum(values, lx, ly)
             positive = (k > 0) & (power > 0)
             ax.loglog(k[positive], power[positive], color=color, label=label)
@@ -206,6 +262,57 @@ def save_field_centerline_comparison(
     return output_path
 
 
+def save_vorticity_comparison(
+    reconstructed: np.ndarray,
+    laplacian: np.ndarray,
+    output_path: Path,
+    figure_title: str,
+) -> Path:
+    """Plot two vorticities, their difference, and horizontal centerlines."""
+    if reconstructed.shape != laplacian.shape or reconstructed.ndim != 2:
+        raise ValueError(
+            "reconstructed and laplacian vorticity must be matching 2-D arrays"
+        )
+    difference = reconstructed - laplacian
+    fields = (reconstructed, laplacian, difference)
+    titles = (
+        "Reconstructed vorticity",
+        r"Vorticity from $\nabla^2\phi$",
+        r"Difference: reconstructed $-\nabla^2\phi$",
+    )
+    nx, ny = reconstructed.shape
+    center = ny // 2
+    x = np.arange(nx)
+    fig, axes = plt.subplots(2, 3, figsize=(17.0, 9.0), squeeze=False)
+    for column, (values, title) in enumerate(zip(fields, titles)):
+        maximum = float(np.max(np.abs(values)))
+        limits = {"vmin": -maximum, "vmax": maximum} if maximum > 0 else {}
+        image = axes[0, column].imshow(
+            values.T,
+            origin="lower",
+            extent=(0, nx, 0, ny),
+            aspect="equal",
+            cmap="coolwarm",
+            **limits,
+        )
+        axes[0, column].set_title(title)
+        axes[0, column].set_xlabel("x [pixels]")
+        axes[0, column].set_ylabel("y [pixels]")
+        fig.colorbar(image, ax=axes[0, column])
+
+        axes[1, column].plot(x, values[:, center], linewidth=1.3)
+        axes[1, column].axhline(0.0, color="0.5", linewidth=0.7)
+        axes[1, column].set_title(f"{title}, centerline y={center}")
+        axes[1, column].set_xlabel("x [pixels]")
+        axes[1, column].set_ylabel("vorticity")
+        axes[1, column].grid(True, alpha=0.25)
+    fig.suptitle(figure_title)
+    fig.tight_layout()
+    fig.savefig(output_path, dpi=180)
+    plt.close(fig)
+    return output_path
+
+
 def save_initial_dns_fields(
     fields: np.ndarray,
     reference_fields: np.ndarray | None,
@@ -269,12 +376,38 @@ def save_dns_snapshot(
     simtime: float,
     output_dir: Path,
     save_images: bool = False,
+    reference_dns: np.ndarray | None = None,
+    lx: float | None = None,
+    ly: float | None = None,
+    cutoff_fraction: float | None = None,
+    les_input: np.ndarray | None = None,
+    unet_output: np.ndarray | None = None,
+    inverse_filtered_output: np.ndarray | None = None,
 ) -> Path:
-    """Save one reconstructed DNS batch as NPZ and optional field images."""
+    """Save one reconstructed DNS batch and optional fields/spectra images."""
     if dns.ndim != 4 or dns.shape[1] != len(field_names):
         raise ValueError(
             "dns must have shape (batch, len(field_names), nx, ny)"
         )
+    if reference_dns is not None:
+        if reference_dns.shape != dns.shape:
+            raise ValueError("reference_dns must have the same shape as dns")
+        if lx is None or ly is None:
+            raise ValueError(
+                "lx and ly are required when saving spectrum comparisons"
+            )
+    for name, values in (
+        ("les_input", les_input),
+        ("unet_output", unet_output),
+        ("inverse_filtered_output", inverse_filtered_output),
+    ):
+        if values is not None and (
+            values.ndim != 4 or values.shape[:2] != dns.shape[:2]
+        ):
+            raise ValueError(
+                f"{name} must have shape "
+                "(batch, len(field_names), nx_les, ny_les)"
+            )
     fields_dir = output_dir / "fields"
     fields_dir.mkdir(parents=True, exist_ok=True)
     output_fields = dns[0] if len(dns) == 1 else dns.transpose(1, 0, 2, 3)
@@ -300,6 +433,40 @@ def save_dns_snapshot(
                 images_dir / f"fields_DNS_{time_step:07d}{suffix}.png",
                 f"Reconstructed DNS, step {time_step}, t={simtime:g}",
             )
+            if les_input is not None:
+                save_field_images(
+                    les_input[batch_index],
+                    field_names,
+                    images_dir
+                    / f"fields_LES_{time_step:07d}{suffix}.png",
+                    f"LES input, step {time_step}, t={simtime:g}",
+                )
+            if reference_dns is not None:
+                save_field_spectrum_comparison(
+                    fields,
+                    reference_dns[batch_index],
+                    field_names,
+                    lx,
+                    ly,
+                    images_dir
+                    / f"fields_DNS_spectrum_{time_step:07d}{suffix}.png",
+                    cutoff_fraction,
+                    les_input=(
+                        None
+                        if les_input is None
+                        else les_input[batch_index]
+                    ),
+                    unet_output=(
+                        None
+                        if unet_output is None
+                        else unet_output[batch_index]
+                    ),
+                    inverse_filtered_output=(
+                        None
+                        if inverse_filtered_output is None
+                        else inverse_filtered_output[batch_index]
+                    ),
+                )
     return snapshot_path
 
 
@@ -596,8 +763,16 @@ def save_arakawa_comparison(
     stem: str = "arakawa_DNS",
     cutoff_fraction: float | None = None,
     spectrum_stem: str | None = None,
+    figure_title: str | None = None,
+    reference_label: str = "Original DNS",
+    filtered_terms: tuple[np.ndarray, np.ndarray] | None = None,
+    current_terms_label: str | None = None,
+    filtered_terms_label: str = "Post-filtered Arakawa",
+    spectrum_variants: list[
+        tuple[str, tuple[np.ndarray, np.ndarray], str]
+    ] | None = None,
 ) -> tuple[Path, Path]:
-    """Save Arakawa fields and spectra, optionally compared with DNS."""
+    """Save Arakawa fields and spectra, optionally including filtered terms."""
     output_dir.mkdir(parents=True, exist_ok=True)
     current = calculate_arakawa_terms(reconstructed, lx, ly)
     reference = (
@@ -607,15 +782,17 @@ def save_arakawa_comparison(
     nx, ny = reconstructed.shape[-2:]
 
     field_path = output_dir / f"{stem}.png"
-    current_label = "Reconstructed DNS" if reference is not None else "DNS"
+    current_label = current_terms_label or (
+        "Reconstructed DNS" if reference is not None else "DNS"
+    )
     _plot_arakawa_fields(
         current,
         titles,
-        current_label,
+        figure_title or current_label,
         field_path,
         reference_fields=reference,
         current_label=current_label,
-        reference_label="Original DNS",
+        reference_label=reference_label,
     )
 
     spectrum_path = output_dir / (
@@ -624,10 +801,21 @@ def save_arakawa_comparison(
     fig, axes = plt.subplots(1, 2, figsize=(12.2, 5.2))
     for index, (ax, values, title) in enumerate(zip(axes, current, titles)):
         plotted_fields = [(values, current_label, "tab:blue")]
-        if reference is not None:
-            plotted_fields.insert(
-                0, (reference[index], "Original DNS", "black")
+        if filtered_terms is not None:
+            plotted_fields.append(
+                (
+                    filtered_terms[index],
+                    filtered_terms_label,
+                    "tab:orange",
+                )
             )
+        if spectrum_variants is not None:
+            plotted_fields.extend(
+                (terms[index], label, color)
+                for label, terms, color in spectrum_variants
+            )
+        if reference is not None:
+            plotted_fields.insert(0, (reference[index], reference_label, "black"))
         for field, label, color in plotted_fields:
             k, power = isotropic_spectrum(field, lx, ly)
             positive = (k > 0) & (power > 0)
@@ -639,6 +827,8 @@ def save_arakawa_comparison(
         ax.set_ylim(bottom=SPECTRUM_Y_MIN)
         ax.grid(True, which="both", alpha=0.25)
         ax.legend()
+    if figure_title is not None:
+        fig.suptitle(figure_title)
     fig.tight_layout()
     fig.savefig(spectrum_path, dpi=180)
     plt.close(fig)

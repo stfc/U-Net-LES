@@ -13,6 +13,7 @@ import numpy as np
 from germano_common import (
     HW_FIELD_LABELS,
     HW_FIELD_NAMES,
+    SPECTRUM_Y_MIN,
     filter_snapshot,
     isotropic_spectrum,
     k2_numpy,
@@ -129,7 +130,7 @@ def save_spectra(
     axis.set_title(f"{HW_FIELD_LABELS[name]}: isotropic spectrum comparison")
     axis.set_xlabel(r"$k$")
     axis.set_ylabel(r"Shell power $P(k)$")
-    axis.set_ylim(bottom=10e-10)
+    axis.set_ylim(bottom=SPECTRUM_Y_MIN)
     axis.grid(True, which="both", alpha=0.3)
     axis.legend(numpoints=1)
     figure.tight_layout()

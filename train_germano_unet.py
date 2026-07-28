@@ -136,7 +136,7 @@ def save_training_sample_diagnostics(
         ax.set_title(f"{HW_FIELD_LABELS.get(name, name)} spectrum")
         ax.set_xlabel(r"wavenumber $k$")
         ax.set_ylabel("shell-summed power")
-        ax.set_ylim(bottom=1e-12)
+        ax.set_ylim(bottom=SPECTRUM_Y_MIN)
         ax.grid(True, which="both", alpha=0.25)
         ax.legend()
     fig.tight_layout()
@@ -551,7 +551,18 @@ def parse_args():
         help="Post-inversion smooth cutoff order (default: 8)",
     )
     p.add_argument("--num-workers", type=int, default=0)
-    p.add_argument("--save-every", type=int, default=25)
+    p.add_argument(
+        "--save-every",
+        type=int,
+        default=25,
+        help="Save an epoch-numbered checkpoint every N epochs; 0 disables it",
+    )
+    p.add_argument(
+        "--diagnostic-every",
+        type=int,
+        default=5,
+        help="Save training diagnostic images every N epochs; 0 disables them",
+    )
     p.add_argument("--seed", type=int, default=7)
     p.add_argument("--resume", type=Path)
     p.add_argument(
@@ -755,6 +766,12 @@ def run_training(a):
         ),
         differential_filter="1 / (1 + alpha^2 k^2)",
         downsampling="centered Fourier-mode truncation",
+        spectrum_loss_fields="reconstructed_dns_vs_dns_target",
+        spectrum_loss_region="radial_wavenumbers_above_les_nyquist",
+        spectrum_loss_les_cutoff_wavenumber=min(
+            np.pi * a.coarse_n / a.lx,
+            np.pi * a.coarse_n / a.ly,
+        ),
         vorticity_operator="learned_independent_channel",
         vorticity_mode="learned_channel",
         dns_vorticity_mode="independent_channel",
@@ -910,6 +927,7 @@ def run_training(a):
             torch.save(c, ckdir / "best.pt")
         if a.save_every > 0 and epoch % a.save_every == 0:
             torch.save(c, ckdir / f"epoch_{epoch:05d}.pt")
+        if a.diagnostic_every > 0 and epoch % a.diagnostic_every == 0:
             save_epoch_diagnostics(
                 epoch,
                 model,

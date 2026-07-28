@@ -21,6 +21,13 @@ DNS_N="${DNS_N:-256}"
 LES_N="${LES_N:-64}"
 LX="${LX:-50.176}"
 ALPHA="${ALPHA:-$(awk -v lx="${LX}" -v n="${LES_N}" 'BEGIN {print lx / n}')}"
+INVERSE_CUTOFF_FRACTION="${INVERSE_CUTOFF_FRACTION:-$(
+  awk -v les="${LES_N}" -v dns="${DNS_N}" \
+    'BEGIN {fraction = 2.0 * les / dns; if (fraction > 1.0) fraction = 1.0; print fraction}'
+)}"
+INVERSE_CUTOFF_ORDER="${INVERSE_CUTOFF_ORDER:-8}"
+CHECKPOINT_EVERY="${CHECKPOINT_EVERY:-25}"
+DIAGNOSTIC_EVERY="${DIAGNOSTIC_EVERY:-5}"
 DATASET="${DATASET:-../../data/BOUT_runs/HW_2D/Papers/PoP23/HW_N${DNS_N}/fields/}"
 OUTPUT_DIR="${OUTPUT_DIR:-germano_training_output_dns${DNS_N}_les${LES_N}}"
 
@@ -32,12 +39,15 @@ python train_germano_unet.py \
   --fine-n "${DNS_N}" \
   --coarse-n "${LES_N}" \
   --alpha "${ALPHA}" \
+  --inverse-cutoff-fraction "${INVERSE_CUTOFF_FRACTION}" \
+  --inverse-cutoff-order "${INVERSE_CUTOFF_ORDER}" \
   --precision float64 \
   --lx "${LX}" \
   --ly 50.176 \
   --lambda-spectrum 1e6 \
   --lambda-dns 0.1 \
-  --save-every 5 \
+  --save-every "${CHECKPOINT_EVERY}" \
+  --diagnostic-every "${DIAGNOSTIC_EVERY}" \
   --no-normalize
 
 #python infer_germano_unet.py --checkpoint germano_training_output_32_v3/checkpoints/best.pt --input fields_HW_run0_time501.npz --output-dir inference_output

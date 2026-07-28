@@ -263,7 +263,7 @@ def main():
                 post_cutoff_fraction,
                 post_cutoff_order,
             )
-            pd = pd_unconstrained
+            pd = enforce_zero_spatial_mean(pd_unconstrained)
         pf_np, pd_np = pf[0].cpu().numpy(), pd[0].cpu().numpy()
         out = a.output_dir / p.stem
         out.mkdir(parents=True, exist_ok=True)
