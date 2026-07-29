@@ -136,13 +136,14 @@ def save_field_spectrum_comparison(
     les_input: np.ndarray | None = None,
     unet_output: np.ndarray | None = None,
     inverse_filtered_output: np.ndarray | None = None,
+    reference_label: str = "DNS",
 ) -> Path:
     """Plot reconstructed spectra against DNS and optional LES input."""
     count = len(field_names)
     fig, axes = plt.subplots(1, count, figsize=(5.8 * count, 5.2), squeeze=False)
     for channel, (ax, name) in enumerate(zip(axes[0], field_names)):
         plotted_fields = [
-            (dns[channel], "DNS", "black"),
+            (dns[channel], reference_label, "black"),
             (reconstructed[channel], "Reconstructed DNS", "tab:blue"),
         ]
         if les_input is not None:
@@ -225,6 +226,9 @@ def save_field_centerline_comparison(
     output_path: Path,
     reconstructed_label: str = "Reconstructed DNS",
     reference_label: str = "Target DNS",
+    additional_channel_lines: dict[
+        int, tuple[np.ndarray, str]
+    ] | None = None,
 ) -> Path:
     """Compare reconstructed and reference horizontal centerlines."""
     count = len(field_names)
@@ -249,6 +253,21 @@ def save_field_centerline_comparison(
             linewidth=1.6,
             label=reconstructed_label,
         )
+        if additional_channel_lines and channel in additional_channel_lines:
+            values, label = additional_channel_lines[channel]
+            if values.shape != reconstructed[channel].shape:
+                raise ValueError(
+                    "Additional centerline field must match its reconstructed "
+                    "channel shape."
+                )
+            ax.plot(
+                x,
+                values[:, center],
+                color="tab:orange",
+                linestyle="-.",
+                linewidth=1.5,
+                label=label,
+            )
         ax.set_title(
             f"{HW_FIELD_LABELS.get(name, name)} centerline, y={center}"
         )
@@ -383,6 +402,7 @@ def save_dns_snapshot(
     les_input: np.ndarray | None = None,
     unet_output: np.ndarray | None = None,
     inverse_filtered_output: np.ndarray | None = None,
+    reference_label: str = "DNS",
 ) -> Path:
     """Save one reconstructed DNS batch and optional fields/spectra images."""
     if dns.ndim != 4 or dns.shape[1] != len(field_names):
@@ -466,6 +486,7 @@ def save_dns_snapshot(
                         if inverse_filtered_output is None
                         else inverse_filtered_output[batch_index]
                     ),
+                    reference_label=reference_label,
                 )
     return snapshot_path
 
@@ -833,3 +854,97 @@ def save_arakawa_comparison(
     fig.savefig(spectrum_path, dpi=180)
     plt.close(fig)
     return field_path, spectrum_path
+
+
+def save_arakawa_dns_field_comparison(
+    reconstructed_dns: np.ndarray,
+    incoming_dns: np.ndarray,
+    lx: float,
+    ly: float,
+    output_path: Path,
+    figure_title: str,
+) -> Path:
+    """Compare reconstructed and incoming-DNS Arakawa maps and centerlines."""
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    reconstructed_terms = calculate_arakawa_terms(reconstructed_dns, lx, ly)
+    incoming_terms = calculate_arakawa_terms(incoming_dns, lx, ly)
+    term_titles = (r"$J(\phi,\omega)$", r"$J(\phi,n)$")
+    nx, ny = reconstructed_terms[0].shape
+    center = ny // 2
+    x = np.arange(nx)
+    fig, axes = plt.subplots(2, 4, figsize=(21.0, 10.0), squeeze=False)
+    column_titles = (
+        "Incoming BOUT++ DNS",
+        "Reconstructed DNS",
+        "Reconstructed − incoming",
+        f"Centerline y={center}",
+    )
+    for row, (reconstructed, incoming, term_title) in enumerate(
+        zip(reconstructed_terms, incoming_terms, term_titles)
+    ):
+        difference = reconstructed - incoming
+        common_limit = max(
+            float(np.max(np.abs(reconstructed))),
+            float(np.max(np.abs(incoming))),
+        )
+        difference_limit = float(np.max(np.abs(difference)))
+        if common_limit == 0:
+            common_limit = np.finfo(np.float64).eps
+        if difference_limit == 0:
+            difference_limit = np.finfo(np.float64).eps
+        for column, (values, limit) in enumerate(
+            (
+                (incoming, common_limit),
+                (reconstructed, common_limit),
+                (difference, difference_limit),
+            )
+        ):
+            image = axes[row, column].imshow(
+                values.T,
+                origin="lower",
+                extent=(0, nx, 0, ny),
+                aspect="equal",
+                cmap="RdBu_r",
+                vmin=-limit,
+                vmax=limit,
+            )
+            axes[row, column].set_title(
+                f"{term_title}: {column_titles[column]}"
+            )
+            axes[row, column].set_xlabel("x [pixels]")
+            axes[row, column].set_ylabel("y [pixels]")
+            fig.colorbar(image, ax=axes[row, column])
+
+        centerline = axes[row, 3]
+        centerline.plot(
+            x,
+            incoming[:, center],
+            color="black",
+            linewidth=1.2,
+            label="Incoming BOUT++ DNS",
+        )
+        centerline.plot(
+            x,
+            reconstructed[:, center],
+            color="tab:blue",
+            linewidth=1.2,
+            label="Reconstructed DNS",
+        )
+        centerline.plot(
+            x,
+            difference[:, center],
+            color="tab:red",
+            linewidth=1.0,
+            label="Difference",
+        )
+        centerline.axhline(0.0, color="0.5", linewidth=0.7)
+        centerline.set_title(f"{term_title}: {column_titles[3]}")
+        centerline.set_xlabel("x [pixels]")
+        centerline.set_ylabel("Arakawa term")
+        centerline.grid(True, alpha=0.25)
+        centerline.legend()
+    fig.suptitle(figure_title)
+    fig.tight_layout()
+    fig.savefig(output_path, dpi=180)
+    plt.close(fig)
+    return output_path
