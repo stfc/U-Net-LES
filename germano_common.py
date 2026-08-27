@@ -41,13 +41,16 @@ def validate_hw_checkpoint(checkpoint: dict) -> None:
             "Retrain it with fields U, V, P before inference or resuming."
         )
     mode = checkpoint.get("vorticity_mode")
-    if mode != "learned_channel":
+    if mode not in ("learned_channel", "laplacian_of_potential"):
         raise ValueError(
-            "This checkpoint does not learn P as an independent channel. "
-            "Retrain it with the current three-output model."
+            "Checkpoint vorticity mode must be learned_channel or "
+            "laplacian_of_potential."
         )
-    if checkpoint.get("model_output_channels") != 3:
-        raise ValueError("Independent-P checkpoints require three model outputs.")
+    expected_outputs = 3 if mode == "learned_channel" else 2
+    if checkpoint.get("model_output_channels") != expected_outputs:
+        raise ValueError(
+            f"{mode} checkpoints require {expected_outputs} model outputs."
+        )
     validate_grid_pair(
         int(checkpoint["fine_n"]),
         int(checkpoint["coarse_n"]),
@@ -176,6 +179,42 @@ def spectral_cutoff_torch(
     multiplier = torch.exp(
         -(torch.sqrt(k2) / cutoff_wavenumber) ** cutoff_order
     )
+    fh = torch.fft.fft2(field, dim=(-2, -1))
+    return torch.fft.ifft2(multiplier * fh, dim=(-2, -1)).real
+
+
+POST_FILTER_TYPES = ("none", "high_order", "gaussian")
+
+
+def post_filter_torch(
+    field: torch.Tensor,
+    lx: float,
+    ly: float,
+    filter_type="high_order",
+    cutoff_fraction=None,
+    cutoff_order=8,
+) -> torch.Tensor:
+    """Apply a selected post-inversion spectral low-pass filter."""
+    if filter_type not in POST_FILTER_TYPES:
+        raise ValueError(
+            f"Unknown post filter {filter_type!r}; choose from "
+            f"{POST_FILTER_TYPES}."
+        )
+    if filter_type == "none":
+        return field
+    if filter_type == "high_order":
+        return spectral_cutoff_torch(
+            field, lx, ly, cutoff_fraction, cutoff_order
+        )
+    if cutoff_fraction is None:
+        return field
+    if not 0 < cutoff_fraction <= 1:
+        raise ValueError("cutoff_fraction must be in (0, 1].")
+    n = field.shape[-1]
+    k2 = k2_torch(n, lx, ly, field.device, field.dtype)
+    grid_nyquist = min(math.pi / (lx / n), math.pi / (ly / n))
+    sigma_k = cutoff_fraction * grid_nyquist
+    multiplier = torch.exp(-0.5 * k2 / sigma_k**2)
     fh = torch.fft.fft2(field, dim=(-2, -1))
     return torch.fft.ifft2(multiplier * fh, dim=(-2, -1)).real
 
@@ -538,14 +577,18 @@ def calculate_losses(
     lx,
     ly,
     lambda_dns,
-    lambda_spectrum,
+    vorticity_from_potential,
     inverse_cutoff_fraction,
     inverse_cutoff_order,
     post_cutoff_fraction=None,
     post_cutoff_order=8,
+    post_filter_type="high_order",
 ):
-    pf = model(coarse) * std + mean
-    pn = (pf - mean) / std
+    output_channels = 2 if vorticity_from_potential else 3
+    output_mean = mean[:, :output_channels]
+    output_std = std[:, :output_channels]
+    pf = model(coarse) * output_std + output_mean
+    pn = (pf - output_mean) / output_std
     inverse_input = spectral_cutoff_torch(
         pf,
         lx,
@@ -559,50 +602,30 @@ def calculate_losses(
         lx,
         ly,
     )
-    pd = spectral_cutoff_torch(
+    pd = post_filter_torch(
         pd,
         lx,
         ly,
+        post_filter_type,
         post_cutoff_fraction,
         post_cutoff_order,
     )
+    if vorticity_from_potential:
+        vorticity = periodic_laplacian_2nd_torch(pd[:, 1:2], lx, ly)
+        pd = torch.cat((pd, vorticity), dim=1)
     pd = enforce_zero_spatial_mean(pd)
-    lf = nn.functional.l1_loss(pn, filtered_target_normalised)
+    lf = nn.functional.l1_loss(
+        pn, filtered_target_normalised[:, :output_channels]
+    )
     dns_absolute_error = torch.abs((pd - dns_target) / dns_std)
     ld = dns_absolute_error.mean()
-    predicted_energy = hw_energy_spectrum_torch(pd, lx, ly)
-    target_energy = hw_energy_spectrum_torch(dns_target, lx, ly)
-    unresolved = above_les_cutoff_mask(
-        predicted_energy.shape[-2:],
-        coarse.shape[-2:],
-        lx,
-        ly,
-        predicted_energy.device,
-        predicted_energy.dtype,
-    )
-    predicted_unresolved_energy = predicted_energy[..., unresolved]
-    target_unresolved_energy = target_energy[..., unresolved]
-    if unresolved.any():
-        ls = nn.functional.l1_loss(
-            torch.log1p(predicted_unresolved_energy),
-            torch.log1p(target_unresolved_energy),
-        )
-        spectrum_relative_l2 = relative_l2(
-            target_unresolved_energy, predicted_unresolved_energy
-        )
-    else:
-        # There are no unresolved modes when the LES and DNS grids coincide.
-        ls = predicted_energy.sum() * 0.0
-        spectrum_relative_l2 = ls.detach()
-    total = lf + lambda_dns * ld + lambda_spectrum * ls
+    total = lf + lambda_dns * ld
     return (
         total,
         {
             "total": total,
             "filtered": lf,
             "dns": ld,
-            "spectrum": ls,
-            "spectrum_relative_l2": spectrum_relative_l2,
             "dns_U": dns_absolute_error[:, 0].mean(),
             "dns_V": dns_absolute_error[:, 1].mean(),
             "dns_P": dns_absolute_error[:, 2].mean(),

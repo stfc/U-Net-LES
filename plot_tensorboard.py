@@ -14,24 +14,15 @@ from tensorboard.backend.event_processing.event_accumulator import (
 
 
 PLOT_GROUPS = {
-    "losses": ("total", "filtered", "dns", "spectrum"),
-    "relative_l2": (
-        "filtered_relative_l2",
-        "dns_relative_l2",
-        "spectrum_relative_l2",
-    ),
+    "losses": ("total", "filtered", "dns"),
+    "relative_l2": ("filtered_relative_l2", "dns_relative_l2"),
     "dns_field_losses": ("dns_U", "dns_V", "dns_P"),
 }
 
 PANEL_LAYOUT = [
     ["definitions", "total", "learning_rate", "."],
-    ["filtered", "dns", "spectrum", "."],
-    [
-        "filtered_relative_l2",
-        "dns_relative_l2",
-        "spectrum_relative_l2",
-        ".",
-    ],
+    ["filtered", "dns", ".", "."],
+    ["filtered_relative_l2", "dns_relative_l2", ".", "."],
     [
         "dns_U",
         "dns_V",
@@ -79,12 +70,9 @@ def load_loss_weights(run_dir: Path):
     run_root = run_dir.parent if run_dir.name == "tensorboard" else run_dir
     parameters_path = run_root / "training_parameters.json"
     if not parameters_path.is_file():
-        return None, None
+        return None
     parameters = json.loads(parameters_path.read_text())
-    return (
-        parameters.get("lambda_dns"),
-        parameters.get("lambda_spectrum"),
-    )
+    return parameters.get("lambda_dns")
 
 
 def format_weight(value):
@@ -96,7 +84,6 @@ def plot_all_metrics(
     output_path,
     log_scale,
     lambda_dns=None,
-    lambda_spectrum=None,
 ):
     available = set(accumulator.Tags().get("scalars", ()))
     fig, axes = plt.subplot_mosaic(
@@ -110,10 +97,8 @@ def plot_all_metrics(
         "learning_rate",
         "filtered",
         "dns",
-        "spectrum",
         "filtered_relative_l2",
         "dns_relative_l2",
-        "spectrum_relative_l2",
         "dns_U",
         "dns_V",
         "dns_P",
@@ -162,15 +147,13 @@ def plot_all_metrics(
         "Definitions\n"
         r"$\mathcal{L}_{total}"
         r"=\mathcal{L}_{filtered}"
-        r"+\lambda_{DNS}\mathcal{L}_{DNS}"
-        r"+\lambda_{spectrum}\mathcal{L}_{spectrum}$"
+        r"+\lambda_{DNS}\mathcal{L}_{DNS}$"
         "\n"
         r"$L_{2,\mathrm{relative}}"
         r"=\dfrac{\|\hat{q}-q\|_2}{\|q\|_2}$"
         "\n"
         r"$\lambda_{filtered}=1,\quad"
-        rf"\lambda_{{DNS}}={format_weight(lambda_dns)},\quad"
-        rf"\lambda_{{spectrum}}={format_weight(lambda_spectrum)}$"
+        rf"\lambda_{{DNS}}={format_weight(lambda_dns)}$"
         "\n"
         "Total: weighted loss; component curves: unweighted losses\n"
         r"$\hat{q}$: prediction"
@@ -219,9 +202,7 @@ def main():
         str(log_dir), size_guidance={"scalars": 0}
     )
     accumulator.Reload()
-    lambda_dns, lambda_spectrum = load_loss_weights(
-        args.run_dir
-    )
+    lambda_dns = load_loss_weights(args.run_dir)
 
     output_path = output_dir / "tensorboard_summary.png"
     if not plot_all_metrics(
@@ -229,7 +210,6 @@ def main():
         output_path,
         log_scale=not args.linear_scale,
         lambda_dns=lambda_dns,
-        lambda_spectrum=lambda_spectrum,
     ):
         available = accumulator.Tags().get("scalars", ())
         raise RuntimeError(

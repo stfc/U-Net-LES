@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 from __future__ import annotations
-import argparse, csv, json, os
+import argparse, csv, json, os, shutil
 from pathlib import Path
 import matplotlib.pyplot as plt
 import numpy as np, torch
@@ -130,9 +130,22 @@ def parse_args():
     return p.parse_args()
 
 
+def recreate_output_directory(path):
+    """Remove a previous inference directory and create an empty one."""
+    resolved = path.resolve()
+    if resolved in (Path.cwd().resolve(), Path(resolved.anchor)):
+        raise ValueError(f"Refusing to clear unsafe output directory: {path}")
+    if path.is_symlink():
+        raise ValueError(f"Refusing to clear symlinked output directory: {path}")
+    if path.exists():
+        if not path.is_dir():
+            raise ValueError(f"Output path exists but is not a directory: {path}")
+        shutil.rmtree(path)
+    path.mkdir(parents=True)
+
+
 def main():
     a = parse_args()
-    a.output_dir.mkdir(parents=True, exist_ok=True)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     c = load_checkpoint(a.checkpoint, device)
     validate_hw_checkpoint(c)
@@ -151,6 +164,14 @@ def main():
     alpha = float(c["alpha"])
     base_channels = int(c["base_channels"])
     model_output_channels = int(c["model_output_channels"])
+    vorticity_mode = c["vorticity_mode"]
+    vorticity_from_potential = vorticity_mode == "laplacian_of_potential"
+    dns_vorticity_mode = c.get(
+        "dns_vorticity_mode",
+        "derived_from_potential"
+        if vorticity_from_potential
+        else "independent_channel",
+    )
     cutoff_fraction = optional_environment_float(
         "PBOUT_UNET_INVERSE_CUTOFF_FRACTION",
         c.get("inverse_cutoff_fraction"),
@@ -171,6 +192,20 @@ def main():
             c.get("post_cutoff_order", 8.0),
         )
     )
+    post_filter_type = os.environ.get(
+        "PBOUT_UNET_POST_FILTER",
+        c.get(
+            "post_filter",
+            c.get("training_parameters", {}).get("post_filter", "high_order"),
+        ),
+    ).lower().replace("-", "_")
+    if post_filter_type == "smooth_exponential_cutoff":
+        post_filter_type = "high_order"
+    if post_filter_type not in POST_FILTER_TYPES:
+        raise ValueError(
+            "PBOUT_UNET_POST_FILTER must be one of "
+            f"{', '.join(POST_FILTER_TYPES)}."
+        )
     if cutoff_fraction is not None and not 0 < cutoff_fraction <= 1:
         raise ValueError(
             "PBOUT_UNET_INVERSE_CUTOFF_FRACTION must be in (0, 1]."
@@ -200,12 +235,14 @@ def main():
         "inverse_cutoff_order": cutoff_order,
         "post_cutoff_fraction": post_cutoff_fraction,
         "post_cutoff_order": post_cutoff_order,
+        "post_filter": post_filter_type,
         "cutoff_application": {
             "inverse": "inverse_input_before_inverse_germano",
             "post": "reconstructed_dns_after_inverse_germano",
         },
-        "vorticity_mode": "learned_channel",
-        "dns_vorticity_mode": "independent_channel",
+        "vorticity_mode": vorticity_mode,
+        "dns_vorticity_mode": dns_vorticity_mode,
+        "vorticity_operator": c.get("vorticity_operator"),
     }
     model = ResidualUNetSR(
         len(fields),
@@ -219,9 +256,12 @@ def main():
     std_np = np.asarray(c["std"], dtype=numpy_dtype)
     mean = torch.from_numpy(mean_np).to(device)
     std = torch.from_numpy(std_np).to(device)
+    output_mean = mean[:, :model_output_channels]
+    output_std = std[:, :model_output_channels]
     files = [a.input] if a.input.is_file() else recursive_npz_files(a.input)
     if not files:
         raise ValueError("No NPZ snapshots found.")
+    recreate_output_directory(a.output_dir)
     effective_inference["snapshots_processed"] = len(files)
     checkpoint_metadata_path, checkpoint_metadata = print_checkpoint_metadata(
         a.checkpoint, effective_inference
@@ -240,10 +280,12 @@ def main():
         )
         with torch.no_grad():
             if a.inverse_input == "unet":
-                pf = model(x) * std + mean
+                pf = model(x) * output_std + output_mean
             else:
-                pf = torch.from_numpy(fine[None]).to(device)
-            pf = spectral_cutoff_torch(
+                pf = torch.from_numpy(
+                    fine[None, :model_output_channels]
+                ).to(device)
+            inverse_input = spectral_cutoff_torch(
                 pf,
                 lx,
                 ly,
@@ -251,20 +293,45 @@ def main():
                 cutoff_order,
             )
             pd_unconstrained = inverse_germano_torch(
-                pf,
+                inverse_input,
                 alpha,
                 lx,
                 ly,
             )
-            pd_unconstrained = spectral_cutoff_torch(
+            pd_unconstrained = post_filter_torch(
                 pd_unconstrained,
                 lx,
                 ly,
+                post_filter_type,
                 post_cutoff_fraction,
                 post_cutoff_order,
             )
+            if vorticity_from_potential:
+                vorticity = periodic_laplacian_2nd_torch(
+                    pd_unconstrained[:, 1:2], lx, ly
+                )
+                pd_unconstrained = torch.cat(
+                    (pd_unconstrained, vorticity), dim=1
+                )
             pd = enforce_zero_spatial_mean(pd_unconstrained)
-        pf_np, pd_np = pf[0].cpu().numpy(), pd[0].cpu().numpy()
+            diagnostic_filtered = pf
+            diagnostic_inverse_input = inverse_input
+            if vorticity_from_potential:
+                filtered_vorticity = periodic_laplacian_2nd_torch(
+                    pf[:, 1:2], lx, ly
+                )
+                diagnostic_filtered = torch.cat(
+                    (pf, filtered_vorticity), dim=1
+                )
+                filtered_vorticity = periodic_laplacian_2nd_torch(
+                    inverse_input[:, 1:2], lx, ly
+                )
+                diagnostic_inverse_input = torch.cat(
+                    (inverse_input, filtered_vorticity), dim=1
+                )
+        pf_np = diagnostic_filtered[0].cpu().numpy()
+        inverse_input_np = diagnostic_inverse_input[0].cpu().numpy()
+        pd_np = pd[0].cpu().numpy()
         out = a.output_dir / p.stem
         out.mkdir(parents=True, exist_ok=True)
         save_dns_centerline_plots(p.name, fields, dns, pd_np, out)
@@ -272,9 +339,10 @@ def main():
             "dns_256": dns,
             "filtered_256": fine,
             "filtered_32": coarse,
-            "inverse_input_256": pf_np,
+            "inverse_input_256": inverse_input_np,
             "inverse_input_mode": np.asarray(a.inverse_input),
-            "dns_vorticity_mode": np.asarray("independent_channel"),
+            "dns_vorticity_mode": np.asarray(dns_vorticity_mode),
+            "vorticity_mode": np.asarray(vorticity_mode),
             "reconstructed_dns_256": pd_np,
             "field_names": np.asarray(fields),
             "source_file": np.asarray(str(p)),
@@ -309,18 +377,18 @@ def main():
             )
             save_image(
                 fine[ch],
-                f"{label}: Filtered 256 (filtered DNS)",
-                out / f"{name}_Filtered_256.png",
+                f"{label}: Filtered {fine_n} (filtered DNS)",
+                out / f"{name}_Filtered_{fine_n}.png",
                 cmap,
             )
             save_image(
                 coarse[ch],
-                f"{label}: Filtered 32 (downsampled filtered image)",
-                out / f"{name}_Filtered_32.png",
+                f"{label}: Filtered {coarse_n} (downsampled filtered image)",
+                out / f"{name}_Filtered_{coarse_n}.png",
                 cmap,
             )
             save_image(
-                pf_np[ch],
+                inverse_input_np[ch],
                 f"{label}: {inverse_input_label(a.inverse_input, cutoff_fraction)}",
                 out / f"{name}_{inverse_input_filename(a.inverse_input)}.png",
                 cmap,
@@ -349,7 +417,7 @@ def main():
             dns,
             fine,
             coarse,
-            pf_np,
+            inverse_input_np,
             pd_np,
             coarse_n,
             lx,

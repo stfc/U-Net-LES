@@ -20,8 +20,12 @@ not need an argument parser::
   PBOUT_UNET_LAPLACIAN_ORDER=2            # periodic Laplacian order (2 or 4)
   PBOUT_UNET_INVERSE_CUTOFF_FRACTION=none
   PBOUT_UNET_INVERSE_CUTOFF_ORDER=8
+  PBOUT_UNET_POST_CUTOFF_FRACTION=none
+  PBOUT_UNET_POST_CUTOFF_ORDER=8
+  PBOUT_UNET_POST_FILTER=none             # none/high_order/gaussian
 The training-consistent inverse cutoff regularizes the U-Net output before
-inverse Germano reconstruction.
+inverse Germano reconstruction. The optional post cutoff regularizes the
+reconstructed DNS afterward.
 Arakawa terms receive the Germano filter before Fourier downsampling.
 """
 
@@ -71,12 +75,14 @@ import torch
 
 from germano_common import (
     ResidualUNetSR,
+    POST_FILTER_TYPES,
     enforce_zero_spatial_mean,
     germano_filter,
     inverse_germano_torch,
     load_checkpoint,
     periodic_laplacian_2nd_torch,
     periodic_laplacian_4th_torch,
+    post_filter_torch,
     spectral_cutoff_torch,
     validate_hw_checkpoint,
     validate_grid_pair,
@@ -121,7 +127,7 @@ IMPLICIT = os.environ.get("PBOUT_UNET_IMPLICIT", "1").lower() not in {
     "0", "false", "no", "off"
 }
 OMEGA_FROM_POTENTIAL = os.environ.get(
-    "PBOUT_UNET_OMEGA_FROM_POTENTIAL", "0"
+    "PBOUT_UNET_OMEGA_FROM_POTENTIAL", "1"
 ).lower() not in {"0", "false", "no", "off"}
 _BOUT_OUTPUT_TIMESTEP = None
 _BOUT_NOUT = None
@@ -202,49 +208,66 @@ def _bout_nout() -> int:
 
 
 def _save_diagnostic_animations(output_dir: Path) -> None:
-    """Animate all time-dependent field and spectrum diagnostic images."""
+    """Animate every numbered PNG family after the final BOUT++ output."""
     images_dir = output_dir / "images"
-    animations = (
-        (images_dir, "fields_DNS_[0-9]*.png", "fields_DNS_animation.gif"),
-        (images_dir, "fields_LES_[0-9]*.png", "fields_LES_animation.gif"),
-        (
-            images_dir,
-            "fields_DNS_spectrum_[0-9]*.png",
-            "fields_DNS_spectrum_animation.gif",
-        ),
-        (
-            images_dir,
-            "vorticity_comparison_time[0-9]*.png",
-            "vorticity_comparison_animation.gif",
-        ),
-        (
-            images_dir,
-            "fields_reconstruction_error_time[0-9]*.png",
-            "fields_reconstruction_error_animation.gif",
-        ),
-        (
-            images_dir,
-            "fields_reconstruction_centerline_time[0-9]*.png",
-            "fields_reconstruction_centerline_animation.gif",
-        ),
-        (
-            output_dir / "arakawa",
-            "arakawa_DNS_time[0-9]*.png",
-            "arakawa_DNS_terms_animation.gif",
-        ),
-        (
-            output_dir / "arakawa",
-            "arakawa_DNS_spectrum_time[0-9]*.png",
-            "arakawa_DNS_spectrum_animation.gif",
-        ),
-        (
-            output_dir / "arakawa",
-            "arakawa_DNS_field_comparison_time[0-9]*.png",
-            "arakawa_DNS_field_comparison_animation.gif",
-        ),
+    numbered_frame = re.compile(
+        r"^(?P<prefix>.*?)(?P<step>\d+)"
+        r"(?P<batch>_batch\d+)?\.png$"
     )
-    for directory, pattern, name in animations:
-        frames = sorted(directory.glob(pattern))
+    image_families = {}
+    for frame in images_dir.glob("*.png"):
+        match = numbered_frame.match(frame.name)
+        if match is None:
+            continue
+        prefix = match.group("prefix").rstrip("_")
+        if prefix.endswith("time"):
+            prefix = prefix[:-4].rstrip("_")
+        batch = match.group("batch") or ""
+        family = f"{prefix}{batch}"
+        image_families.setdefault(family, []).append(
+            (int(match.group("step")), frame)
+        )
+
+    animations = [
+        (
+            images_dir,
+            [frame for _, frame in sorted(frames)],
+            f"{family}_animation.gif",
+        )
+        for family, frames in sorted(image_families.items())
+    ]
+    animations.extend(
+        (
+            (
+                output_dir / "arakawa",
+                sorted(
+                    (output_dir / "arakawa").glob(
+                        "arakawa_DNS_time[0-9]*.png"
+                    )
+                ),
+                "arakawa_DNS_terms_animation.gif",
+            ),
+            (
+                output_dir / "arakawa",
+                sorted(
+                    (output_dir / "arakawa").glob(
+                        "arakawa_DNS_spectrum_time[0-9]*.png"
+                    )
+                ),
+                "arakawa_DNS_spectrum_animation.gif",
+            ),
+            (
+                output_dir / "arakawa",
+                sorted(
+                    (output_dir / "arakawa").glob(
+                        "arakawa_DNS_field_comparison_time[0-9]*.png"
+                    )
+                ),
+                "arakawa_DNS_field_comparison_animation.gif",
+            ),
+        )
+    )
+    for directory, frames, name in animations:
         if frames:
             save_png_animation(frames, directory / name)
             print(
@@ -345,6 +368,9 @@ def _print_init_metadata(initial_state: str) -> None:
         "base_channels": BASE_CHANNELS,
         "inverse_cutoff_fraction": CUTOFF_FRACTION,
         "inverse_cutoff_order": CUTOFF_ORDER,
+        "post_cutoff_fraction": POST_CUTOFF_FRACTION,
+        "post_cutoff_order": POST_CUTOFF_ORDER,
+        "post_filter": POST_FILTER_TYPE,
     }
     print_values(effective_inference, "effective_inference")
 
@@ -408,9 +434,13 @@ if PRECISION not in ("float32", "float64"):
     raise ValueError(f"Unsupported checkpoint precision: {PRECISION}")
 TORCH_DTYPE = getattr(torch, PRECISION)
 NUMPY_DTYPE = getattr(np, PRECISION)
-VORTICITY_MODE = "learned_channel"
+VORTICITY_MODE = _checkpoint["vorticity_mode"]
+if VORTICITY_MODE == "laplacian_of_potential":
+    OMEGA_FROM_POTENTIAL = True
 DNS_VORTICITY_MODE = (
-    "potential_laplacian" if OMEGA_FROM_POTENTIAL else "independent_channel"
+    "derived_from_potential"
+    if OMEGA_FROM_POTENTIAL
+    else "independent_channel"
 )
 _training_parameters = _checkpoint.get("training_parameters", {})
 LAPLACIAN_ORDER = int(
@@ -452,8 +482,46 @@ if CUTOFF_FRACTION is not None and not 0 < CUTOFF_FRACTION <= 1:
     )
 if not np.isfinite(CUTOFF_ORDER) or CUTOFF_ORDER <= 0:
     raise ValueError("PBOUT_UNET_INVERSE_CUTOFF_ORDER must be positive.")
-
-
+POST_CUTOFF_FRACTION = _optional_float(
+    "PBOUT_UNET_POST_CUTOFF_FRACTION",
+    _checkpoint.get("post_cutoff_fraction"),
+)
+POST_CUTOFF_ORDER = float(
+    os.environ.get(
+        "PBOUT_UNET_POST_CUTOFF_ORDER",
+        _checkpoint.get("post_cutoff_order", 8.0),
+    )
+)
+if (
+    POST_CUTOFF_FRACTION is not None
+    and not 0 < POST_CUTOFF_FRACTION <= 1
+):
+    raise ValueError(
+        "PBOUT_UNET_POST_CUTOFF_FRACTION must be in (0, 1]."
+    )
+if not np.isfinite(POST_CUTOFF_ORDER) or POST_CUTOFF_ORDER <= 0:
+    raise ValueError("PBOUT_UNET_POST_CUTOFF_ORDER must be positive.")
+_checkpoint_post_filter = _checkpoint.get(
+    "post_filter",
+    _training_parameters.get("post_filter", "none"),
+)
+if _checkpoint_post_filter == "smooth_exponential_cutoff":
+    _checkpoint_post_filter = "high_order"
+POST_FILTER_TYPE = os.environ.get(
+    "PBOUT_UNET_POST_FILTER", _checkpoint_post_filter
+).lower().replace("-", "_")
+if POST_FILTER_TYPE == "dns_spectrum":
+    print(
+        "Checkpoint requested the removed dns_spectrum post-filter; "
+        "using no post-filter.",
+        flush=True,
+    )
+    POST_FILTER_TYPE = "none"
+if POST_FILTER_TYPE not in POST_FILTER_TYPES:
+    raise ValueError(
+        "PBOUT_UNET_POST_FILTER must be one of "
+        f"{', '.join(POST_FILTER_TYPES)}."
+    )
 def _arakawa_bracket(f: torch.Tensor, g: torch.Tensor, dx: float, dy: float):
     """Compatibility wrapper for the shared Arakawa implementation."""
     return shared_arakawa_bracket(f, g, dx, dy)
@@ -600,22 +668,47 @@ def _set_omega_from_potential(dns: torch.Tensor) -> torch.Tensor:
 
 
 @torch.inference_mode()
+def _append_vorticity_for_diagnostics(fields: torch.Tensor) -> torch.Tensor:
+    """Return U,V,P diagnostics for a two-output U-Net field."""
+    if fields.shape[1] == len(FIELD_NAMES):
+        return fields
+    if fields.shape[1] != 2:
+        raise ValueError(f"Expected two or three channels, got {fields.shape[1]}")
+    return torch.cat((fields, _vorticity_from_potential(fields)), dim=1)
+
+
+@torch.inference_mode()
 def _reconstruct_dns(
     coarse: torch.Tensor,
     incoming_filtered_fine: torch.Tensor | None = None,
 ):
-    """Return DNS, reconstructing only selected fine-grid input channels."""
+    """Return inverse-Germano DNS, replacing only selected inputs by U-Net."""
     normalised = (coarse - MEAN) / STD
     predicted = MODEL(normalised)
-    unet_output = predicted * STD + MEAN
+    unet_output = (
+        predicted * STD[:, :OUTPUT_CHANNELS]
+        + MEAN[:, :OUTPUT_CHANNELS]
+    )
     inverse_input = unet_output
     if incoming_filtered_fine is not None:
+        incoming_filtered_fine = incoming_filtered_fine[:, :OUTPUT_CHANNELS]
         if incoming_filtered_fine.shape != inverse_input.shape:
             raise ValueError(
                 "Incoming fine LES fields and U-Net reconstruction have "
                 f"different shapes: {incoming_filtered_fine.shape} and "
                 f"{inverse_input.shape}"
             )
+        reconstruct_mask = torch.tensor(
+            [
+                name in RECONSTRUCT_CHANNELS
+                for name in FIELD_NAMES[:OUTPUT_CHANNELS]
+            ],
+            dtype=torch.bool,
+            device=inverse_input.device,
+        ).view(1, -1, 1, 1)
+        inverse_input = torch.where(
+            reconstruct_mask, inverse_input, incoming_filtered_fine
+        )
     inverse_input = spectral_cutoff_torch(
         inverse_input,
         LX,
@@ -624,25 +717,34 @@ def _reconstruct_dns(
         CUTOFF_ORDER,
     )
     dns = inverse_germano_torch(inverse_input, ALPHA, LX, LY)
-    reconstructed_vorticity = dns[:, FIELD_NAMES.index("P"):][:, :1]
-    dns = enforce_zero_spatial_mean(dns)
-    if incoming_filtered_fine is not None:
-        reconstruct_mask = torch.tensor(
-            [name in RECONSTRUCT_CHANNELS for name in FIELD_NAMES],
-            dtype=torch.bool,
-            device=dns.device,
-        ).view(1, -1, 1, 1)
-        dns = torch.where(reconstruct_mask, dns, incoming_filtered_fine)
+    dns = post_filter_torch(
+        dns,
+        LX,
+        LY,
+        POST_FILTER_TYPE,
+        POST_CUTOFF_FRACTION,
+        POST_CUTOFF_ORDER,
+    )
+    reconstructed_vorticity = (
+        _vorticity_from_potential(dns)
+        if VORTICITY_MODE == "laplacian_of_potential"
+        else dns[:, FIELD_NAMES.index("P"):][:, :1]
+    )
     # Derive omega last from the reconstructed potential. This avoids
     # independently inverse-reconstructing omega.
     dns = _set_omega_from_potential(dns)
-    return dns, unet_output, inverse_input, reconstructed_vorticity
+    return (
+        enforce_zero_spatial_mean(dns),
+        _append_vorticity_for_diagnostics(unet_output),
+        _append_vorticity_for_diagnostics(inverse_input),
+        reconstructed_vorticity,
+    )
 
 
 @torch.inference_mode()
 def _inverse_germano_only(
     filtered_fields: torch.Tensor,
-) -> tuple[torch.Tensor, torch.Tensor]:
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Reconstruct DNS and independent vorticity without U-Net or resizing."""
     inverse_input = spectral_cutoff_torch(
         filtered_fields,
@@ -652,6 +754,14 @@ def _inverse_germano_only(
         CUTOFF_ORDER,
     )
     dns = inverse_germano_torch(inverse_input, ALPHA, LX, LY)
+    dns = post_filter_torch(
+        dns,
+        LX,
+        LY,
+        POST_FILTER_TYPE,
+        POST_CUTOFF_FRACTION,
+        POST_CUTOFF_ORDER,
+    )
     reconstructed_vorticity = dns[:, FIELD_NAMES.index("P"):][:, :1]
     dns = _set_omega_from_potential(dns)
     return (
@@ -764,8 +874,9 @@ def initFlow(npv):
         and downsample to the coarse LES grid.
     DNS_INIT=1:
         initialize from the reference DNS field, apply the Germano filter
-        but keep the fine DNS grid. U-Net/inverse reconstruction is enabled
-        only for channels selected by PBOUT_UNET_RECONSTRUCT_CHANNELS.
+        and use the fine DNS grid when no reconstruction channels are selected.
+        With selected channels, downsample BOUT++ to the coarse grid and use
+        the U-Net to reconstruct a fine-grid inverse-Germano DNS for Arakawa.
     DNS_INIT=2:
         initialize from the reference DNS field, do not apply filtering
         or downsampling, and use the DNS fields directly.
@@ -811,8 +922,18 @@ def initFlow(npv):
         )
         initial_state = "Germano-filtered and downsampled DNS snapshot"
     elif DNS_INIT == 1:
-        fields = source_fields
-        initial_state = "Germano-filtered fine-grid DNS snapshot"
+        if RECONSTRUCT_CHANNELS:
+            coarse_torch = _spectral_resize_torch(source_torch, COARSE_N)
+            fields = coarse_torch[0].detach().cpu().numpy().astype(
+                NUMPY_DTYPE, copy=False
+            )
+            initial_state = (
+                "Germano-filtered and downsampled DNS snapshot for "
+                "selected-channel reconstruction"
+            )
+        else:
+            fields = source_fields
+            initial_state = "Germano-filtered fine-grid DNS snapshot"
     else:
         fields = source_fields
         initial_state = "original unfiltered DNS snapshot"
@@ -823,15 +944,29 @@ def initFlow(npv):
                 coarse_torch
             )
             diagnostic_mode = "downsampled and U-Net reconstructed"
-        elif DNS_INIT == 1 and RECONSTRUCT_CHANNELS:
-            coarse_for_reconstruct = _spectral_resize_torch(
-                source_torch, COARSE_N
-            )
-            initial_dns, _, _, initial_reconstructed_vorticity = _reconstruct_dns(
-                coarse_for_reconstruct,
-                incoming_filtered_fine=source_torch,
-            )
-            diagnostic_mode = "fine-grid filtered and U-Net reconstructed"
+        elif DNS_INIT == 1:
+            if RECONSTRUCT_CHANNELS:
+                (
+                    initial_dns,
+                    _,
+                    _,
+                    initial_reconstructed_vorticity,
+                ) = _reconstruct_dns(
+                    coarse_torch,
+                    incoming_filtered_fine=source_torch,
+                )
+                diagnostic_mode = (
+                    "fine-grid filtered and U-Net/inverse-Germano reconstructed"
+                )
+            else:
+                (
+                    initial_dns,
+                    _,
+                    initial_reconstructed_vorticity,
+                ) = _inverse_germano_only(source_torch)
+                diagnostic_mode = (
+                    "fine-grid filtered and inverse-Germano reconstructed"
+                )
         else:
             initial_dns = source_torch
             initial_reconstructed_vorticity = _vorticity_from_potential(
@@ -875,8 +1010,7 @@ def initFlow(npv):
         reference_label="Reference DNS Arakawa",
         current_terms_label=(
             "Reconstructed DNS Arakawa"
-            if DNS_INIT == 0
-            or (DNS_INIT == 1 and RECONSTRUCT_CHANNELS)
+            if DNS_INIT in (0, 1)
             else (
                 "Filtered DNS Arakawa"
                 if DNS_INIT == 1
@@ -919,7 +1053,11 @@ def findLESTerms(pLES):
     simtime = float(values[3])
     dx_les = float(values[2])
 
-    simulation_n = FINE_N if DNS_INIT in (1, 2) else COARSE_N
+    simulation_n = (
+        FINE_N
+        if DNS_INIT == 2 or (DNS_INIT == 1 and not RECONSTRUCT_CHANNELS)
+        else COARSE_N
+    )
     _validate_les_spacing(dx_les, dx_les, simulation_n)
 
     required_channels = 5 if IMPLICIT else 3
@@ -938,17 +1076,28 @@ def findLESTerms(pLES):
             inverse_filtered_output,
             reconstructed_vorticity,
         ) = _reconstruct_dns(coarse_fields)
-    elif DNS_INIT == 1 and RECONSTRUCT_CHANNELS:
-        coarse_fields = _spectral_resize_torch(simulation_fields, COARSE_N)
-        (
-            dns,
-            unet_output,
-            inverse_filtered_output,
-            reconstructed_vorticity,
-        ) = _reconstruct_dns(
-            coarse_fields,
-            incoming_filtered_fine=simulation_fields,
-        )
+    elif DNS_INIT == 1:
+        if RECONSTRUCT_CHANNELS:
+            coarse_fields = simulation_fields
+            incoming_filtered_fine = _spectral_resize_torch(
+                simulation_fields, FINE_N
+            )
+            (
+                dns,
+                unet_output,
+                inverse_filtered_output,
+                reconstructed_vorticity,
+            ) = _reconstruct_dns(
+                coarse_fields,
+                incoming_filtered_fine=incoming_filtered_fine,
+            )
+        else:
+            (
+                dns,
+                inverse_filtered_output,
+                reconstructed_vorticity,
+            ) = _inverse_germano_only(simulation_fields)
+            unet_output = simulation_fields
     else:
         dns = simulation_fields
         unet_output = simulation_fields
@@ -967,7 +1116,7 @@ def findLESTerms(pLES):
             inverse_filtered_output.detach().cpu().double().numpy()
         )
 
-        if DNS_INIT in (1, 2):
+        if simulation_n == FINE_N:
             simulation_fields_np = simulation_fields.detach().cpu().double().numpy()
         elif _INITIAL_DNS_REFERENCE is not None:
             simulation_fields_np = np.broadcast_to(
@@ -1065,7 +1214,7 @@ def findLESTerms(pLES):
     bracket_vort = _arakawa_bracket(phi, arakawa_fields[:, 2:3], dx_dns, dy_dns)
     bracket_n = _arakawa_bracket(phi, arakawa_fields[:, 0:1], dx_dns, dy_dns)
 
-    if DNS_INIT == 0:
+    if simulation_n == COARSE_N:
         bracket_vort = _germano_filter_torch(bracket_vort)
         bracket_n = _germano_filter_torch(bracket_n)
         bracket_vort = _spectral_resize_torch(bracket_vort, COARSE_N)
@@ -1089,6 +1238,8 @@ def findLESTerms(pLES):
 
     out_vort = bracket_vort.permute(1, 0, 2).reshape(-1)
     out_n = bracket_n.permute(1, 0, 2).reshape(-1)
+    if diagnostics_due and _LAST_FIELD_OUTPUT_INDEX >= _bout_nout():
+        _save_diagnostic_animations(Path("results_U-Net"))
     iteration = np.asarray([0.0], dtype=np.float64)
     return np.concatenate(
         (iteration, out_vort.cpu().double().numpy(), out_n.cpu().double().numpy())
