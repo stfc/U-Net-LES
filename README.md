@@ -120,6 +120,7 @@ export PBOUT_UNET_DNS_INIT=1
 export PBOUT_UNET_RECONSTRUCT_CHANNELS=U
 export PBOUT_UNET_ALPHA=0.392
 export PBOUT_UNET_DEVICE=cuda
+export PBOUT_UNET_WRITE_DIAGNOSTICS=0     # disable images and saved fields
 export PBOUT_UNET_INVERSE_CUTOFF_FRACTION=0.707107
 export PBOUT_UNET_INVERSE_CUTOFF_ORDER=8
 
@@ -127,8 +128,10 @@ export PBOUT_UNET_INVERSE_CUTOFF_ORDER=8
 ```
 
 `PBOUT_UNET_ALPHA` overrides the checkpoint's physical Germano width. The
-Arakawa terms are Germano-filtered when `ALPHA > 0`, except in modes `2` and
-`3`. Mode `3` still downsamples the unfiltered terms to the coarse grid.
+Arakawa terms are Germano-filtered when `ALPHA > 0`, except in
+`PBOUT_UNET_DNS_INIT=2`, which always uses unfiltered DNS fields and terms.
+Set `PBOUT_UNET_WRITE_DIAGNOSTICS=0` to suppress all pBOUT++ diagnostic image
+and field files, including initial diagnostics, snapshots, and animations.
 
 ### Initialization modes and required BOUT++ grid
 
@@ -138,11 +141,10 @@ Arakawa terms are Germano-filtered when `ALPHA > 0`, except in modes `2` and
 | `1` with reconstruction channels | Germano-filter and downsample the initial DNS. Reconstruct only the selected `U,V` channels; unselected channels use the spectrally resized incoming fields. Apply inverse Germano reconstruction, calculate fine-grid Arakawa terms, filter them when `ALPHA > 0`, and downsample the terms. | `coarse_n` |
 | `1` with `none` | Keep the Germano-filtered initial fields on the fine grid. No U-Net is used, but inverse Germano reconstruction and its configured cutoffs are still applied before the Arakawa calculation. The resulting terms are Germano-filtered when `ALPHA > 0`. | `fine_n` |
 | `2` | Use and evolve the original DNS snapshot directly. No U-Net, inverse Germano reconstruction, or Germano filtering of the Arakawa terms is used. | `fine_n` |
-| `3` | Follow mode `0`, including filtered/downsampled initialization and U-Net fine-grid reconstruction, but skip the inverse Germano operation. Fine-grid Arakawa terms are not filtered; they are only downsampled. | `coarse_n` |
 
 BOUT++ `nx` includes four X guard cells, while `nz` has no periodic guard
 cells. For the 256-to-128 checkpoint, use the following for a coarse-grid run
-(mode 0, mode 3, or mode 1 with selected reconstruction channels):
+(mode 0, or mode 1 with selected reconstruction channels):
 
 ```ini
 [mesh]

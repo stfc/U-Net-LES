@@ -18,6 +18,51 @@ from visualization_common import (
 )
 
 
+def periodic_derivative_losses(prediction, target, scale, lx, ly):
+    """Return periodic L1 differences of first and pure second derivatives."""
+    error = (prediction - target) / scale
+    dx = lx / error.shape[-2]
+    dy = ly / error.shape[-1]
+    xp = torch.roll(error, shifts=-1, dims=-2)
+    xm = torch.roll(error, shifts=1, dims=-2)
+    yp = torch.roll(error, shifts=-1, dims=-1)
+    ym = torch.roll(error, shifts=1, dims=-1)
+    first = 0.5 * (
+        ((xp - xm) / (2.0 * dx)).abs().mean()
+        + ((yp - ym) / (2.0 * dy)).abs().mean()
+    )
+    second = 0.5 * (
+        ((xp - 2.0 * error + xm) / dx**2).abs().mean()
+        + ((yp - 2.0 * error + ym) / dy**2).abs().mean()
+    )
+    return first, second
+
+
+def calculate_training_losses(
+    model, coarse, filtered_target, dns_target, mean, std, dns_std,
+    alpha, lx, ly, lambda_dns, lambda_first_derivative,
+    lambda_second_derivative, vorticity_from_potential,
+    inverse_cutoff_fraction, inverse_cutoff_order,
+    post_cutoff_fraction, post_cutoff_order, post_filter_type,
+):
+    """Augment the existing value loss with DNS derivative penalties."""
+    value_loss, values, predicted_filtered, predicted_dns = calculate_losses(
+        model, coarse, filtered_target, dns_target, mean, std, dns_std,
+        alpha, lx, ly, lambda_dns, vorticity_from_potential,
+        inverse_cutoff_fraction, inverse_cutoff_order, post_cutoff_fraction,
+        post_cutoff_order, post_filter_type,
+    )
+    first, second = periodic_derivative_losses(
+        predicted_dns, dns_target, dns_std, lx, ly
+    )
+    total = (value_loss + lambda_first_derivative * first
+             + lambda_second_derivative * second)
+    values.update(
+        total=total, first_derivative=first, second_derivative=second
+    )
+    return total, values, predicted_filtered, predicted_dns
+
+
 def save_training_sample_diagnostics(
     source_path,
     field_names,
@@ -164,6 +209,8 @@ def save_epoch_diagnostics(
     lx,
     ly,
     lambda_dns,
+    lambda_first_derivative,
+    lambda_second_derivative,
     vorticity_from_potential,
     inverse_cutoff_fraction,
     inverse_cutoff_order,
@@ -179,7 +226,7 @@ def save_epoch_diagnostics(
     filtered_batch = filtered_target.unsqueeze(0).to(device)
     dns_batch = dns_target.unsqueeze(0).to(device)
     model.eval()
-    _, _, predicted_filtered, reconstructed_dns = calculate_losses(
+    _, _, predicted_filtered, reconstructed_dns = calculate_training_losses(
         model,
         coarse_batch,
         filtered_batch,
@@ -191,6 +238,8 @@ def save_epoch_diagnostics(
         lx,
         ly,
         lambda_dns,
+        lambda_first_derivative,
+        lambda_second_derivative,
         vorticity_from_potential,
         inverse_cutoff_fraction,
         inverse_cutoff_order,
@@ -309,6 +358,8 @@ def run_epoch(
     lx,
     ly,
     lambda_dns,
+    lambda_first_derivative,
+    lambda_second_derivative,
     vorticity_from_potential,
     inverse_cutoff_fraction,
     inverse_cutoff_order,
@@ -323,6 +374,8 @@ def run_epoch(
         "total",
         "filtered",
         "dns",
+        "first_derivative",
+        "second_derivative",
         "dns_U",
         "dns_V",
         "dns_P",
@@ -343,7 +396,7 @@ def run_epoch(
             )
             if training:
                 optimizer.zero_grad(set_to_none=True)
-            loss, vals, pf, pd = calculate_losses(
+            loss, vals, pf, pd = calculate_training_losses(
                 model,
                 coarse,
                 ft,
@@ -355,6 +408,8 @@ def run_epoch(
                 lx,
                 ly,
                 lambda_dns,
+                lambda_first_derivative,
+                lambda_second_derivative,
                 vorticity_from_potential,
                 inverse_cutoff_fraction,
                 inverse_cutoff_order,
@@ -390,7 +445,13 @@ def configure_tensorboard(writer, normalize):
                     "Multiline",
                     [f"metrics/train/{name}", f"metrics/validation/{name}"],
                 ]
-                for name in ("total", "filtered", "dns")
+                for name in (
+                    "total",
+                    "filtered",
+                    "dns",
+                    "first_derivative",
+                    "second_derivative",
+                )
             },
             "Relative L2": {
                 name.replace("_", " ").title(): [
@@ -510,6 +571,14 @@ def parse_args():
     )
     p.add_argument("--lambda-dns", type=float, default=0.05)
     p.add_argument(
+        "--lambda-first-derivative", type=float, default=1.0e-2,
+        help="Weight of the DNS first-derivative L1 loss (default: 1e-2)",
+    )
+    p.add_argument(
+        "--lambda-second-derivative", type=float, default=1.0e-4,
+        help="Weight of the DNS second-derivative L1 loss (default: 1e-4)",
+    )
+    p.add_argument(
         "--vorticity-from-potential",
         action=argparse.BooleanOptionalAction,
         default=True,
@@ -624,6 +693,10 @@ def run_training(a):
         raise ValueError("learning-rate-step must be positive.")
     if not 0 < a.learning_rate_gamma <= 1:
         raise ValueError("learning-rate-gamma must be in (0, 1].")
+    if a.lambda_first_derivative < 0:
+        raise ValueError("lambda-first-derivative must be non-negative.")
+    if a.lambda_second_derivative < 0:
+        raise ValueError("lambda-second-derivative must be non-negative.")
     all_directions_periodic = a.periodic_x and a.periodic_y
     use_random_periodic_shift = (
         a.random_periodic_shift and all_directions_periodic
@@ -867,6 +940,8 @@ def run_training(a):
             a.lx,
             a.ly,
             a.lambda_dns,
+            a.lambda_first_derivative,
+            a.lambda_second_derivative,
             a.vorticity_from_potential,
             inverse_cutoff_fraction,
             a.inverse_cutoff_order,
@@ -889,6 +964,8 @@ def run_training(a):
             a.lx,
             a.ly,
             a.lambda_dns,
+            a.lambda_first_derivative,
+            a.lambda_second_derivative,
             a.vorticity_from_potential,
             inverse_cutoff_fraction,
             a.inverse_cutoff_order,
@@ -908,6 +985,8 @@ def run_training(a):
             a.lx,
             a.ly,
             a.lambda_dns,
+            a.lambda_first_derivative,
+            a.lambda_second_derivative,
             a.vorticity_from_potential,
             inverse_cutoff_fraction,
             a.inverse_cutoff_order,
@@ -953,6 +1032,8 @@ def run_training(a):
             "ly": a.ly,
             "base_channels": a.base_channels,
             "lambda_dns": a.lambda_dns,
+            "lambda_first_derivative": a.lambda_first_derivative,
+            "lambda_second_derivative": a.lambda_second_derivative,
             "learning_rate_step": a.learning_rate_step,
             "learning_rate_gamma": a.learning_rate_gamma,
             "periodic_x": a.periodic_x,
@@ -987,6 +1068,8 @@ def run_training(a):
                 a.lx,
                 a.ly,
                 a.lambda_dns,
+                a.lambda_first_derivative,
+                a.lambda_second_derivative,
                 a.vorticity_from_potential,
                 inverse_cutoff_fraction,
                 a.inverse_cutoff_order,
@@ -1018,6 +1101,8 @@ def run_training(a):
         a.lx,
         a.ly,
         a.lambda_dns,
+        a.lambda_first_derivative,
+        a.lambda_second_derivative,
         a.vorticity_from_potential,
         inverse_cutoff_fraction,
         a.inverse_cutoff_order,

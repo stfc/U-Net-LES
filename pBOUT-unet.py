@@ -16,6 +16,7 @@ not need an argument parser::
   PBOUT_UNET_RECONSTRUCT_CHANNELS=none    # mode-1 U-Net channels
   PBOUT_UNET_DEVICE=cuda                 # or cpu; default is automatic
   PBOUT_UNET_IMPLICIT=1                  # return -(DNS-LES) brackets
+  PBOUT_UNET_WRITE_DIAGNOSTICS=1         # 0 disables image/field output
   PBOUT_UNET_OMEGA_FROM_POTENTIAL=1      # omega = Laplacian(phi) at DNS scale
   PBOUT_UNET_LAPLACIAN_ORDER=2            # periodic Laplacian order (2 or 4)
   PBOUT_UNET_INVERSE_CUTOFF_FRACTION=none
@@ -126,6 +127,9 @@ BOUT_INPUT = Path(
 IMPLICIT = os.environ.get("PBOUT_UNET_IMPLICIT", "1").lower() not in {
     "0", "false", "no", "off"
 }
+WRITE_DIAGNOSTICS = os.environ.get(
+    "PBOUT_UNET_WRITE_DIAGNOSTICS", "1"
+).lower() not in {"0", "false", "no", "off"}
 OMEGA_FROM_POTENTIAL = os.environ.get(
     "PBOUT_UNET_OMEGA_FROM_POTENTIAL", "1"
 ).lower() not in {"0", "false", "no", "off"}
@@ -344,6 +348,7 @@ def _print_init_metadata(initial_state: str) -> None:
         "dns_init": DNS_INIT,
         "initial_state": initial_state,
         "implicit": IMPLICIT,
+        "write_diagnostics": WRITE_DIAGNOSTICS,
         "vorticity_mode": VORTICITY_MODE,
         "dns_vorticity_mode": DNS_VORTICITY_MODE,
         "vorticity_operator": (
@@ -839,7 +844,8 @@ def _validate_les_spacing(
 
 def saveArakawaTerms(pArakawa):
     """BOUT++ callback delegating Arakawa output to visualization helpers."""
-    save_bout_arakawa_terms(pArakawa, Path("results_U-Net_DNS"))
+    if WRITE_DIAGNOSTICS:
+        save_bout_arakawa_terms(pArakawa, Path("results_U-Net_DNS"))
     return None
 
 
@@ -885,7 +891,7 @@ def initFlow(npv):
 
     _INITIAL_DNS_REFERENCE = None
     output_dir = Path("results_U-Net")
-    if output_dir.exists():
+    if WRITE_DIAGNOSTICS and output_dir.exists():
         shutil.rmtree(output_dir)
 
     if DNS_PATH is None:
@@ -980,45 +986,46 @@ def initFlow(npv):
 
     initial_laplacian_vorticity = _vorticity_from_potential(initial_dns)
     initial_dns_np = initial_dns[0].detach().cpu().double().numpy()
-    prepare_run_output(Path("results_U-Net"))
+    if WRITE_DIAGNOSTICS:
+        prepare_run_output(Path("results_U-Net"))
 
-    fields_image_output, fields_spectrum_output = save_initial_dns_fields(
-        initial_dns_np,
-        simulation_fields,
-        FIELD_NAMES,
-        LX,
-        LY,
-        Path("results_U-Net") / "images",
-        None,
-    )
-    save_vorticity_comparison(
-        initial_reconstructed_vorticity[0, 0].detach().cpu().double().numpy(),
-        initial_laplacian_vorticity[0, 0].detach().cpu().double().numpy(),
-        Path("results_U-Net") / "images/vorticity_comparison_initial.png",
-        "Initial reconstructed and Laplacian-derived vorticity",
-    )
+        fields_image_output, fields_spectrum_output = save_initial_dns_fields(
+            initial_dns_np,
+            simulation_fields,
+            FIELD_NAMES,
+            LX,
+            LY,
+            Path("results_U-Net") / "images",
+            None,
+        )
+        save_vorticity_comparison(
+            initial_reconstructed_vorticity[0, 0].detach().cpu().double().numpy(),
+            initial_laplacian_vorticity[0, 0].detach().cpu().double().numpy(),
+            Path("results_U-Net") / "images/vorticity_comparison_initial.png",
+            "Initial reconstructed and Laplacian-derived vorticity",
+        )
 
-    arakawa_image_output, arakawa_spectrum_output = save_arakawa_comparison(
-        initial_dns_np,
-        simulation_fields,
-        LX,
-        LY,
-        Path("results_U-Net") / "arakawa",
-        stem="arakawa_DNS_initial",
-        cutoff_fraction=None,
-        spectrum_stem="arakawa_DNS_spectrum_initial.png",
-        reference_label="Reference DNS Arakawa",
-        current_terms_label=(
-            "Reconstructed DNS Arakawa"
-            if DNS_INIT in (0, 1)
-            else (
-                "Filtered DNS Arakawa"
-                if DNS_INIT == 1
-                else "DNS Arakawa"
-            )
-        ),
-        spectrum_variants=_arakawa_spectrum_stages_numpy(initial_dns_np),
-    )
+        arakawa_image_output, arakawa_spectrum_output = save_arakawa_comparison(
+            initial_dns_np,
+            simulation_fields,
+            LX,
+            LY,
+            Path("results_U-Net") / "arakawa",
+            stem="arakawa_DNS_initial",
+            cutoff_fraction=None,
+            spectrum_stem="arakawa_DNS_spectrum_initial.png",
+            reference_label="Reference DNS Arakawa",
+            current_terms_label=(
+                "Reconstructed DNS Arakawa"
+                if DNS_INIT in (0, 1)
+                else (
+                    "Filtered DNS Arakawa"
+                    if DNS_INIT == 1
+                    else "DNS Arakawa"
+                )
+            ),
+            spectrum_variants=_arakawa_spectrum_stages_numpy(initial_dns_np),
+        )
 
     print("\n\n", flush=True)
     print("------------------ U-Net parameters---------------", flush=True)
@@ -1030,13 +1037,15 @@ def initFlow(npv):
         f"resolution={fields.shape[-1]}, Lx={LX}, Ly={LY};\n"
         f"Germano filter="
         f"{'enabled' if DNS_INIT in (0, 1) else 'disabled'}"
-        f", alpha={ALPHA:g}; "
-        f"diagnostic mode={diagnostic_mode}; "
-        f"saved {diagnostic_mode} and DNS fields to "
-        f"{fields_image_output};\n"
-        f"saved their spectra to {fields_spectrum_output};\n"
-        f"saved DNS Arakawa terms to {arakawa_image_output};\n"
-        f"saved their spectra to {arakawa_spectrum_output}\n",
+        f", alpha={ALPHA:g}; diagnostic mode={diagnostic_mode};\n"
+        + (
+            f"saved fields to {fields_image_output} and spectra to "
+            f"{fields_spectrum_output};\n"
+            f"saved DNS Arakawa terms to {arakawa_image_output} and spectra "
+            f"to {arakawa_spectrum_output}\n"
+            if WRITE_DIAGNOSTICS
+            else "image and field diagnostics disabled\n"
+        ),
         flush=True,
     )
 
@@ -1104,7 +1113,7 @@ def findLESTerms(pLES):
         inverse_filtered_output = simulation_fields
         reconstructed_vorticity = _vorticity_from_potential(dns)
 
-    diagnostics_due = _field_output_due(simtime)
+    diagnostics_due = WRITE_DIAGNOSTICS and _field_output_due(simtime)
     simulation_fields_np = None
     if diagnostics_due:
         dns_np = dns.detach().cpu().double().numpy()
@@ -1214,9 +1223,15 @@ def findLESTerms(pLES):
     bracket_vort = _arakawa_bracket(phi, arakawa_fields[:, 2:3], dx_dns, dy_dns)
     bracket_n = _arakawa_bracket(phi, arakawa_fields[:, 0:1], dx_dns, dy_dns)
 
-    if simulation_n == COARSE_N:
+    # Filtering is set by the physical Germano width, independently of the
+    # grid on which BOUT++ evolves the fields.  In DNS_INIT=1 with no selected
+    # reconstruction channels, the filtered Arakawa terms stay on the fine
+    # grid; selecting channels requires returning them on the coarse grid.
+    if DNS_INIT in (0, 1) and ALPHA > 0:
         bracket_vort = _germano_filter_torch(bracket_vort)
         bracket_n = _germano_filter_torch(bracket_n)
+
+    if DNS_INIT == 0 or (DNS_INIT == 1 and RECONSTRUCT_CHANNELS):
         bracket_vort = _spectral_resize_torch(bracket_vort, COARSE_N)
         bracket_n = _spectral_resize_torch(bracket_n, COARSE_N)
 
