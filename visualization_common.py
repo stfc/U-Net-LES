@@ -18,6 +18,48 @@ from germano_common import (
 )
 
 
+def save_energy_history(
+    times: np.ndarray,
+    energy: np.ndarray,
+    output_dir: Path,
+) -> tuple[Path, Path]:
+    """Save HW energy samples and their time-history plot."""
+    times = np.asarray(times, dtype=np.float64)
+    energy = np.asarray(energy, dtype=np.float64)
+    if times.ndim != 1 or energy.ndim not in (1, 2):
+        raise ValueError("times must be 1-D and energy must be 1-D or 2-D")
+    if energy.shape[0] != times.size:
+        raise ValueError("energy must contain one row per time sample")
+    if energy.ndim == 2 and energy.shape[1] == 1:
+        energy = energy[:, 0]
+    output_dir.mkdir(parents=True, exist_ok=True)
+    data_path = output_dir / "energy_vs_time.npz"
+    np.savez_compressed(data_path, time=times, Energy=energy)
+
+    figure_path = output_dir / "energy_vs_time.png"
+    fig, ax = plt.subplots(figsize=(7.4, 5.2))
+    if energy.ndim == 1 or energy.shape[1] == 1:
+        ax.plot(times, energy.reshape(-1), "o-", linewidth=1.5)
+    else:
+        for batch_index in range(energy.shape[1]):
+            ax.plot(
+                times,
+                energy[:, batch_index],
+                "o-",
+                linewidth=1.5,
+                label=f"batch {batch_index}",
+            )
+        ax.legend()
+    ax.set_xlabel("simulation time")
+    ax.set_ylabel("Energy")
+    ax.set_title("Hasegawa-Wakatani energy versus time")
+    ax.grid(True, alpha=0.3)
+    fig.tight_layout()
+    fig.savefig(figure_path, dpi=180)
+    plt.close(fig)
+    return data_path, figure_path
+
+
 def save_png_animation(
     frame_paths,
     output_path: Path,
@@ -52,6 +94,7 @@ def save_field_images(
     field_names,
     output_path: Path,
     title_prefix: str = "Reconstructed DNS",
+    field_limits: tuple[tuple[float, float], ...] | None = None,
 ) -> Path:
     """Save channel-first physical fields and their horizontal centerlines."""
     if fields.ndim != 3 or fields.shape[0] != len(field_names):
@@ -73,12 +116,18 @@ def save_field_images(
             "V": "Reds_r",
             "P": "hot",
         }.get(name, "viridis")
+        image_limits = {}
+        if field_limits is not None:
+            lower, upper = field_limits[channel]
+            if lower < upper:
+                image_limits = {"vmin": lower, "vmax": upper}
         image = ax.imshow(
             fields[channel].T,
             origin="lower",
             extent=(0, nx, 0, ny),
             aspect="equal",
             cmap=cmap,
+            **image_limits,
         )
         ax.set_title(f"{title_prefix}: {HW_FIELD_LABELS.get(name, name)}")
         ax.set_xlabel("x [pixels]")
@@ -94,6 +143,8 @@ def save_field_images(
         )
         center_ax.set_xlabel("x [pixels]")
         center_ax.set_ylabel(HW_FIELD_LABELS.get(name, name))
+        if field_limits is not None and lower < upper:
+            center_ax.set_ylim(lower, upper)
         center_ax.grid(True, alpha=0.25)
     fig.tight_layout()
     fig.savefig(output_path, dpi=180)
@@ -403,6 +454,7 @@ def save_dns_snapshot(
     unet_output: np.ndarray | None = None,
     inverse_filtered_output: np.ndarray | None = None,
     reference_label: str = "DNS",
+    field_limits: tuple[tuple[float, float], ...] | None = None,
 ) -> Path:
     """Save one reconstructed DNS batch and optional fields/spectra images."""
     if dns.ndim != 4 or dns.shape[1] != len(field_names):
@@ -452,6 +504,7 @@ def save_dns_snapshot(
                 field_names,
                 images_dir / f"fields_DNS_{time_step:07d}{suffix}.png",
                 f"Reconstructed DNS, step {time_step}, t={simtime:g}",
+                field_limits=field_limits,
             )
             if les_input is not None:
                 save_field_images(

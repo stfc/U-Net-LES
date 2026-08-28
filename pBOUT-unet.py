@@ -96,6 +96,7 @@ from visualization_common import (
     save_arakawa_comparison,
     save_arakawa_dns_field_comparison,
     save_dns_snapshot,
+    save_energy_history,
     save_field_centerline_comparison,
     save_field_error_images,
     save_initial_dns_fields,
@@ -144,6 +145,9 @@ _BOUT_OUTPUT_TIMESTEP = None
 _BOUT_NOUT = None
 _LAST_FIELD_OUTPUT_INDEX = -1
 _INITIAL_DNS_REFERENCE = None
+_INITIAL_DNS_PLOT_LIMITS = None
+_ENERGY_TIMES = []
+_ENERGY_VALUES = []
 
 
 def _optional_float(name: str, default):
@@ -286,6 +290,31 @@ def _save_diagnostic_animations(output_dir: Path) -> None:
                 f"{directory / name}",
                 flush=True,
             )
+
+
+def _hw_energy(fields: torch.Tensor) -> torch.Tensor:
+    """Return the StylES HW energy using fourth-order periodic gradients."""
+    density = fields[:, 0]
+    potential = fields[:, 1]
+    dx = LX / potential.shape[-2]
+    dy = LY / potential.shape[-1]
+    dphi_dx = (
+        -torch.roll(potential, shifts=-2, dims=-2)
+        + 8.0 * torch.roll(potential, shifts=-1, dims=-2)
+        - 8.0 * torch.roll(potential, shifts=1, dims=-2)
+        + torch.roll(potential, shifts=2, dims=-2)
+    ) / (12.0 * dx)
+    dphi_dy = (
+        -torch.roll(potential, shifts=-2, dims=-1)
+        + 8.0 * torch.roll(potential, shifts=-1, dims=-1)
+        - 8.0 * torch.roll(potential, shifts=1, dims=-1)
+        + torch.roll(potential, shifts=2, dims=-1)
+    ) / (12.0 * dy)
+    density_energy = density.square()
+    gradient_energy = dphi_dx.square() + dphi_dy.square()
+    return 0.5 * LX * LY * (density_energy + gradient_energy).sum(
+        dim=(-2, -1)
+    )
 
 
 def _field_output_due(simtime: float) -> bool:
@@ -894,9 +923,14 @@ def initFlow(npv):
         initialize from the reference DNS field, do not apply filtering
         or downsampling, and use the DNS fields directly.
     """
-    global _INITIAL_DNS_REFERENCE
+    global _INITIAL_DNS_REFERENCE, _INITIAL_DNS_PLOT_LIMITS
+    global _ENERGY_TIMES, _ENERGY_VALUES
+    global _LAST_FIELD_OUTPUT_INDEX
 
     _INITIAL_DNS_REFERENCE = None
+    _ENERGY_TIMES = []
+    _ENERGY_VALUES = []
+    _LAST_FIELD_OUTPUT_INDEX = -1
     output_dir = Path("results_U-Net")
     if output_dir.exists():
         shutil.rmtree(output_dir)
@@ -993,6 +1027,10 @@ def initFlow(npv):
 
     initial_laplacian_vorticity = _vorticity_from_potential(initial_dns)
     initial_dns_np = initial_dns[0].detach().cpu().double().numpy()
+    _INITIAL_DNS_PLOT_LIMITS = tuple(
+        (float(np.min(field)), float(np.max(field)))
+        for field in initial_dns_np
+    )
     if WRITE_DIAGNOSTICS == 1:
         prepare_run_output(Path("results_U-Net"))
 
@@ -1163,7 +1201,14 @@ def findLESTerms(pLES):
                 if DNS_INIT == 1
                 else "Incoming BOUT++ DNS"
             ),
+            field_limits=_INITIAL_DNS_PLOT_LIMITS,
         )
+
+        if WRITE_DIAGNOSTICS == 1:
+            _ENERGY_TIMES.append(simtime)
+            _ENERGY_VALUES.append(
+                _hw_energy(dns).detach().cpu().double().numpy()
+            )
 
         if WRITE_DIAGNOSTICS == 1:
             laplacian_vorticity = _vorticity_from_potential(dns)
@@ -1266,6 +1311,11 @@ def findLESTerms(pLES):
         and diagnostics_due
         and _LAST_FIELD_OUTPUT_INDEX >= _bout_nout()
     ):
+        save_energy_history(
+            np.asarray(_ENERGY_TIMES, dtype=np.float64),
+            np.asarray(_ENERGY_VALUES, dtype=np.float64),
+            Path("results_U-Net") / "energy",
+        )
         _save_diagnostic_animations(Path("results_U-Net"))
     iteration = np.asarray([0.0], dtype=np.float64)
     return np.concatenate(
