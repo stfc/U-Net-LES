@@ -16,7 +16,7 @@ not need an argument parser::
   PBOUT_UNET_RECONSTRUCT_CHANNELS=none    # mode-1 U-Net channels
   PBOUT_UNET_DEVICE=cuda                 # or cpu; default is automatic
   PBOUT_UNET_IMPLICIT=1                  # return -(DNS-LES) brackets
-  PBOUT_UNET_WRITE_DIAGNOSTICS=1         # 0 disables image/field output
+  PBOUT_UNET_WRITE_DIAGNOSTICS=1         # 0=off, 1=all, 2=fields only
   PBOUT_UNET_OMEGA_FROM_POTENTIAL=1      # omega = Laplacian(phi) at DNS scale
   PBOUT_UNET_LAPLACIAN_ORDER=2            # periodic Laplacian order (2 or 4)
   PBOUT_UNET_INVERSE_CUTOFF_FRACTION=none
@@ -127,9 +127,16 @@ BOUT_INPUT = Path(
 IMPLICIT = os.environ.get("PBOUT_UNET_IMPLICIT", "1").lower() not in {
     "0", "false", "no", "off"
 }
-WRITE_DIAGNOSTICS = os.environ.get(
-    "PBOUT_UNET_WRITE_DIAGNOSTICS", "1"
-).lower() not in {"0", "false", "no", "off"}
+try:
+    WRITE_DIAGNOSTICS = int(
+        os.environ.get("PBOUT_UNET_WRITE_DIAGNOSTICS", "1")
+    )
+except ValueError as error:
+    raise ValueError(
+        "PBOUT_UNET_WRITE_DIAGNOSTICS must be 0, 1, or 2"
+    ) from error
+if WRITE_DIAGNOSTICS not in (0, 1, 2):
+    raise ValueError("PBOUT_UNET_WRITE_DIAGNOSTICS must be 0, 1, or 2")
 OMEGA_FROM_POTENTIAL = os.environ.get(
     "PBOUT_UNET_OMEGA_FROM_POTENTIAL", "1"
 ).lower() not in {"0", "false", "no", "off"}
@@ -844,7 +851,7 @@ def _validate_les_spacing(
 
 def saveArakawaTerms(pArakawa):
     """BOUT++ callback delegating Arakawa output to visualization helpers."""
-    if WRITE_DIAGNOSTICS:
+    if WRITE_DIAGNOSTICS == 1:
         save_bout_arakawa_terms(pArakawa, Path("results_U-Net_DNS"))
     return None
 
@@ -891,7 +898,7 @@ def initFlow(npv):
 
     _INITIAL_DNS_REFERENCE = None
     output_dir = Path("results_U-Net")
-    if WRITE_DIAGNOSTICS and output_dir.exists():
+    if output_dir.exists():
         shutil.rmtree(output_dir)
 
     if DNS_PATH is None:
@@ -986,7 +993,7 @@ def initFlow(npv):
 
     initial_laplacian_vorticity = _vorticity_from_potential(initial_dns)
     initial_dns_np = initial_dns[0].detach().cpu().double().numpy()
-    if WRITE_DIAGNOSTICS:
+    if WRITE_DIAGNOSTICS == 1:
         prepare_run_output(Path("results_U-Net"))
 
         fields_image_output, fields_spectrum_output = save_initial_dns_fields(
@@ -1043,8 +1050,12 @@ def initFlow(npv):
             f"{fields_spectrum_output};\n"
             f"saved DNS Arakawa terms to {arakawa_image_output} and spectra "
             f"to {arakawa_spectrum_output}\n"
-            if WRITE_DIAGNOSTICS
-            else "image and field diagnostics disabled\n"
+            if WRITE_DIAGNOSTICS == 1
+            else (
+                "saving field diagnostics only\n"
+                if WRITE_DIAGNOSTICS == 2
+                else "image and field diagnostics disabled\n"
+            )
         ),
         flush=True,
     )
@@ -1139,7 +1150,7 @@ def findLESTerms(pLES):
             time_step,
             simtime,
             Path("results_U-Net"),
-            save_images=True,
+            save_images=WRITE_DIAGNOSTICS == 1,
             reference_dns=simulation_fields_np,
             lx=LX,
             ly=LY,
@@ -1154,66 +1165,63 @@ def findLESTerms(pLES):
             ),
         )
 
-        laplacian_vorticity = _vorticity_from_potential(dns)
-        reconstructed_vorticity_np = (
-            reconstructed_vorticity.detach().cpu().double().numpy()
-        )
-        laplacian_vorticity_np = (
-            laplacian_vorticity.detach().cpu().double().numpy()
-        )
-        centerline_dns_np = dns_np.copy()
-        vorticity_index = FIELD_NAMES.index("P")
-        centerline_dns_np[:, vorticity_index] = reconstructed_vorticity_np[:, 0]
-
-        images_dir = Path("results_U-Net") / "images"
-        for batch_index in range(dns.shape[0]):
-            suffix = "" if dns.shape[0] == 1 else f"_batch{batch_index:03d}"
-            save_vorticity_comparison(
-                reconstructed_vorticity_np[batch_index, 0],
-                laplacian_vorticity_np[batch_index, 0],
-                images_dir
-                / (
-                    f"vorticity_comparison_time{time_step:07d}{suffix}.png"
-                ),
-                (
-                    "Reconstructed and Laplacian-derived vorticity, "
-                    f"step {time_step}, t={simtime:g}"
-                ),
+        if WRITE_DIAGNOSTICS == 1:
+            laplacian_vorticity = _vorticity_from_potential(dns)
+            reconstructed_vorticity_np = (
+                reconstructed_vorticity.detach().cpu().double().numpy()
             )
+            laplacian_vorticity_np = (
+                laplacian_vorticity.detach().cpu().double().numpy()
+            )
+            centerline_dns_np = dns_np.copy()
+            vorticity_index = FIELD_NAMES.index("P")
+            centerline_dns_np[:, vorticity_index] = reconstructed_vorticity_np[:, 0]
 
-            if simulation_fields_np is not None:
-                save_field_error_images(
-                    dns_np[batch_index],
-                    simulation_fields_np[batch_index],
-                    FIELD_NAMES,
-                    images_dir
-                    / (
-                        f"fields_reconstruction_error_time{time_step:07d}{suffix}.png"
+            images_dir = Path("results_U-Net") / "images"
+            for batch_index in range(dns.shape[0]):
+                suffix = "" if dns.shape[0] == 1 else f"_batch{batch_index:03d}"
+                save_vorticity_comparison(
+                    reconstructed_vorticity_np[batch_index, 0],
+                    laplacian_vorticity_np[batch_index, 0],
+                    images_dir / f"vorticity_comparison_time{time_step:07d}{suffix}.png",
+                    (
+                        "Reconstructed and Laplacian-derived vorticity, "
+                        f"step {time_step}, t={simtime:g}"
                     ),
-                    title_prefix="Reconstructed − incoming BOUT++ DNS",
                 )
-                save_field_centerline_comparison(
-                    centerline_dns_np[batch_index],
-                    simulation_fields_np[batch_index],
-                    FIELD_NAMES,
-                    images_dir
-                    / (
-                        "fields_reconstruction_centerline_time"
-                        f"{time_step:07d}{suffix}.png"
-                    ),
-                    reconstructed_label="Inverse-Germano reconstructed DNS",
-                    reference_label=(
-                        "Incoming BOUT++ Germano-filtered DNS"
-                        if DNS_INIT == 1
-                        else "Incoming BOUT++ DNS"
-                    ),
-                    additional_channel_lines={
-                        vorticity_index: (
-                            laplacian_vorticity_np[batch_index, 0],
-                            r"$\omega=\nabla^2\phi$",
-                        )
-                    },
-                )
+
+                if simulation_fields_np is not None:
+                    save_field_error_images(
+                        dns_np[batch_index],
+                        simulation_fields_np[batch_index],
+                        FIELD_NAMES,
+                        images_dir / (
+                            "fields_reconstruction_error_time"
+                            f"{time_step:07d}{suffix}.png"
+                        ),
+                        title_prefix="Reconstructed − incoming BOUT++ DNS",
+                    )
+                    save_field_centerline_comparison(
+                        centerline_dns_np[batch_index],
+                        simulation_fields_np[batch_index],
+                        FIELD_NAMES,
+                        images_dir / (
+                            "fields_reconstruction_centerline_time"
+                            f"{time_step:07d}{suffix}.png"
+                        ),
+                        reconstructed_label="Inverse-Germano reconstructed DNS",
+                        reference_label=(
+                            "Incoming BOUT++ Germano-filtered DNS"
+                            if DNS_INIT == 1
+                            else "Incoming BOUT++ DNS"
+                        ),
+                        additional_channel_lines={
+                            vorticity_index: (
+                                laplacian_vorticity_np[batch_index, 0],
+                                r"$\omega=\nabla^2\phi$",
+                            )
+                        },
+                    )
 
     arakawa_fields = simulation_fields if DNS_INIT == 2 else dns
     dx_dns = LX / arakawa_fields.shape[-2]
@@ -1253,7 +1261,11 @@ def findLESTerms(pLES):
 
     out_vort = bracket_vort.permute(1, 0, 2).reshape(-1)
     out_n = bracket_n.permute(1, 0, 2).reshape(-1)
-    if diagnostics_due and _LAST_FIELD_OUTPUT_INDEX >= _bout_nout():
+    if (
+        WRITE_DIAGNOSTICS == 1
+        and diagnostics_due
+        and _LAST_FIELD_OUTPUT_INDEX >= _bout_nout()
+    ):
         _save_diagnostic_animations(Path("results_U-Net"))
     iteration = np.asarray([0.0], dtype=np.float64)
     return np.concatenate(

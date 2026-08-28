@@ -120,7 +120,7 @@ export PBOUT_UNET_DNS_INIT=1
 export PBOUT_UNET_RECONSTRUCT_CHANNELS=U
 export PBOUT_UNET_ALPHA=0.392
 export PBOUT_UNET_DEVICE=cuda
-export PBOUT_UNET_WRITE_DIAGNOSTICS=0     # disable images and saved fields
+export PBOUT_UNET_WRITE_DIAGNOSTICS=2     # save only results_U-Net/fields
 export PBOUT_UNET_INVERSE_CUTOFF_FRACTION=0.707107
 export PBOUT_UNET_INVERSE_CUTOFF_ORDER=8
 
@@ -130,10 +130,21 @@ export PBOUT_UNET_INVERSE_CUTOFF_ORDER=8
 `PBOUT_UNET_ALPHA` overrides the checkpoint's physical Germano width. The
 Arakawa terms are Germano-filtered when `ALPHA > 0`, except in
 `PBOUT_UNET_DNS_INIT=2`, which always uses unfiltered DNS fields and terms.
-Set `PBOUT_UNET_WRITE_DIAGNOSTICS=0` to suppress all pBOUT++ diagnostic image
-and field files, including initial diagnostics, snapshots, and animations.
+`PBOUT_UNET_WRITE_DIAGNOSTICS` accepts three modes:
+
+| Value | Diagnostic output |
+| --- | --- |
+| `0` | Disable all diagnostic files. |
+| `1` | Write all field, image, Arakawa, and animation diagnostics (default). |
+| `2` | Write only field snapshots under `results_U-Net/fields`. |
+
+At the start of every fresh BOUT++ inference, pBOUT removes any existing
+`results_U-Net` directory, even when diagnostic writing is disabled.
 
 ### Initialization modes and required BOUT++ grid
+
+`PBOUT_UNET_DNS_INIT` accepts only `0`, `1`, or `2`. Mode `3` is not supported.
+Any other value causes pBOUT to stop with a configuration error.
 
 | `PBOUT_UNET_DNS_INIT` | Initialization and runtime behavior | BOUT++ active grid |
 | --- | --- | --- |
