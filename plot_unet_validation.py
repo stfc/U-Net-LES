@@ -1,367 +1,531 @@
 #!/usr/bin/env python3
-"""Render ``unet_validation_XXXXXXX.npz`` integration diagnostics as images."""
+"""Compare U-Net and DNS field-snapshot histories.
+
+Read ``fields_*.npz`` snapshots from two specified directories, then plot
+domain-center values and total/component HW-energy histories.
+"""
 
 from __future__ import annotations
 
 import argparse
 from pathlib import Path
 
+import matplotlib
+
+matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 
-
-FIELD_NAMES = ("U", "V", "P")
-REQUIRED_ARRAYS = (
-    "incoming_filtered_fine",
-    "downsampled_coarse",
-    "unet_filtered_fine",
-    "inverse_only_reference_dns",
-    "unet_reconstructed_dns",
-    "filtered_relative_l2",
-    "dns_relative_l2",
+from visualization_common import (
+    HW_FIELD_LABELS,
+    calculate_arakawa_terms,
+    save_png_animation,
 )
 
 
-def parse_args():
-    parser = argparse.ArgumentParser(
-        description="Plot U-Net validation NPZ files produced by pBOUT-unet."
+FIELD_NAMES = ("U", "V", "P")
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "unet_fields",
+        type=Path,
+        help="First run directory, or its directory of fields_*.npz snapshots",
     )
     parser.add_argument(
-        "input",
-        nargs="?",
+        "dns_fields",
         type=Path,
-        default=Path("results_U-Net/validation"),
-        help=(
-            "Validation directory or one unet_validation NPZ file "
-            "(default: results_U-Net/validation)"
-        ),
+        help="Second run directory, or its directory of fields_*.npz snapshots",
     )
     parser.add_argument(
-        "--output-dir",
-        type=Path,
-        help="Image directory (default: INPUT/images)",
+        "--output-dir", type=Path, default=Path("results_U-Net/comparison"),
+        help="Output directory (default: results_U-Net/comparison)",
     )
+    parser.add_argument("--lx", type=float, default=50.176)
+    parser.add_argument("--ly", type=float, default=50.176)
     parser.add_argument("--dpi", type=int, default=180)
     parser.add_argument(
-        "--format",
-        choices=("png", "pdf"),
-        default="png",
-        help="Output image format (default: png)",
+        "--fps", type=float, default=5.0,
+        help="Frame rate of the 2-D comparison animation (default: 5)",
     )
     parser.add_argument(
-        "--lx",
-        type=float,
-        help="Domain length Lx (overrides archive metadata)",
+        "--animations",
+        action="store_true",
+        help="Generate field and Arakawa comparison GIFs (disabled by default)",
     )
     parser.add_argument(
-        "--ly",
-        type=float,
-        help="Domain length Ly (overrides archive metadata)",
+        "--batch", type=int, default=0,
+        help="Batch index for batched snapshots (default: 0)",
     )
     return parser.parse_args()
 
 
-def validation_files(path: Path) -> list[Path]:
-    if path.is_file():
-        return [path]
-    if not path.is_dir():
-        raise FileNotFoundError(f"Validation input does not exist: {path}")
-    files = sorted(path.glob("unet_validation_*.npz"))
+def _select_field(values: np.ndarray, batch: int, source: Path) -> np.ndarray:
+    """Select a 2-D field from an unbatched or batched archive array."""
+    values = np.asarray(values, dtype=np.float64)
+    if values.ndim == 2:
+        if batch != 0:
+            raise IndexError(f"{source}: unbatched field has no batch {batch}")
+        return values
+    if values.ndim == 3:
+        if not 0 <= batch < values.shape[0]:
+            raise IndexError(
+                f"{source}: batch {batch} is outside [0, {values.shape[0]})"
+            )
+        return values[batch]
+    raise ValueError(
+        f"{source}: expected (nx, ny) or (batch, nx, ny), got {values.shape}"
+    )
+
+
+def read_history(
+    directory: Path, batch: int
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Read time, step, and channel-first fields from a snapshot directory."""
+    if not directory.is_dir():
+        raise FileNotFoundError(f"Field directory does not exist: {directory}")
+    nested_fields = directory / "fields"
+    fields_directory = nested_fields if nested_fields.is_dir() else directory
+    files = sorted(fields_directory.glob("fields_*.npz"))
     if not files:
         raise FileNotFoundError(
-            f"No unet_validation_*.npz files found in {path}"
+            f"No fields_*.npz files found in {directory} or "
+            f"{directory / 'fields'}"
         )
-    return files
 
-
-def load_validation(path: Path) -> dict[str, np.ndarray]:
-    with np.load(path) as archive:
-        missing = [name for name in REQUIRED_ARRAYS if name not in archive]
-        if missing:
-            raise KeyError(f"{path} is missing arrays: {missing}")
-        data = {name: np.asarray(archive[name]) for name in REQUIRED_ARRAYS}
-        data["pStep"] = np.asarray(archive.get("pStep", -1)).item()
-        data["simtime"] = np.asarray(archive.get("simtime", np.nan)).item()
-        data["lx"] = np.asarray(archive.get("lx", np.nan)).item()
-        data["ly"] = np.asarray(archive.get("ly", np.nan)).item()
-
-    fine_shape = data["incoming_filtered_fine"].shape
-    if len(fine_shape) != 4 or fine_shape[1] != len(FIELD_NAMES):
-        raise ValueError(
-            f"{path}: expected fine fields shaped (batch, 3, nx, ny), "
-            f"received {fine_shape}"
-        )
-    for name in (
-        "unet_filtered_fine",
-        "inverse_only_reference_dns",
-        "unet_reconstructed_dns",
-    ):
-        if data[name].shape != fine_shape:
-            raise ValueError(
-                f"{path}: {name} has shape {data[name].shape}, "
-                f"expected {fine_shape}"
+    records = []
+    expected_shape = None
+    for source in files:
+        with np.load(source) as archive:
+            missing = [name for name in FIELD_NAMES if name not in archive]
+            if missing:
+                raise KeyError(f"{source} is missing fields: {missing}")
+            fields = np.stack(
+                [_select_field(archive[name], batch, source) for name in FIELD_NAMES]
             )
-    coarse_shape = data["downsampled_coarse"].shape
-    if coarse_shape[:2] != fine_shape[:2] or len(coarse_shape) != 4:
-        raise ValueError(
-            f"{path}: invalid downsampled_coarse shape {coarse_shape}"
-        )
-    metric_shape = fine_shape[:2]
-    for name in ("filtered_relative_l2", "dns_relative_l2"):
-        if data[name].shape != metric_shape:
+            simtime = float(np.asarray(archive.get("simtime", np.nan)).item())
+            step = int(np.asarray(archive.get("pStep", -1)).item())
+        if not np.isfinite(simtime):
+            raise ValueError(f"{source}: missing a finite simtime")
+        if expected_shape is None:
+            expected_shape = fields.shape
+        elif fields.shape != expected_shape:
             raise ValueError(
-                f"{path}: {name} has shape {data[name].shape}, "
-                f"expected {metric_shape}"
+                f"{source}: field shape {fields.shape} differs from {expected_shape}"
             )
-    return data
+        records.append((simtime, step, fields))
 
-
-def symmetric_limit(*arrays: np.ndarray) -> float:
-    limit = max(float(np.max(np.abs(array))) for array in arrays)
-    return limit if limit > 0 else 1.0
+    records.sort(key=lambda record: (record[0], record[1]))
+    return (
+        np.asarray([record[0] for record in records]),
+        np.asarray([record[1] for record in records]),
+        np.stack([record[2] for record in records]),
+    )
 
 
 def periodic_derivative(
-    field: np.ndarray, spacing: float, axis: int, order: int
+    values: np.ndarray, spacing: float, axis: int
 ) -> np.ndarray:
-    """Return a centered periodic first derivative."""
-    if order == 2:
-        return (
-            np.roll(field, -1, axis=axis)
-            - np.roll(field, 1, axis=axis)
-        ) / (2 * spacing)
-    if order == 4:
-        if field.shape[axis] < 5:
-            raise ValueError(
-                "Fourth-order derivative requires at least 5 points"
-            )
-        return (
-            np.roll(field, 2, axis=axis)
-            - 8 * np.roll(field, 1, axis=axis)
-            + 8 * np.roll(field, -1, axis=axis)
-            - np.roll(field, -2, axis=axis)
-        ) / (12 * spacing)
-    raise ValueError(f"Derivative order must be 2 or 4, received {order}")
-
-
-def periodic_location_shift(
-    first: tuple[int, int],
-    second: tuple[int, int],
-    shape: tuple[int, int],
-    lx: float,
-    ly: float,
-) -> float:
-    """Return the physical separation of two indices on a periodic domain."""
-    delta_x = min(
-        abs(first[0] - second[0]),
-        shape[0] - abs(first[0] - second[0]),
-    )
-    delta_y = min(
-        abs(first[1] - second[1]),
-        shape[1] - abs(first[1] - second[1]),
-    )
-    return float(
-        np.hypot(delta_x * lx / shape[0], delta_y * ly / shape[1])
-    )
-
-
-def vorticity_diagnostics(
-    reference_w: np.ndarray,
-    reconstructed_w: np.ndarray,
-    reconstructed_potential: np.ndarray,
-    lx: float,
-    ly: float,
-    order: int,
-) -> str:
-    """Summarize circulation, extrema/location, and divergence checks."""
-    nx, ny = reconstructed_w.shape
-    dx, dy = lx / nx, ly / ny
-
-    def circulation(field: np.ndarray) -> tuple[float, float, float]:
-        area = dx * dy
-        return (
-            float(np.sum(field) * area),
-            float(np.sum(np.maximum(field, 0)) * area),
-            float(np.sum(np.minimum(field, 0)) * area),
-        )
-
-    ref_circ = circulation(reference_w)
-    rec_circ = circulation(reconstructed_w)
-    ref_min = np.unravel_index(np.argmin(reference_w), reference_w.shape)
-    ref_max = np.unravel_index(np.argmax(reference_w), reference_w.shape)
-    rec_min = np.unravel_index(
-        np.argmin(reconstructed_w), reconstructed_w.shape
-    )
-    rec_max = np.unravel_index(
-        np.argmax(reconstructed_w), reconstructed_w.shape
-    )
-    min_shift = periodic_location_shift(
-        ref_min, rec_min, reconstructed_w.shape, lx, ly
-    )
-    max_shift = periodic_location_shift(
-        ref_max, rec_max, reconstructed_w.shape, lx, ly
-    )
-
-    # V is electrostatic potential. Its E×B velocity is
-    # (-dV/dy, dV/dx), which should be divergence-free.
-    velocity_x = -periodic_derivative(
-        reconstructed_potential, dy, axis=1, order=order
-    )
-    velocity_y = periodic_derivative(
-        reconstructed_potential, dx, axis=0, order=order
-    )
-    divergence = periodic_derivative(
-        velocity_x, dx, axis=0, order=order
-    ) + periodic_derivative(velocity_y, dy, axis=1, order=order)
-
+    """Return a fourth-order centered derivative on a periodic grid."""
+    if values.shape[axis] < 5:
+        raise ValueError("Fourth-order derivative requires at least five points")
     return (
-        "Circulation Γ (total / positive / negative)\n"
-        f"ref: {ref_circ[0]:+.3e} / {ref_circ[1]:+.3e} / "
-        f"{ref_circ[2]:+.3e}\n"
-        f"rec: {rec_circ[0]:+.3e} / {rec_circ[1]:+.3e} / "
-        f"{rec_circ[2]:+.3e}\n\n"
-        "Extrema: value @ grid index (ix, iy)\n"
-        f"min ref: {reference_w[ref_min]:+.3e} @ {ref_min}\n"
-        f"min rec: {reconstructed_w[rec_min]:+.3e} @ {rec_min}\n"
-        f"max ref: {reference_w[ref_max]:+.3e} @ {ref_max}\n"
-        f"max rec: {reconstructed_w[rec_max]:+.3e} @ {rec_max}\n"
-        f"periodic shift min/max: {min_shift:.3e} / {max_shift:.3e}\n\n"
-        "div(E×B velocity), reconstructed V\n"
-        f"RMS: {np.sqrt(np.mean(divergence**2)):.3e}   "
-        f"max|.|: {np.max(np.abs(divergence)):.3e}"
+        -np.roll(values, -2, axis=axis)
+        + 8.0 * np.roll(values, -1, axis=axis)
+        - 8.0 * np.roll(values, 1, axis=axis)
+        + np.roll(values, 2, axis=axis)
+    ) / (12.0 * spacing)
+
+
+def hw_energy_components(
+    fields: np.ndarray, lx: float, ly: float
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Return the density, x-gradient, and y-gradient HW energy terms."""
+    if min(fields.shape[-2:]) < 5:
+        raise ValueError("HW energy requires at least five points per direction")
+    density, potential = fields[:, 0], fields[:, 1]
+    dx, dy = lx / potential.shape[-2], ly / potential.shape[-1]
+    dphi_dx = periodic_derivative(potential, dx, -2)
+    dphi_dy = periodic_derivative(potential, dy, -1)
+    return (
+        0.5 * np.mean(density**2, axis=(-2, -1)),
+        0.5 * np.mean(dphi_dx**2, axis=(-2, -1)),
+        0.5 * np.mean(dphi_dy**2, axis=(-2, -1)),
     )
 
 
-def plot_field(
-    data: dict[str, np.ndarray],
-    source: Path,
-    output_dir: Path,
-    batch: int,
-    channel: int,
-    dpi: int,
-    image_format: str,
-    lx: float,
-    ly: float,
-) -> Path:
-    incoming = data["incoming_filtered_fine"][batch, channel]
-    coarse = data["downsampled_coarse"][batch, channel]
-    predicted = data["unet_filtered_fine"][batch, channel]
-    reference_dns = data["inverse_only_reference_dns"][batch, channel]
-    reconstructed_dns = data["unet_reconstructed_dns"][batch, channel]
-    filtered_error = predicted - incoming
-    dns_error = reconstructed_dns - reference_dns
+def hw_energy(fields: np.ndarray, lx: float, ly: float) -> np.ndarray:
+    """Compute E=1/2 <n^2 + |grad(phi)|^2> with periodic 4th-order gradients."""
+    return np.sum(hw_energy_components(fields, lx, ly), axis=0)
 
-    filtered_limit = symmetric_limit(incoming, predicted)
-    dns_limit = symmetric_limit(reference_dns, reconstructed_dns)
-    filtered_error_limit = symmetric_limit(filtered_error)
-    dns_error_limit = symmetric_limit(dns_error)
 
-    panels = (
-        (incoming, "Incoming filtered fine", filtered_limit),
-        (coarse, "Spectrally downsampled", symmetric_limit(coarse)),
-        (predicted, "U-Net filtered fine", filtered_limit),
-        (
-            filtered_error,
-            "U-Net filtered − incoming",
-            filtered_error_limit,
-        ),
-        (reference_dns, "Inverse-only DNS reference", dns_limit),
-        (reconstructed_dns, "U-Net reconstructed DNS", dns_limit),
-        (
-            dns_error,
-            "Reconstructed − reference DNS",
-            dns_error_limit,
-        ),
+def save_centerpoint_history(datasets, output_path: Path, dpi: int) -> Path:
+    """Compare each field's value at the domain center versus time."""
+    figure, axes = plt.subplots(
+        len(FIELD_NAMES), 1, figsize=(9, 10), sharex=True, squeeze=False
     )
-
-    fig, axes = plt.subplots(
-        2,
-        4,
-        figsize=(17, 8.5),
-        constrained_layout=True,
-    )
-    axes = axes.ravel()
-    extent = (0, 1, 0, 1)
-    for axis, (field, title, limit) in zip(axes, panels):
-        image = axis.imshow(
-            field.T,
-            origin="lower",
-            extent=extent,
-            cmap="RdBu_r",
-            vmin=-limit,
-            vmax=limit,
-            interpolation="nearest",
-            aspect="equal",
-        )
-        axis.set_title(title)
-        axis.set_xlabel("x / Lx")
-        axis.set_ylabel("z / Lz")
-        fig.colorbar(image, ax=axis, shrink=0.82)
-
-    filtered_l2 = data["filtered_relative_l2"][batch, channel]
-    dns_l2 = data["dns_relative_l2"][batch, channel]
-    axes[7].axis("off")
-    axes[7].text(
-        0.05,
-        0.75,
-        f"Filtered relative L2: {filtered_l2:.6e}\n"
-        f"DNS relative L2: {dns_l2:.6e}\n\n"
-        f"Fine grid: {incoming.shape[0]} × {incoming.shape[1]}\n"
-        f"Coarse grid: {coarse.shape[0]} × {coarse.shape[1]}",
-        va="top",
-        family="monospace",
-        fontsize=11,
-    )
-    fig.suptitle(
-        f"{FIELD_NAMES[channel]} reconstruction — step {data['pStep']}, "
-        f"t={data['simtime']:g}, batch {batch}"
-    )
-
-    batch_suffix = (
-        "" if data["incoming_filtered_fine"].shape[0] == 1
-        else f"_batch{batch:03d}"
-    )
-    output_path = output_dir / (
-        f"{source.stem}_{FIELD_NAMES[channel]}{batch_suffix}.{image_format}"
-    )
-    fig.savefig(output_path, dpi=dpi)
-    plt.close(fig)
+    styles = (("tab:blue", "-"), ("black", "--"))
+    for channel, name in enumerate(FIELD_NAMES):
+        axis = axes[channel, 0]
+        for (label, times, fields), (color, linestyle) in zip(datasets, styles):
+            center_x = fields.shape[-2] // 2
+            center_y = fields.shape[-1] // 2
+            axis.plot(
+                times,
+                fields[:, channel, center_x, center_y],
+                color=color,
+                linestyle=linestyle,
+                linewidth=1.6,
+                label=label,
+            )
+        field_label = HW_FIELD_LABELS.get(name, name)
+        axis.set_title(f"{field_label} at domain center")
+        axis.set_ylabel(field_label)
+        axis.grid(True, alpha=0.3)
+    axes[0, 0].legend()
+    axes[-1, 0].set_xlabel("simulation time")
+    figure.suptitle("Domain-center field trajectories")
+    figure.tight_layout()
+    figure.savefig(output_path, dpi=dpi, bbox_inches="tight")
+    plt.close(figure)
     return output_path
 
 
-def main():
-    args = parse_args()
-    files = validation_files(args.input)
-    default_parent = args.input if args.input.is_dir() else args.input.parent
-    output_dir = args.output_dir or default_parent / "images"
-    output_dir.mkdir(parents=True, exist_ok=True)
+def save_energy_comparison(
+    datasets, output_path: Path, lx: float, ly: float, dpi: int
+) -> Path:
+    """Plot overlaid HW energy histories."""
+    figure, axis = plt.subplots(figsize=(7.4, 5.2))
+    styles = (("tab:blue", "-"), ("black", "--"))
+    for (label, times, fields), (color, linestyle) in zip(datasets, styles):
+        axis.plot(
+            times, hw_energy(fields, lx, ly), color=color,
+            linestyle=linestyle, linewidth=1.6, label=label,
+        )
+    axis.set_xlabel("simulation time")
+    axis.set_ylabel(r"$E=\frac{1}{2}\langle n^2+|\nabla\phi|^2\rangle$")
+    axis.set_title("Hasegawa–Wakatani energy versus time")
+    axis.grid(True, alpha=0.3)
+    axis.legend()
+    figure.tight_layout()
+    figure.savefig(output_path, dpi=dpi, bbox_inches="tight")
+    plt.close(figure)
+    return output_path
 
-    images_written = 0
-    for index, source in enumerate(files, 1):
-        data = load_validation(source)
-        lx = args.lx if args.lx is not None else float(data["lx"])
-        ly = args.ly if args.ly is not None else float(data["ly"])
-        if not np.isfinite(lx) or lx <= 0 or not np.isfinite(ly) or ly <= 0:
-            raise ValueError(
-                f"{source}: missing valid lx/ly metadata; provide --lx and --ly"
+
+def save_energy_components_comparison(
+    datasets, output_path: Path, lx: float, ly: float, dpi: int
+) -> Path:
+    """Plot each additive HW energy component versus time."""
+    component_labels = (
+        r"Density: $E_n=\frac{1}{2}\langle n^2\rangle$",
+        r"Potential x-gradient: $E_{\phi,x}=\frac{1}{2}\langle(\partial_x\phi)^2\rangle$",
+        r"Potential y-gradient: $E_{\phi,y}=\frac{1}{2}\langle(\partial_y\phi)^2\rangle$",
+    )
+    figure, axes = plt.subplots(
+        len(component_labels), 1, figsize=(8.2, 10), sharex=True,
+        squeeze=False,
+    )
+    styles = (("tab:blue", "-"), ("black", "--"))
+    for (label, times, fields), (color, linestyle) in zip(datasets, styles):
+        components = hw_energy_components(fields, lx, ly)
+        for axis, values in zip(axes[:, 0], components):
+            axis.plot(
+                times, values, color=color, linestyle=linestyle,
+                linewidth=1.6, label=label,
             )
-        for batch in range(data["incoming_filtered_fine"].shape[0]):
-            for channel in range(len(FIELD_NAMES)):
-                plot_field(
-                    data,
-                    source,
-                    output_dir,
-                    batch,
-                    channel,
-                    args.dpi,
-                    args.format,
-                    lx,
-                    ly,
-                )
-                images_written += 1
-        print(f"[{index}/{len(files)}] {source}")
 
-    print(f"Saved {images_written} images to {output_dir}")
+    for axis, component_label in zip(axes[:, 0], component_labels):
+        axis.set_title(component_label)
+        axis.set_ylabel("Energy")
+        axis.grid(True, alpha=0.3)
+    axes[0, 0].legend()
+    axes[-1, 0].set_xlabel("simulation time")
+    figure.suptitle("Hasegawa–Wakatani energy components versus time")
+    figure.tight_layout()
+    figure.savefig(output_path, dpi=dpi, bbox_inches="tight")
+    plt.close(figure)
+    return output_path
+
+
+def save_initial_derivative_comparison(
+    datasets, output_path: Path, lx: float, ly: float, dpi: int
+) -> Path:
+    """Compare x/y derivatives of every field at the time nearest zero."""
+    (first_label, first_times, first_fields), (
+        second_label, second_times, second_fields
+    ) = datasets
+    if first_fields.shape[1:] != second_fields.shape[1:]:
+        raise ValueError(
+            "Derivative comparison requires matching field grids; received "
+            f"{first_fields.shape[2:]} and {second_fields.shape[2:]}"
+        )
+
+    first_index = int(np.argmin(np.abs(first_times)))
+    second_index = int(np.argmin(np.abs(second_times)))
+    nx, ny = first_fields.shape[-2:]
+    spacings = (lx / nx, ly / ny)
+    directions = (("x", -2), ("y", -1))
+    figure, axes = plt.subplots(
+        2 * len(FIELD_NAMES), 3, figsize=(14, 24), squeeze=False
+    )
+    for channel, name in enumerate(FIELD_NAMES):
+        field_label = HW_FIELD_LABELS.get(name, name)
+        for direction_index, ((direction, axis), spacing) in enumerate(
+            zip(directions, spacings)
+        ):
+            row = 2 * channel + direction_index
+            first_values = periodic_derivative(
+                first_fields[first_index, channel], spacing, axis
+            )
+            second_values = periodic_derivative(
+                second_fields[second_index, channel], spacing, axis
+            )
+            error = np.abs(first_values - second_values)
+            limit = max(
+                float(np.max(np.abs(first_values))),
+                float(np.max(np.abs(second_values))),
+            ) or 1.0
+            error_limit = float(np.max(error)) or 1.0
+            derivative_label = rf"$\partial_{direction}$ {field_label}"
+            panels = (
+                (first_values, first_label, "RdBu_r", -limit, limit),
+                (second_values, second_label, "RdBu_r", -limit, limit),
+                (error, "absolute error", "magma", 0.0, error_limit),
+            )
+            for column, (values, label, cmap, vmin, vmax) in enumerate(panels):
+                plot_axis = axes[row, column]
+                image = plot_axis.imshow(
+                    values.T,
+                    origin="lower",
+                    extent=(0.0, 1.0, 0.0, 1.0),
+                    aspect="equal",
+                    interpolation="nearest",
+                    cmap=cmap,
+                    vmin=vmin,
+                    vmax=vmax,
+                )
+                plot_axis.set_title(f"{derivative_label}: {label}")
+                plot_axis.set_xlabel("x / Lx")
+                plot_axis.set_ylabel("y / Ly")
+                figure.colorbar(image, ax=plot_axis, shrink=0.78)
+    figure.suptitle(
+        f"Initial field derivatives: {first_label} t={first_times[first_index]:g}, "
+        f"{second_label} t={second_times[second_index]:g}"
+    )
+    figure.tight_layout()
+    figure.savefig(output_path, dpi=dpi, bbox_inches="tight")
+    plt.close(figure)
+    return output_path
+
+
+def save_field_comparison_animation(
+    datasets, output_dir: Path, dpi: int, fps: float
+) -> Path:
+    """Animate both 2-D solutions and their absolute error at nearest times."""
+    (first_label, first_times, first_fields), (
+        second_label, second_times, second_fields
+    ) = datasets
+    if first_fields.shape[1:] != second_fields.shape[1:]:
+        raise ValueError(
+            "2-D error animation requires matching field grids; received "
+            f"{first_fields.shape[2:]} and {second_fields.shape[2:]}"
+        )
+
+    nearest = np.asarray(
+        [np.argmin(np.abs(second_times - time)) for time in first_times]
+    )
+    matched_second = second_fields[nearest]
+    errors = np.abs(first_fields - matched_second)
+    field_limits = [
+        max(
+            float(np.max(np.abs(first_fields[:, channel]))),
+            float(np.max(np.abs(matched_second[:, channel]))),
+        )
+        for channel in range(len(FIELD_NAMES))
+    ]
+    error_limits = [
+        float(np.max(errors[:, channel]))
+        for channel in range(len(FIELD_NAMES))
+    ]
+
+    frames_dir = output_dir / "field_comparison_frames"
+    frames_dir.mkdir(parents=True, exist_ok=True)
+    frame_paths = []
+    for frame_index, (first_time, second_index) in enumerate(
+        zip(first_times, nearest)
+    ):
+        figure, axes = plt.subplots(
+            len(FIELD_NAMES), 3, figsize=(14, 13), squeeze=False
+        )
+        for channel, name in enumerate(FIELD_NAMES):
+            limit = field_limits[channel] or 1.0
+            error_limit = error_limits[channel] or 1.0
+            panels = (
+                (first_fields[frame_index, channel], first_label, "RdBu_r", -limit, limit),
+                (second_fields[second_index, channel], second_label, "RdBu_r", -limit, limit),
+                (errors[frame_index, channel], "absolute error", "magma", 0.0, error_limit),
+            )
+            for column, (values, label, cmap, vmin, vmax) in enumerate(panels):
+                axis = axes[channel, column]
+                image = axis.imshow(
+                    values.T,
+                    origin="lower",
+                    extent=(0.0, 1.0, 0.0, 1.0),
+                    aspect="equal",
+                    interpolation="nearest",
+                    cmap=cmap,
+                    vmin=vmin,
+                    vmax=vmax,
+                )
+                axis.set_title(f"{HW_FIELD_LABELS.get(name, name)}: {label}")
+                axis.set_xlabel("x / Lx")
+                axis.set_ylabel("y / Ly")
+                figure.colorbar(image, ax=axis, shrink=0.78)
+        figure.suptitle(
+            f"2-D field comparison: {first_label} t={first_time:g}, "
+            f"{second_label} t={second_times[second_index]:g}"
+        )
+        figure.tight_layout()
+        frame_path = frames_dir / f"field_comparison_{frame_index:07d}.png"
+        figure.savefig(frame_path, dpi=dpi, bbox_inches="tight")
+        plt.close(figure)
+        frame_paths.append(frame_path)
+
+    return save_png_animation(
+        frame_paths, output_dir / "field_comparison.gif", fps=fps
+    )
+
+
+def save_arakawa_comparison_animation(
+    datasets, output_dir: Path, lx: float, ly: float, dpi: int, fps: float
+) -> Path:
+    """Animate U-Net and DNS Arakawa terms and their absolute errors."""
+    (first_label, first_times, first_fields), (
+        second_label, second_times, second_fields
+    ) = datasets
+    if first_fields.shape[1:] != second_fields.shape[1:]:
+        raise ValueError(
+            "Arakawa comparison requires matching field grids; received "
+            f"{first_fields.shape[2:]} and {second_fields.shape[2:]}"
+        )
+
+    nearest = np.asarray(
+        [np.argmin(np.abs(second_times - time)) for time in first_times]
+    )
+    first_terms = np.asarray(
+        [calculate_arakawa_terms(fields, lx, ly) for fields in first_fields]
+    )
+    second_terms = np.asarray(
+        [
+            calculate_arakawa_terms(second_fields[index], lx, ly)
+            for index in nearest
+        ]
+    )
+    errors = np.abs(first_terms - second_terms)
+    term_limits = [
+        max(
+            float(np.max(np.abs(first_terms[:, term]))),
+            float(np.max(np.abs(second_terms[:, term]))),
+        )
+        for term in range(2)
+    ]
+    error_limits = [
+        float(np.max(errors[:, term])) for term in range(2)
+    ]
+    term_labels = (r"$J(\phi,\omega)$", r"$J(\phi,n)$")
+
+    frames_dir = output_dir / "arakawa_comparison_frames"
+    frames_dir.mkdir(parents=True, exist_ok=True)
+    frame_paths = []
+    for frame_index, (first_time, second_index) in enumerate(
+        zip(first_times, nearest)
+    ):
+        figure, axes = plt.subplots(2, 3, figsize=(14, 9), squeeze=False)
+        for term, term_label in enumerate(term_labels):
+            limit = term_limits[term] or 1.0
+            error_limit = error_limits[term] or 1.0
+            panels = (
+                (first_terms[frame_index, term], first_label, "RdBu_r", -limit, limit),
+                (second_terms[frame_index, term], second_label, "RdBu_r", -limit, limit),
+                (errors[frame_index, term], "absolute error", "magma", 0.0, error_limit),
+            )
+            for column, (values, label, cmap, vmin, vmax) in enumerate(panels):
+                axis = axes[term, column]
+                image = axis.imshow(
+                    values.T,
+                    origin="lower",
+                    extent=(0.0, 1.0, 0.0, 1.0),
+                    aspect="equal",
+                    interpolation="nearest",
+                    cmap=cmap,
+                    vmin=vmin,
+                    vmax=vmax,
+                )
+                axis.set_title(f"{term_label}: {label}")
+                axis.set_xlabel("x / Lx")
+                axis.set_ylabel("y / Ly")
+                figure.colorbar(image, ax=axis, shrink=0.78)
+        figure.suptitle(
+            f"Arakawa comparison: {first_label} t={first_time:g}, "
+            f"{second_label} t={second_times[second_index]:g}"
+        )
+        figure.tight_layout()
+        frame_path = frames_dir / f"arakawa_comparison_{frame_index:07d}.png"
+        figure.savefig(frame_path, dpi=dpi, bbox_inches="tight")
+        plt.close(figure)
+        frame_paths.append(frame_path)
+
+    return save_png_animation(
+        frame_paths, output_dir / "arakawa_comparison.gif", fps=fps
+    )
+
+
+def main() -> None:
+    args = parse_args()
+    if args.lx <= 0 or args.ly <= 0:
+        raise ValueError("lx and ly must be positive")
+    if args.batch < 0:
+        raise ValueError("batch must be non-negative")
+    if args.animations and args.fps <= 0:
+        raise ValueError("fps must be positive")
+
+    unet_times, _, unet_fields = read_history(args.unet_fields, args.batch)
+    dns_times, _, dns_fields = read_history(args.dns_fields, args.batch)
+    datasets = (
+        (args.unet_fields.resolve().name, unet_times, unet_fields),
+        (args.dns_fields.resolve().name, dns_times, dns_fields),
+    )
+    args.output_dir.mkdir(parents=True, exist_ok=True)
+    centerpoint_path = save_centerpoint_history(
+        datasets, args.output_dir / "centerpoint_vs_time.png", args.dpi
+    )
+    energy_path = save_energy_comparison(
+        datasets, args.output_dir / "energy_vs_time.png",
+        args.lx, args.ly, args.dpi,
+    )
+    energy_components_path = save_energy_components_comparison(
+        datasets, args.output_dir / "energy_components_vs_time.png",
+        args.lx, args.ly, args.dpi,
+    )
+    initial_derivatives_path = save_initial_derivative_comparison(
+        datasets, args.output_dir / "field_derivatives_t0.png",
+        args.lx, args.ly, args.dpi,
+    )
+    print(f"Saved {centerpoint_path}")
+    print(f"Saved {energy_path}")
+    print(f"Saved {energy_components_path}")
+    print(f"Saved {initial_derivatives_path}")
+    if args.animations:
+        animation_path = save_field_comparison_animation(
+            datasets, args.output_dir, args.dpi, args.fps
+        )
+        arakawa_animation_path = save_arakawa_comparison_animation(
+            datasets, args.output_dir, args.lx, args.ly, args.dpi, args.fps
+        )
+        print(f"Saved {animation_path}")
+        print(f"Saved {arakawa_animation_path}")
 
 
 if __name__ == "__main__":
