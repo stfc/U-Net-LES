@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 from pathlib import Path
+import shutil
 
 import matplotlib
 
@@ -497,6 +498,22 @@ def main() -> None:
         (args.unet_fields.resolve().name, unet_times, unet_fields),
         (args.dns_fields.resolve().name, dns_times, dns_fields),
     )
+    output_directory = args.output_dir.resolve()
+    input_directories = (
+        args.unet_fields.resolve(),
+        args.dns_fields.resolve(),
+    )
+    if any(
+        input_directory == output_directory
+        or output_directory in input_directory.parents
+        for input_directory in input_directories
+    ):
+        raise ValueError(
+            f"Refusing to delete output directory {output_directory} because "
+            "it contains an input dataset"
+        )
+    if args.output_dir.exists():
+        shutil.rmtree(args.output_dir)
     args.output_dir.mkdir(parents=True, exist_ok=True)
     centerpoint_path = save_centerpoint_history(
         datasets, args.output_dir / "centerpoint_vs_time.png", args.dpi
