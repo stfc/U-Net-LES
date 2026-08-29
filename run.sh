@@ -51,6 +51,9 @@ python train_germano_unet.py \
   --save-every "${CHECKPOINT_EVERY}" \
   --diagnostic-every "${DIAGNOSTIC_EVERY}" \
   --no-normalize \
-  --post-filter none
+  --post-filter none \
+  --inverse-method van_cittert \
+  --van-cittert-iterations 5 \
+  --van-cittert-relaxation 1.0
 
 #python infer_germano_unet.py --checkpoint germano_training_output_32_v3/checkpoints/best.pt --input fields_HW_run0_time501.npz --output-dir inference_output

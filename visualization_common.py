@@ -13,6 +13,7 @@ from PIL import Image
 
 from germano_common import (
     HW_FIELD_LABELS,
+    SPECTRUM_Y_MAX,
     SPECTRUM_Y_MIN,
     isotropic_spectrum,
 )
@@ -225,7 +226,7 @@ def save_field_spectrum_comparison(
         ax.set_title(f"{HW_FIELD_LABELS.get(name, name)} spectrum")
         ax.set_xlabel(r"wavenumber $k$")
         ax.set_ylabel("shell-summed power")
-        ax.set_ylim(bottom=SPECTRUM_Y_MIN)
+        ax.set_ylim(bottom=SPECTRUM_Y_MIN, top=SPECTRUM_Y_MAX)
         ax.grid(True, which="both", alpha=0.25)
         ax.legend()
     fig.tight_layout()
@@ -419,7 +420,7 @@ def save_initial_dns_fields(
         ax.set_title(f"{HW_FIELD_LABELS.get(name, name)} spectrum")
         ax.set_xlabel(r"wavenumber $k$")
         ax.set_ylabel("shell-summed power")
-        ax.set_ylim(bottom=SPECTRUM_Y_MIN)
+        ax.set_ylim(bottom=SPECTRUM_Y_MIN, top=SPECTRUM_Y_MAX)
         ax.grid(True, which="both", alpha=0.25)
         ax.legend()
     fig.tight_layout()
@@ -898,7 +899,7 @@ def save_arakawa_comparison(
         ax.set_title(f"{title} spectrum")
         ax.set_xlabel(r"wavenumber $k$")
         ax.set_ylabel("shell-summed power")
-        ax.set_ylim(bottom=SPECTRUM_Y_MIN)
+        ax.set_ylim(bottom=SPECTRUM_Y_MIN, top=SPECTRUM_Y_MAX)
         ax.grid(True, which="both", alpha=0.25)
         ax.legend()
     if figure_title is not None:

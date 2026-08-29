@@ -69,17 +69,12 @@ def scalar_series(accumulator, tag):
     return [event.step for event in events], [event.value for event in events]
 
 
-def load_loss_weights(run_dir: Path):
+def load_training_parameters(run_dir: Path):
     run_root = run_dir.parent if run_dir.name == "tensorboard" else run_dir
     parameters_path = run_root / "training_parameters.json"
     if not parameters_path.is_file():
         return None
-    parameters = json.loads(parameters_path.read_text())
-    return {
-        "dns": parameters.get("lambda_dns"),
-        "first_derivative": parameters.get("lambda_first_derivative"),
-        "second_derivative": parameters.get("lambda_second_derivative"),
-    }
+    return json.loads(parameters_path.read_text())
 
 
 def format_weight(value):
@@ -90,9 +85,9 @@ def plot_all_metrics(
     accumulator,
     output_path,
     log_scale,
-    loss_weights=None,
+    training_parameters=None,
 ):
-    loss_weights = loss_weights or {}
+    training_parameters = training_parameters or {}
     available = set(accumulator.Tags().get("scalars", ()))
     fig, axes = plt.subplot_mosaic(
         PANEL_LAYOUT,
@@ -133,7 +128,10 @@ def plot_all_metrics(
                 steps, values = scalar_series(accumulator, tag)
                 ax.plot(steps, values, color=color, label=split)
                 plotted = True
-            ax.set_title(metric.replace("_", " ").title())
+            title = metric.replace("_", " ").title()
+            if metric == "filtered_relative_l2":
+                title += " (Diagnostic Only)"
+            ax.set_title(title)
         ax.set_xlabel("Epoch")
         ax.set_ylabel("Value")
         if log_scale:
@@ -153,30 +151,51 @@ def plot_all_metrics(
             )
     definition_ax = axes["definitions"]
     definition_ax.set_axis_off()
-    dns_weight = format_weight(loss_weights.get("dns"))
-    first_weight = format_weight(loss_weights.get("first_derivative"))
-    second_weight = format_weight(loss_weights.get("second_derivative"))
-    definitions = (
-        "Definitions\n"
-        r"$\mathcal{L}_{total}"
-        r"=\mathcal{L}_{filtered}"
-        r"+\lambda_{DNS}\mathcal{L}_{DNS}"
-        r"+\lambda_{\nabla}\mathcal{L}_{\nabla}"
-        r"+\lambda_{\nabla^2}\mathcal{L}_{\nabla^2}$"
-        "\n"
-        r"$L_{2,\mathrm{relative}}"
-        r"=\dfrac{\|\hat{q}-q\|_2}{\|q\|_2}$"
-        "\n"
-        rf"$\lambda_{{filtered}}=1,\quad"
-        rf"\lambda_{{DNS}}={dns_weight},\quad"
-        rf"\lambda_{{\nabla}}={first_weight},\quad"
-        rf"\lambda_{{\nabla^2}}={second_weight}$"
-        "\n"
-        "Total: weighted loss; component curves: unweighted losses\n"
-        r"$\hat{q}$: prediction"
-        "        "
-        r"$q$: target"
-    )
+    if training_parameters.get("training_objective") == (
+        "dns_l1_density_potential_only"
+    ):
+        definitions = (
+            "Active training objective\n"
+            r"$\mathcal{L}_{total}=\mathcal{L}_{DNS}="
+            r"\dfrac{1}{2}\left("
+            r"\operatorname{mean}|\hat{n}_e-n_e|"
+            r"+\operatorname{mean}|\hat{\phi}-\phi|\right)$"
+            "\n"
+            "Filtered-field, vorticity, and derivative losses are disabled.\n"
+            r"$L_{2,\mathrm{relative}}"
+            r"=\dfrac{\|\hat{q}-q\|_2}{\|q\|_2}$"
+            "\n"
+            "Filtered relative L2 is diagnostic only."
+        )
+    else:
+        dns_weight = format_weight(training_parameters.get("lambda_dns"))
+        first_weight = format_weight(
+            training_parameters.get("lambda_first_derivative")
+        )
+        second_weight = format_weight(
+            training_parameters.get("lambda_second_derivative")
+        )
+        definitions = (
+            "Definitions\n"
+            r"$\mathcal{L}_{total}"
+            r"=\mathcal{L}_{filtered}"
+            r"+\lambda_{DNS}\mathcal{L}_{DNS}"
+            r"+\lambda_{\nabla}\mathcal{L}_{\nabla}"
+            r"+\lambda_{\nabla^2}\mathcal{L}_{\nabla^2}$"
+            "\n"
+            r"$L_{2,\mathrm{relative}}"
+            r"=\dfrac{\|\hat{q}-q\|_2}{\|q\|_2}$"
+            "\n"
+            rf"$\lambda_{{filtered}}=1,\quad"
+            rf"\lambda_{{DNS}}={dns_weight},\quad"
+            rf"\lambda_{{\nabla}}={first_weight},\quad"
+            rf"\lambda_{{\nabla^2}}={second_weight}$"
+            "\n"
+            "Total: weighted loss; component curves: unweighted losses\n"
+            r"$\hat{q}$: prediction"
+            "        "
+            r"$q$: target"
+        )
     definition_ax.text(
         0.5,
         0.5,
@@ -219,14 +238,14 @@ def main():
         str(log_dir), size_guidance={"scalars": 0}
     )
     accumulator.Reload()
-    loss_weights = load_loss_weights(args.run_dir) or {}
+    training_parameters = load_training_parameters(args.run_dir) or {}
 
     output_path = output_dir / "tensorboard_summary.png"
     if not plot_all_metrics(
         accumulator,
         output_path,
         log_scale=not args.linear_scale,
-        loss_weights=loss_weights,
+        training_parameters=training_parameters,
     ):
         available = accumulator.Tags().get("scalars", ())
         raise RuntimeError(

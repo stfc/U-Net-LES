@@ -18,48 +18,35 @@ from visualization_common import (
 )
 
 
-def periodic_derivative_losses(prediction, target, scale, lx, ly):
-    """Return periodic L1 differences of first and pure second derivatives."""
-    error = (prediction - target) / scale
-    dx = lx / error.shape[-2]
-    dy = ly / error.shape[-1]
-    xp = torch.roll(error, shifts=-1, dims=-2)
-    xm = torch.roll(error, shifts=1, dims=-2)
-    yp = torch.roll(error, shifts=-1, dims=-1)
-    ym = torch.roll(error, shifts=1, dims=-1)
-    first = 0.5 * (
-        ((xp - xm) / (2.0 * dx)).abs().mean()
-        + ((yp - ym) / (2.0 * dy)).abs().mean()
-    )
-    second = 0.5 * (
-        ((xp - 2.0 * error + xm) / dx**2).abs().mean()
-        + ((yp - 2.0 * error + ym) / dy**2).abs().mean()
-    )
-    return first, second
-
-
 def calculate_training_losses(
     model, coarse, filtered_target, dns_target, mean, std, dns_std,
     alpha, lx, ly, lambda_dns, lambda_first_derivative,
     lambda_second_derivative, vorticity_from_potential,
     inverse_cutoff_fraction, inverse_cutoff_order,
     post_cutoff_fraction, post_cutoff_order, post_filter_type,
+    inverse_method="exact", van_cittert_iterations=1,
+    van_cittert_relaxation=1.0,
 ):
-    """Augment the existing value loss with DNS derivative penalties."""
-    value_loss, values, predicted_filtered, predicted_dns = calculate_losses(
+    """Return the DNS-space value loss on density and potential only."""
+    _, _, predicted_filtered, predicted_dns = calculate_losses(
         model, coarse, filtered_target, dns_target, mean, std, dns_std,
         alpha, lx, ly, lambda_dns, vorticity_from_potential,
         inverse_cutoff_fraction, inverse_cutoff_order, post_cutoff_fraction,
-        post_cutoff_order, post_filter_type,
+        post_cutoff_order, post_filter_type, inverse_method,
+        van_cittert_iterations, van_cittert_relaxation,
     )
-    first, second = periodic_derivative_losses(
-        predicted_dns, dns_target, dns_std, lx, ly
+    dns_error = torch.abs(
+        (predicted_dns[:, :2] - dns_target[:, :2]) / dns_std[:, :2]
     )
-    total = (value_loss + lambda_first_derivative * first
-             + lambda_second_derivative * second)
-    values.update(
-        total=total, first_derivative=first, second_derivative=second
-    )
+    density_loss = dns_error[:, 0].mean()
+    potential_loss = dns_error[:, 1].mean()
+    total = dns_error.mean()
+    values = {
+        "total": total,
+        "dns": total,
+        "dns_U": density_loss,
+        "dns_V": potential_loss,
+    }
     return total, values, predicted_filtered, predicted_dns
 
 
@@ -181,7 +168,7 @@ def save_training_sample_diagnostics(
         ax.set_title(f"{HW_FIELD_LABELS.get(name, name)} spectrum")
         ax.set_xlabel(r"wavenumber $k$")
         ax.set_ylabel("shell-summed power")
-        ax.set_ylim(bottom=SPECTRUM_Y_MIN)
+        ax.set_ylim(bottom=SPECTRUM_Y_MIN, top=SPECTRUM_Y_MAX)
         ax.grid(True, which="both", alpha=0.25)
         ax.legend()
     fig.tight_layout()
@@ -217,6 +204,9 @@ def save_epoch_diagnostics(
     post_cutoff_fraction,
     post_cutoff_order,
     post_filter_type,
+    inverse_method,
+    van_cittert_iterations,
+    van_cittert_relaxation,
     field_names,
     output_root,
 ):
@@ -246,6 +236,9 @@ def save_epoch_diagnostics(
         post_cutoff_fraction,
         post_cutoff_order,
         post_filter_type,
+        inverse_method,
+        van_cittert_iterations,
+        van_cittert_relaxation,
     )
     coarse_physical = (coarse_batch * std + mean)[0].cpu().numpy()
     predicted_filtered = predicted_filtered[0].cpu().numpy()
@@ -366,19 +359,18 @@ def run_epoch(
     post_cutoff_fraction,
     post_cutoff_order,
     post_filter_type,
+    inverse_method,
+    van_cittert_iterations,
+    van_cittert_relaxation,
     optimizer=None,
 ):
     training = optimizer is not None
     model.train(training)
     loss_names = [
         "total",
-        "filtered",
         "dns",
-        "first_derivative",
-        "second_derivative",
         "dns_U",
         "dns_V",
-        "dns_P",
     ]
     totals = {
         name: 0.0
@@ -416,6 +408,9 @@ def run_epoch(
                 post_cutoff_fraction,
                 post_cutoff_order,
                 post_filter_type,
+                inverse_method,
+                van_cittert_iterations,
+                van_cittert_relaxation,
             )
             if training:
                 loss.backward()
@@ -431,7 +426,7 @@ def run_epoch(
                 ).detach().item() * b
             )
             totals["dns_relative_l2"] += (
-                relative_l2(dns, pd).detach().item() * b
+                relative_l2(dns[:, :2], pd[:, :2]).detach().item() * b
             )
 
     return {k: v / count for k, v in totals.items()}
@@ -447,10 +442,7 @@ def configure_tensorboard(writer, normalize):
                 ]
                 for name in (
                     "total",
-                    "filtered",
                     "dns",
-                    "first_derivative",
-                    "second_derivative",
                 )
             },
             "Relative L2": {
@@ -475,7 +467,7 @@ def configure_tensorboard(writer, normalize):
                         f"metrics/validation/dns_{name}",
                     ],
                 ]
-                for name in HW_FIELD_NAMES
+                for name in HW_FIELD_NAMES[:2]
             },
         }
     )
@@ -541,6 +533,12 @@ def parse_args():
     p.add_argument("--batch-size", type=int, default=4)
     p.add_argument("--learning-rate", type=float, default=2e-4)
     p.add_argument(
+        "--learning-rate-policy",
+        choices=("constant", "step"),
+        default="constant",
+        help="Learning-rate policy (default: constant/no changes)",
+    )
+    p.add_argument(
         "--learning-rate-step",
         type=int,
         default=25,
@@ -569,14 +567,17 @@ def parse_args():
             "--no-normalize for physical values throughout)"
         ),
     )
-    p.add_argument("--lambda-dns", type=float, default=0.05)
+    p.add_argument(
+        "--lambda-dns", type=float, default=1.0,
+        help="Deprecated and ignored; the DNS n/phi loss is the full objective",
+    )
     p.add_argument(
         "--lambda-first-derivative", type=float, default=1.0e-2,
-        help="Weight of the DNS first-derivative L1 loss (default: 1e-2)",
+        help="Deprecated and ignored; derivative losses are disabled",
     )
     p.add_argument(
         "--lambda-second-derivative", type=float, default=1.0e-4,
-        help="Weight of the DNS second-derivative L1 loss (default: 1e-4)",
+        help="Deprecated and ignored; derivative losses are disabled",
     )
     p.add_argument(
         "--vorticity-from-potential",
@@ -619,6 +620,24 @@ def parse_args():
         ),
     )
     p.add_argument("--inverse-cutoff-order", type=float, default=8.0)
+    p.add_argument(
+        "--inverse-method",
+        choices=INVERSE_METHODS,
+        default="exact",
+        help="DNS reconstruction operator used in training (default: exact)",
+    )
+    p.add_argument(
+        "--van-cittert-iterations",
+        type=int,
+        default=1,
+        help="Number of van Cittert correction steps (default: 1)",
+    )
+    p.add_argument(
+        "--van-cittert-relaxation",
+        type=float,
+        default=1.0,
+        help="Van Cittert relaxation in (0, 1] (default: 1)",
+    )
     p.add_argument(
         "--post-filter",
         choices=POST_FILTER_TYPES,
@@ -685,6 +704,10 @@ def run_training(a):
         raise ValueError("inverse-cutoff-fraction must be in [0, 1].")
     if a.inverse_cutoff_order <= 0:
         raise ValueError("inverse-cutoff-order must be positive.")
+    if a.van_cittert_iterations < 0:
+        raise ValueError("van-cittert-iterations must be non-negative.")
+    if not 0 < a.van_cittert_relaxation <= 1:
+        raise ValueError("van-cittert-relaxation must be in (0, 1].")
     if not 0 <= a.post_cutoff_fraction <= 1:
         raise ValueError("post-cutoff-fraction must be in [0, 1].")
     if a.post_cutoff_order <= 0:
@@ -783,6 +806,11 @@ def run_training(a):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print("Device:", device)
     print("Precision:", a.precision)
+    print(
+        "Training objective: mean absolute DNS-space error in electron "
+        "density and electrostatic potential only (no filtered, vorticity, "
+        "or derivative losses)."
+    )
     if device.type == "cuda":
         print("GPU:", torch.cuda.get_device_name(0))
         torch.backends.cudnn.benchmark = True
@@ -796,11 +824,14 @@ def run_training(a):
     opt = torch.optim.AdamW(
         model.parameters(), lr=a.learning_rate, weight_decay=1e-6
     )
-    scheduler = torch.optim.lr_scheduler.StepLR(
-        opt,
-        step_size=a.learning_rate_step,
-        gamma=a.learning_rate_gamma,
-    )
+    if a.learning_rate_policy == "step":
+        scheduler = torch.optim.lr_scheduler.StepLR(
+            opt,
+            step_size=a.learning_rate_step,
+            gamma=a.learning_rate_gamma,
+        )
+    else:
+        scheduler = torch.optim.lr_scheduler.LambdaLR(opt, lambda _: 1.0)
     mean = torch.from_numpy(mean_np).to(device)
     std = torch.from_numpy(std_np).to(device)
     dns_std = torch.from_numpy(dns_std_np).to(device)
@@ -838,10 +869,11 @@ def run_training(a):
             scheduler.load_state_dict(c["scheduler"])
         else:
             completed_epoch = int(c["epoch"])
-            resumed_lr = a.learning_rate * (
-                a.learning_rate_gamma
-                ** (completed_epoch // a.learning_rate_step)
-            )
+            resumed_lr = a.learning_rate
+            if a.learning_rate_policy == "step":
+                resumed_lr *= a.learning_rate_gamma ** (
+                    completed_epoch // a.learning_rate_step
+                )
             for group in opt.param_groups:
                 group["lr"] = resumed_lr
             scheduler.last_epoch = completed_epoch
@@ -860,7 +892,7 @@ def run_training(a):
         scale_factor=scale_factor,
         optimizer="AdamW",
         optimizer_learning_rate=opt.param_groups[0]["lr"],
-        learning_rate_policy="StepLR",
+        learning_rate_policy=a.learning_rate_policy,
         learning_rate_step=a.learning_rate_step,
         learning_rate_gamma=a.learning_rate_gamma,
         optimizer_weight_decay=opt.param_groups[0]["weight_decay"],
@@ -903,7 +935,26 @@ def run_training(a):
             if use_random_periodic_shift
             else "none"
         ),
-        inverse_regularization="smooth_exponential_cutoff",
+        inverse_method=a.inverse_method,
+        lambda_dns=1.0,
+        lambda_first_derivative=0.0,
+        lambda_second_derivative=0.0,
+        training_objective="dns_l1_density_potential_only",
+        loss_channels=list(a.fields[:2]),
+        effective_loss_weights={
+            "dns_density_potential": 1.0,
+            "filtered": 0.0,
+            "vorticity": 0.0,
+            "first_derivative": 0.0,
+            "second_derivative": 0.0,
+        },
+        van_cittert_iterations=a.van_cittert_iterations,
+        van_cittert_relaxation=a.van_cittert_relaxation,
+        inverse_regularization=(
+            "truncated_relaxed_van_cittert"
+            if a.inverse_method == "van_cittert"
+            else "smooth_exponential_cutoff"
+        ),
         inverse_cutoff_wavenumber=(
             inverse_cutoff_fraction * np.pi / delta
             if inverse_cutoff_fraction is not None
@@ -948,6 +999,9 @@ def run_training(a):
             post_cutoff_fraction,
             a.post_cutoff_order,
             a.post_filter,
+            a.inverse_method,
+            a.van_cittert_iterations,
+            a.van_cittert_relaxation,
             a.fields,
             a.output_dir / "training_diagnostics",
         )
@@ -972,6 +1026,9 @@ def run_training(a):
             post_cutoff_fraction,
             a.post_cutoff_order,
             a.post_filter,
+            a.inverse_method,
+            a.van_cittert_iterations,
+            a.van_cittert_relaxation,
             opt,
         )
         vm = run_epoch(
@@ -993,6 +1050,9 @@ def run_training(a):
             post_cutoff_fraction,
             a.post_cutoff_order,
             a.post_filter,
+            a.inverse_method,
+            a.van_cittert_iterations,
+            a.van_cittert_relaxation,
         )
         row = {
             "epoch": epoch,
@@ -1031,11 +1091,15 @@ def run_training(a):
             "lx": a.lx,
             "ly": a.ly,
             "base_channels": a.base_channels,
-            "lambda_dns": a.lambda_dns,
-            "lambda_first_derivative": a.lambda_first_derivative,
-            "lambda_second_derivative": a.lambda_second_derivative,
+            "lambda_dns": 1.0,
+            "lambda_first_derivative": 0.0,
+            "lambda_second_derivative": 0.0,
+            "training_objective": parameters["training_objective"],
+            "loss_channels": parameters["loss_channels"],
+            "effective_loss_weights": parameters["effective_loss_weights"],
             "learning_rate_step": a.learning_rate_step,
             "learning_rate_gamma": a.learning_rate_gamma,
+            "learning_rate_policy": a.learning_rate_policy,
             "periodic_x": a.periodic_x,
             "periodic_y": a.periodic_y,
             "all_directions_periodic": all_directions_periodic,
@@ -1043,6 +1107,9 @@ def run_training(a):
             "random_periodic_shift": use_random_periodic_shift,
             "inverse_cutoff_fraction": inverse_cutoff_fraction,
             "inverse_cutoff_order": a.inverse_cutoff_order,
+            "inverse_method": a.inverse_method,
+            "van_cittert_iterations": a.van_cittert_iterations,
+            "van_cittert_relaxation": a.van_cittert_relaxation,
             "post_cutoff_fraction": post_cutoff_fraction,
             "post_cutoff_order": a.post_cutoff_order,
             "post_filter": a.post_filter,
@@ -1076,6 +1143,9 @@ def run_training(a):
                 post_cutoff_fraction,
                 a.post_cutoff_order,
                 a.post_filter,
+                a.inverse_method,
+                a.van_cittert_iterations,
+                a.van_cittert_relaxation,
                 a.fields,
                 a.output_dir / "training_diagnostics",
             )
@@ -1109,6 +1179,9 @@ def run_training(a):
         post_cutoff_fraction,
         a.post_cutoff_order,
         a.post_filter,
+        a.inverse_method,
+        a.van_cittert_iterations,
+        a.van_cittert_relaxation,
     )
     for name, value in test.items():
         writer.add_scalar(f"metrics/test/{name}", value, int(c["epoch"]))

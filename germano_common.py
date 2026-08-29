@@ -11,9 +11,10 @@ import torch
 from torch import nn
 from torch.utils.data import Dataset
 
-SPECTRUM_Y_MIN = float(os.environ.get("SPECTRUM_Y_MIN", "1e-10"))
+SPECTRUM_Y_MIN = float(os.environ.get("SPECTRUM_Y_MIN", "1e-14"))
 if not math.isfinite(SPECTRUM_Y_MIN) or SPECTRUM_Y_MIN <= 0:
     raise ValueError("SPECTRUM_Y_MIN must be finite and greater than zero")
+SPECTRUM_Y_MAX = 10.0
 
 HW_FIELD_NAMES = ("U", "V", "P")
 HW_FIELD_LABELS = {
@@ -151,6 +152,69 @@ def inverse_germano_torch(
         )
     reconstructed = torch.fft.ifft2(mult * fh, dim=(-2, -1)).real
     return enforce_zero_spatial_mean(reconstructed)
+
+
+INVERSE_METHODS = ("exact", "van_cittert")
+
+
+def van_cittert_torch(
+    filtered: torch.Tensor,
+    alpha: float,
+    lx: float,
+    ly: float,
+    iterations: int = 1,
+    relaxation: float = 1.0,
+) -> torch.Tensor:
+    """Approximately invert the Germano filter with relaxed van Cittert.
+
+    ``filtered`` is kept as the fixed right-hand side in
+    ``u[n+1] = u[n] + relaxation * (filtered - G(u[n]))``.  Starting from
+    ``u[0] = filtered`` makes ``iterations=0`` the identity reconstruction.
+    """
+    if isinstance(iterations, bool) or not isinstance(iterations, int):
+        raise TypeError("iterations must be an integer.")
+    if iterations < 0:
+        raise ValueError("iterations must be non-negative.")
+    if not math.isfinite(relaxation) or not 0 < relaxation <= 1:
+        raise ValueError("relaxation must be finite and in (0, 1].")
+
+    n = filtered.shape[-1]
+    k2 = k2_torch(n, lx, ly, filtered.device, filtered.dtype)
+    filter_multiplier = 1 / (1 + alpha**2 * k2)
+    estimate = filtered
+    for _ in range(iterations):
+        estimate_hat = torch.fft.fft2(estimate, dim=(-2, -1))
+        refiltered = torch.fft.ifft2(
+            filter_multiplier * estimate_hat, dim=(-2, -1)
+        ).real
+        estimate = estimate + relaxation * (filtered - refiltered)
+    return enforce_zero_spatial_mean(estimate)
+
+
+def reconstruct_germano_torch(
+    filtered: torch.Tensor,
+    alpha: float,
+    lx: float,
+    ly: float,
+    method: str = "exact",
+    van_cittert_iterations: int = 1,
+    van_cittert_relaxation: float = 1.0,
+) -> torch.Tensor:
+    """Reconstruct a Germano-filtered field with the selected inverse."""
+    if method == "exact":
+        return inverse_germano_torch(filtered, alpha, lx, ly)
+    if method == "van_cittert":
+        return van_cittert_torch(
+            filtered,
+            alpha,
+            lx,
+            ly,
+            van_cittert_iterations,
+            van_cittert_relaxation,
+        )
+    raise ValueError(
+        f"Unknown inverse method {method!r}; choose from {INVERSE_METHODS}."
+    )
 
 
 def enforce_zero_spatial_mean(fields: torch.Tensor) -> torch.Tensor:
@@ -583,6 +647,9 @@ def calculate_losses(
     post_cutoff_fraction=None,
     post_cutoff_order=8,
     post_filter_type="high_order",
+    inverse_method="exact",
+    van_cittert_iterations=1,
+    van_cittert_relaxation=1.0,
 ):
     output_channels = 2 if vorticity_from_potential else 3
     output_mean = mean[:, :output_channels]
@@ -596,11 +663,14 @@ def calculate_losses(
         inverse_cutoff_fraction,
         inverse_cutoff_order,
     )
-    pd = inverse_germano_torch(
+    pd = reconstruct_germano_torch(
         inverse_input,
         alpha,
         lx,
         ly,
+        inverse_method,
+        van_cittert_iterations,
+        van_cittert_relaxation,
     )
     pd = post_filter_torch(
         pd,
@@ -812,7 +882,7 @@ def save_spectrum_plot(
     )
     ax.set_xlabel(r"$k$")
     ax.set_ylabel(r"Shell energy $E(k)$")
-    ax.set_ylim(bottom=SPECTRUM_Y_MIN)
+    ax.set_ylim(bottom=SPECTRUM_Y_MIN, top=SPECTRUM_Y_MAX)
     ax.grid(True, which="both", alpha=0.3)
     ax.legend(numpoints=1)
     fig.tight_layout()

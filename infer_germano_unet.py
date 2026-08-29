@@ -127,6 +127,14 @@ def parse_args():
         default="checkpoint",
         help="U-Net and physics precision (default: use checkpoint precision)",
     )
+    p.add_argument(
+        "--inverse-method",
+        choices=("checkpoint",) + INVERSE_METHODS,
+        default="checkpoint",
+        help="Reconstruction operator (default: checkpoint, falling back to exact)",
+    )
+    p.add_argument("--van-cittert-iterations", type=int)
+    p.add_argument("--van-cittert-relaxation", type=float)
     return p.parse_args()
 
 
@@ -162,6 +170,32 @@ def main():
     lx = float(c["lx"])
     ly = float(c["ly"])
     alpha = float(c["alpha"])
+    training_parameters = c.get("training_parameters", {})
+    inverse_method = (
+        c.get("inverse_method", training_parameters.get("inverse_method", "exact"))
+        if a.inverse_method == "checkpoint"
+        else a.inverse_method
+    )
+    van_cittert_iterations = (
+        c.get(
+            "van_cittert_iterations",
+            training_parameters.get("van_cittert_iterations", 1),
+        )
+        if a.van_cittert_iterations is None
+        else a.van_cittert_iterations
+    )
+    van_cittert_relaxation = (
+        c.get(
+            "van_cittert_relaxation",
+            training_parameters.get("van_cittert_relaxation", 1.0),
+        )
+        if a.van_cittert_relaxation is None
+        else a.van_cittert_relaxation
+    )
+    if van_cittert_iterations < 0:
+        raise ValueError("--van-cittert-iterations must be non-negative.")
+    if not 0 < van_cittert_relaxation <= 1:
+        raise ValueError("--van-cittert-relaxation must be in (0, 1].")
     base_channels = int(c["base_channels"])
     model_output_channels = int(c["model_output_channels"])
     vorticity_mode = c["vorticity_mode"]
@@ -231,6 +265,9 @@ def main():
         "physics_dtype": precision,
         "normalization_enabled": normalization_enabled,
         "inverse_input": a.inverse_input,
+        "inverse_method": inverse_method,
+        "van_cittert_iterations": van_cittert_iterations,
+        "van_cittert_relaxation": van_cittert_relaxation,
         "inverse_cutoff_fraction": cutoff_fraction,
         "inverse_cutoff_order": cutoff_order,
         "post_cutoff_fraction": post_cutoff_fraction,
@@ -292,11 +329,14 @@ def main():
                 cutoff_fraction,
                 cutoff_order,
             )
-            pd_unconstrained = inverse_germano_torch(
+            pd_unconstrained = reconstruct_germano_torch(
                 inverse_input,
                 alpha,
                 lx,
                 ly,
+                inverse_method,
+                van_cittert_iterations,
+                van_cittert_relaxation,
             )
             pd_unconstrained = post_filter_torch(
                 pd_unconstrained,

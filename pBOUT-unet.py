@@ -21,6 +21,9 @@ not need an argument parser::
   PBOUT_UNET_LAPLACIAN_ORDER=2            # periodic Laplacian order (2 or 4)
   PBOUT_UNET_INVERSE_CUTOFF_FRACTION=none
   PBOUT_UNET_INVERSE_CUTOFF_ORDER=8
+  PBOUT_UNET_INVERSE_METHOD=exact          # exact or van_cittert
+  PBOUT_UNET_VAN_CITTERT_ITERATIONS=1
+  PBOUT_UNET_VAN_CITTERT_RELAXATION=1
   PBOUT_UNET_POST_CUTOFF_FRACTION=none
   PBOUT_UNET_POST_CUTOFF_ORDER=8
   PBOUT_UNET_POST_FILTER=none             # none/high_order/gaussian
@@ -76,10 +79,11 @@ import torch
 
 from germano_common import (
     ResidualUNetSR,
+    INVERSE_METHODS,
     POST_FILTER_TYPES,
     enforce_zero_spatial_mean,
     germano_filter,
-    inverse_germano_torch,
+    reconstruct_germano_torch,
     load_checkpoint,
     periodic_laplacian_2nd_torch,
     periodic_laplacian_4th_torch,
@@ -407,6 +411,9 @@ def _print_init_metadata(initial_state: str) -> None:
         "ly": LY,
         "alpha": ALPHA,
         "base_channels": BASE_CHANNELS,
+        "inverse_method": INVERSE_METHOD,
+        "van_cittert_iterations": VAN_CITTERT_ITERATIONS,
+        "van_cittert_relaxation": VAN_CITTERT_RELAXATION,
         "inverse_cutoff_fraction": CUTOFF_FRACTION,
         "inverse_cutoff_order": CUTOFF_ORDER,
         "post_cutoff_fraction": POST_CUTOFF_FRACTION,
@@ -484,6 +491,39 @@ DNS_VORTICITY_MODE = (
     else "independent_channel"
 )
 _training_parameters = _checkpoint.get("training_parameters", {})
+INVERSE_METHOD = os.environ.get(
+    "PBOUT_UNET_INVERSE_METHOD",
+    _checkpoint.get(
+        "inverse_method", _training_parameters.get("inverse_method", "exact")
+    ),
+).lower().replace("-", "_")
+if INVERSE_METHOD not in INVERSE_METHODS:
+    raise ValueError(
+        "PBOUT_UNET_INVERSE_METHOD must be one of "
+        f"{', '.join(INVERSE_METHODS)}."
+    )
+VAN_CITTERT_ITERATIONS = int(
+    os.environ.get(
+        "PBOUT_UNET_VAN_CITTERT_ITERATIONS",
+        _checkpoint.get(
+            "van_cittert_iterations",
+            _training_parameters.get("van_cittert_iterations", 1),
+        ),
+    )
+)
+VAN_CITTERT_RELAXATION = float(
+    os.environ.get(
+        "PBOUT_UNET_VAN_CITTERT_RELAXATION",
+        _checkpoint.get(
+            "van_cittert_relaxation",
+            _training_parameters.get("van_cittert_relaxation", 1.0),
+        ),
+    )
+)
+if VAN_CITTERT_ITERATIONS < 0:
+    raise ValueError("PBOUT_UNET_VAN_CITTERT_ITERATIONS must be non-negative.")
+if not 0 < VAN_CITTERT_RELAXATION <= 1:
+    raise ValueError("PBOUT_UNET_VAN_CITTERT_RELAXATION must be in (0, 1].")
 LAPLACIAN_ORDER = int(
     os.environ.get(
         "PBOUT_UNET_LAPLACIAN_ORDER",
@@ -757,7 +797,15 @@ def _reconstruct_dns(
         CUTOFF_FRACTION,
         CUTOFF_ORDER,
     )
-    dns = inverse_germano_torch(inverse_input, ALPHA, LX, LY)
+    dns = reconstruct_germano_torch(
+        inverse_input,
+        ALPHA,
+        LX,
+        LY,
+        INVERSE_METHOD,
+        VAN_CITTERT_ITERATIONS,
+        VAN_CITTERT_RELAXATION,
+    )
     dns = post_filter_torch(
         dns,
         LX,
@@ -794,7 +842,15 @@ def _inverse_germano_only(
         CUTOFF_FRACTION,
         CUTOFF_ORDER,
     )
-    dns = inverse_germano_torch(inverse_input, ALPHA, LX, LY)
+    dns = reconstruct_germano_torch(
+        inverse_input,
+        ALPHA,
+        LX,
+        LY,
+        INVERSE_METHOD,
+        VAN_CITTERT_ITERATIONS,
+        VAN_CITTERT_RELAXATION,
+    )
     dns = post_filter_torch(
         dns,
         LX,
