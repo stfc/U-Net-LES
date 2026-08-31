@@ -14,25 +14,30 @@ from tensorboard.backend.event_processing.event_accumulator import (
 
 
 PLOT_GROUPS = {
-    "losses": (
-        "total", "filtered", "dns",
-        "first_derivative", "second_derivative",
-    ),
+    "losses": ("total", "dns", "dns_P"),
+    "legacy_derivative_losses": ("first_derivative", "second_derivative"),
     "relative_l2": ("filtered_relative_l2", "dns_relative_l2"),
-    "dns_field_losses": ("dns_U", "dns_V", "dns_P"),
+    "dns_field_losses": ("dns_U", "dns_V"),
 }
 
 PANEL_LAYOUT = [
-    ["definitions", "total", "learning_rate", "."],
-    ["filtered", "dns", "first_derivative", "second_derivative"],
-    ["filtered_relative_l2", "dns_relative_l2", ".", "."],
-    [
-        "dns_U",
-        "dns_V",
-        "dns_P",
-        ".",
-    ],
+    ["definitions", "definitions", "total", "learning_rate"],
+    ["dns", "dns_U", "dns_V", "dns_P"],
+    ["first_derivative", "second_derivative",
+     "filtered_relative_l2", "dns_relative_l2"],
 ]
+
+METRIC_TITLES = {
+    "total": "Total Training Objective",
+    "dns": "DNS Density/Potential L1",
+    "dns_U": "DNS Density L1",
+    "dns_V": "DNS Potential L1",
+    "dns_P": "DNS Vorticity L1 (Normalized)",
+    "first_derivative": "First-Derivative Loss (Legacy)",
+    "second_derivative": "Second-Derivative Loss (Legacy)",
+    "filtered_relative_l2": "Filtered Relative L2 (Diagnostic Only)",
+    "dns_relative_l2": "DNS Density/Potential Relative L2",
+}
 
 
 def parse_args():
@@ -91,14 +96,13 @@ def plot_all_metrics(
     available = set(accumulator.Tags().get("scalars", ()))
     fig, axes = plt.subplot_mosaic(
         PANEL_LAYOUT,
-        figsize=(20.8, 17.6),
-        gridspec_kw={"height_ratios": (1, 1, 1, 1)},
+        figsize=(20.8, 13.4),
+        gridspec_kw={"height_ratios": (1, 1, 1)},
     )
     plotted = False
     for metric in (
         "total",
         "learning_rate",
-        "filtered",
         "dns",
         "first_derivative",
         "second_derivative",
@@ -128,10 +132,9 @@ def plot_all_metrics(
                 steps, values = scalar_series(accumulator, tag)
                 ax.plot(steps, values, color=color, label=split)
                 plotted = True
-            title = metric.replace("_", " ").title()
-            if metric == "filtered_relative_l2":
-                title += " (Diagnostic Only)"
-            ax.set_title(title)
+            ax.set_title(METRIC_TITLES.get(
+                metric, metric.replace("_", " ").title()
+            ))
         ax.set_xlabel("Epoch")
         ax.set_ylabel("Value")
         if log_scale:
@@ -151,58 +154,42 @@ def plot_all_metrics(
             )
     definition_ax = axes["definitions"]
     definition_ax.set_axis_off()
-    if training_parameters.get("training_objective") == (
-        "dns_l1_density_potential_only"
-    ):
-        definitions = (
-            "Active training objective\n"
-            r"$\mathcal{L}_{total}=\mathcal{L}_{DNS}="
-            r"\dfrac{1}{2}\left("
-            r"\operatorname{mean}|\hat{n}_e-n_e|"
-            r"+\operatorname{mean}|\hat{\phi}-\phi|\right)$"
-            "\n"
-            "Filtered-field, vorticity, and derivative losses are disabled.\n"
-            r"$L_{2,\mathrm{relative}}"
-            r"=\dfrac{\|\hat{q}-q\|_2}{\|q\|_2}$"
-            "\n"
-            "Filtered relative L2 is diagnostic only."
-        )
-    else:
-        dns_weight = format_weight(training_parameters.get("lambda_dns"))
-        first_weight = format_weight(
-            training_parameters.get("lambda_first_derivative")
-        )
-        second_weight = format_weight(
-            training_parameters.get("lambda_second_derivative")
-        )
-        definitions = (
-            "Definitions\n"
-            r"$\mathcal{L}_{total}"
-            r"=\mathcal{L}_{filtered}"
-            r"+\lambda_{DNS}\mathcal{L}_{DNS}"
-            r"+\lambda_{\nabla}\mathcal{L}_{\nabla}"
-            r"+\lambda_{\nabla^2}\mathcal{L}_{\nabla^2}$"
-            "\n"
-            r"$L_{2,\mathrm{relative}}"
-            r"=\dfrac{\|\hat{q}-q\|_2}{\|q\|_2}$"
-            "\n"
-            rf"$\lambda_{{filtered}}=1,\quad"
-            rf"\lambda_{{DNS}}={dns_weight},\quad"
-            rf"\lambda_{{\nabla}}={first_weight},\quad"
-            rf"\lambda_{{\nabla^2}}={second_weight}$"
-            "\n"
-            "Total: weighted loss; component curves: unweighted losses\n"
-            r"$\hat{q}$: prediction"
-            "        "
-            r"$q$: target"
-        )
+    vorticity_weight = training_parameters.get("lambda_vorticity")
+    if vorticity_weight is None:
+        vorticity_weight = training_parameters.get(
+            "effective_loss_weights", {}
+        ).get("vorticity")
+    normalization = (
+        "Errors in n and phi are scaled by their training standard deviations."
+        if training_parameters.get("normalize", True)
+        else "Errors in n and phi use physical values (no normalization)."
+    )
+    definitions = (
+        "Active training objective\n"
+        r"$\mathcal{L}_{total}=\mathcal{L}_{n,\phi}"
+        r"+\lambda_{\omega}\mathcal{L}_{\omega}$"
+        "\n"
+        r"$\mathcal{L}_{n,\phi}=\dfrac{1}{2}\left("
+        r"\operatorname{mean}|\Delta n/\sigma_n|+"
+        r"\operatorname{mean}|\Delta\phi/\sigma_\phi|\right)$"
+        "\n"
+        r"$\mathcal{L}_{\omega}="
+        r"\operatorname{mean}|\Delta\omega/\sigma_\omega|,\quad"
+        rf"\lambda_{{\omega}}={format_weight(vorticity_weight)}$"
+        "\n"
+        + normalization
+        + "\nFiltered and derivative losses are disabled in the current objective; "
+        "derivative panels retain legacy histories.\n"
+        r"$L_{2,\mathrm{relative}}="
+        r"\dfrac{\|\hat{q}-q\|_2}{\|q\|_2}$ (diagnostic only)."
+    )
     definition_ax.text(
         0.5,
         0.5,
         definitions,
         ha="center",
         va="center",
-        fontsize=11,
+        fontsize=10,
         linespacing=1.25,
         transform=definition_ax.transAxes,
         bbox={

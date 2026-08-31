@@ -1,8 +1,11 @@
 #!/usr/bin/env python3
-"""Compare U-Net and DNS field-snapshot histories.
+"""Compare up to four field-snapshot histories.
 
-Read ``fields_*.npz`` snapshots from two specified directories, then plot
-domain-center values and total/component HW-energy histories.
+Read ``fields_*.npz`` snapshots from specified directories, then plot
+domain-center values and total/component HW-energy histories. The dataset whose
+directory name contains ``DNS`` is used as the reference; if none does, the
+first dataset is the reference. Animations and the initial-derivative plot
+compare the first non-reference dataset with it.
 """
 
 from __future__ import annotations
@@ -19,12 +22,13 @@ import numpy as np
 
 from visualization_common import (
     HW_FIELD_LABELS,
-    calculate_arakawa_terms,
     save_png_animation,
 )
+from germano_common import SPECTRUM_Y_MIN, isotropic_hw_energy_spectrum
 
 
 FIELD_NAMES = ("U", "V", "P")
+MAX_ANIMATION_FRAMES = 100
 
 
 def parse_args() -> argparse.Namespace:
@@ -37,8 +41,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "dns_fields",
         type=Path,
+        nargs="?",
         help="Second run directory, or its directory of fields_*.npz snapshots",
     )
+    parser.add_argument("dataset2_fields", type=Path, nargs="?",
+                        help="Optional second model dataset directory")
+    parser.add_argument("dataset3_fields", type=Path, nargs="?",
+                        help="Optional third model dataset directory")
     parser.add_argument(
         "--output-dir", type=Path, default=Path("results_U-Net/comparison"),
         help="Output directory (default: results_U-Net/comparison)",
@@ -53,7 +62,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--animations",
         action="store_true",
-        help="Generate field and Arakawa comparison GIFs (disabled by default)",
+        help="Generate field and energy-spectrum comparison GIFs (disabled by default)",
+    )
+    parser.add_argument(
+        "--overall-animation-limits", action="store_true",
+        help=("Set animation color limits from all frames instead of the "
+              "snapshots nearest t=0"),
     )
     parser.add_argument(
         "--batch", type=int, default=0,
@@ -142,23 +156,40 @@ def periodic_derivative(
 def hw_energy_components(
     fields: np.ndarray, lx: float, ly: float
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Return the density, x-gradient, and y-gradient HW energy terms."""
+    """Return HW energy terms using the StylES ``L**2 * sum`` convention."""
     if min(fields.shape[-2:]) < 5:
         raise ValueError("HW energy requires at least five points per direction")
     density, potential = fields[:, 0], fields[:, 1]
     dx, dy = lx / potential.shape[-2], ly / potential.shape[-1]
     dphi_dx = periodic_derivative(potential, dx, -2)
     dphi_dy = periodic_derivative(potential, dy, -1)
+    domain_factor = lx * ly
     return (
-        0.5 * np.mean(density**2, axis=(-2, -1)),
-        0.5 * np.mean(dphi_dx**2, axis=(-2, -1)),
-        0.5 * np.mean(dphi_dy**2, axis=(-2, -1)),
+        0.5 * domain_factor * np.sum(density**2, axis=(-2, -1)),
+        0.5 * domain_factor * np.sum(dphi_dx**2, axis=(-2, -1)),
+        0.5 * domain_factor * np.sum(dphi_dy**2, axis=(-2, -1)),
     )
 
 
 def hw_energy(fields: np.ndarray, lx: float, ly: float) -> np.ndarray:
-    """Compute E=1/2 <n^2 + |grad(phi)|^2> with periodic 4th-order gradients."""
+    """Compute the StylES ``E=0.5*L**2*sum(...)`` energy convention."""
     return np.sum(hw_energy_components(fields, lx, ly), axis=0)
+
+
+def order_datasets_with_reference_first(datasets, reference_hints=None):
+    """Put the DNS dataset first, falling back to the original first dataset."""
+    if reference_hints is None:
+        reference_hints = (label for label, _, _ in datasets)
+    reference_index = next(
+        (index for index, hint in enumerate(reference_hints)
+         if "dns" in str(hint).casefold()),
+        0,
+    )
+    return (
+        datasets[reference_index],
+        *datasets[:reference_index],
+        *datasets[reference_index + 1:],
+    )
 
 
 def save_centerpoint_history(datasets, output_path: Path, dpi: int) -> Path:
@@ -166,7 +197,8 @@ def save_centerpoint_history(datasets, output_path: Path, dpi: int) -> Path:
     figure, axes = plt.subplots(
         len(FIELD_NAMES), 1, figsize=(9, 10), sharex=True, squeeze=False
     )
-    styles = (("tab:blue", "-"), ("black", "--"))
+    styles = (("black", "-"), ("tab:blue", "-"), ("tab:orange", "--"),
+              ("tab:green", "-."))
     for channel, name in enumerate(FIELD_NAMES):
         axis = axes[channel, 0]
         for (label, times, fields), (color, linestyle) in zip(datasets, styles):
@@ -198,14 +230,16 @@ def save_energy_comparison(
 ) -> Path:
     """Plot overlaid HW energy histories."""
     figure, axis = plt.subplots(figsize=(7.4, 5.2))
-    styles = (("tab:blue", "-"), ("black", "--"))
+    styles = (("black", "-"), ("tab:blue", "-"), ("tab:orange", "--"),
+              ("tab:green", "-."))
     for (label, times, fields), (color, linestyle) in zip(datasets, styles):
         axis.plot(
             times, hw_energy(fields, lx, ly), color=color,
             linestyle=linestyle, linewidth=1.6, label=label,
         )
     axis.set_xlabel("simulation time")
-    axis.set_ylabel(r"$E=\frac{1}{2}\langle n^2+|\nabla\phi|^2\rangle$")
+    axis.set_ylabel(r"$E=\frac{1}{2}L_xL_y\sum(n^2+|\nabla\phi|^2)$")
+    axis.set_ylim(bottom=0.0)
     axis.set_title("Hasegawa–Wakatani energy versus time")
     axis.grid(True, alpha=0.3)
     axis.legend()
@@ -228,7 +262,8 @@ def save_energy_components_comparison(
         len(component_labels), 1, figsize=(8.2, 10), sharex=True,
         squeeze=False,
     )
-    styles = (("tab:blue", "-"), ("black", "--"))
+    styles = (("black", "-"), ("tab:blue", "-"), ("tab:orange", "--"),
+              ("tab:green", "-."))
     for (label, times, fields), (color, linestyle) in zip(datasets, styles):
         components = hw_energy_components(fields, lx, ly)
         for axis, values in zip(axes[:, 0], components):
@@ -322,12 +357,14 @@ def save_initial_derivative_comparison(
 
 
 def save_field_comparison_animation(
-    datasets, output_dir: Path, dpi: int, fps: float
+    datasets, output_dir: Path, dpi: int, fps: float, overall_limits: bool = False
 ) -> Path:
     """Animate both 2-D solutions and their absolute error at nearest times."""
     (first_label, first_times, first_fields), (
         second_label, second_times, second_fields
     ) = datasets
+    first_times = first_times[:MAX_ANIMATION_FRAMES]
+    first_fields = first_fields[:MAX_ANIMATION_FRAMES]
     if first_fields.shape[1:] != second_fields.shape[1:]:
         raise ValueError(
             "2-D error animation requires matching field grids; received "
@@ -339,17 +376,20 @@ def save_field_comparison_animation(
     )
     matched_second = second_fields[nearest]
     errors = np.abs(first_fields - matched_second)
+    if overall_limits:
+        limit_first, limit_second, limit_errors = first_fields, matched_second, errors
+    else:
+        first_t0 = int(np.argmin(np.abs(first_times)))
+        limit_first = first_fields[first_t0:first_t0 + 1]
+        limit_second = matched_second[first_t0:first_t0 + 1]
+        limit_errors = errors[first_t0:first_t0 + 1]
     field_limits = [
-        max(
-            float(np.max(np.abs(first_fields[:, channel]))),
-            float(np.max(np.abs(matched_second[:, channel]))),
-        )
+        max(float(np.max(np.abs(limit_first[:, channel]))),
+            float(np.max(np.abs(limit_second[:, channel]))))
         for channel in range(len(FIELD_NAMES))
     ]
-    error_limits = [
-        float(np.max(errors[:, channel]))
-        for channel in range(len(FIELD_NAMES))
-    ]
+    error_limits = [float(np.max(limit_errors[:, channel]))
+                    for channel in range(len(FIELD_NAMES))]
 
     frames_dir = output_dir / "field_comparison_frames"
     frames_dir.mkdir(parents=True, exist_ok=True)
@@ -399,87 +439,168 @@ def save_field_comparison_animation(
     )
 
 
-def save_arakawa_comparison_animation(
-    datasets, output_dir: Path, lx: float, ly: float, dpi: int, fps: float
+def save_energy_spectrum_comparison_animation(
+    datasets, output_dir: Path, lx: float, ly: float, dpi: int, fps: float,
+    overall_limits: bool = False,
 ) -> Path:
-    """Animate U-Net and DNS Arakawa terms and their absolute errors."""
+    """Animate dataset1 and nearest-time DNS HW energy spectra."""
     (first_label, first_times, first_fields), (
         second_label, second_times, second_fields
     ) = datasets
-    if first_fields.shape[1:] != second_fields.shape[1:]:
-        raise ValueError(
-            "Arakawa comparison requires matching field grids; received "
-            f"{first_fields.shape[2:]} and {second_fields.shape[2:]}"
-        )
-
+    first_times = first_times[:MAX_ANIMATION_FRAMES]
+    first_fields = first_fields[:MAX_ANIMATION_FRAMES]
     nearest = np.asarray(
         [np.argmin(np.abs(second_times - time)) for time in first_times]
     )
-    first_terms = np.asarray(
-        [calculate_arakawa_terms(fields, lx, ly) for fields in first_fields]
-    )
-    second_terms = np.asarray(
-        [
-            calculate_arakawa_terms(second_fields[index], lx, ly)
-            for index in nearest
-        ]
-    )
-    errors = np.abs(first_terms - second_terms)
-    term_limits = [
-        max(
-            float(np.max(np.abs(first_terms[:, term]))),
-            float(np.max(np.abs(second_terms[:, term]))),
-        )
-        for term in range(2)
+    first_spectra = [
+        isotropic_hw_energy_spectrum(fields, lx, ly) for fields in first_fields
     ]
-    error_limits = [
-        float(np.max(errors[:, term])) for term in range(2)
+    second_spectra = [
+        isotropic_hw_energy_spectrum(second_fields[index], lx, ly)
+        for index in nearest
     ]
-    term_labels = (r"$J(\phi,\omega)$", r"$J(\phi,n)$")
 
-    frames_dir = output_dir / "arakawa_comparison_frames"
+    limit_indices = range(len(first_times)) if overall_limits else (
+        int(np.argmin(np.abs(first_times))),
+    )
+    positive_energy = []
+    for index in limit_indices:
+        for _, energy in (first_spectra[index], second_spectra[index]):
+            positive_energy.extend(energy[energy > 0.0])
+    if positive_energy:
+        ymax = float(np.max(positive_energy))
+        if ymax <= SPECTRUM_Y_MIN:
+            ymax = 10.0 * SPECTRUM_Y_MIN
+    else:
+        ymax = 10.0 * SPECTRUM_Y_MIN
+
+    frames_dir = output_dir / "energy_spectrum_comparison_frames"
     frames_dir.mkdir(parents=True, exist_ok=True)
     frame_paths = []
     for frame_index, (first_time, second_index) in enumerate(
         zip(first_times, nearest)
     ):
-        figure, axes = plt.subplots(2, 3, figsize=(14, 9), squeeze=False)
-        for term, term_label in enumerate(term_labels):
-            limit = term_limits[term] or 1.0
-            error_limit = error_limits[term] or 1.0
-            panels = (
-                (first_terms[frame_index, term], first_label, "RdBu_r", -limit, limit),
-                (second_terms[frame_index, term], second_label, "RdBu_r", -limit, limit),
-                (errors[frame_index, term], "absolute error", "magma", 0.0, error_limit),
-            )
-            for column, (values, label, cmap, vmin, vmax) in enumerate(panels):
-                axis = axes[term, column]
-                image = axis.imshow(
-                    values.T,
-                    origin="lower",
-                    extent=(0.0, 1.0, 0.0, 1.0),
-                    aspect="equal",
-                    interpolation="nearest",
-                    cmap=cmap,
-                    vmin=vmin,
-                    vmax=vmax,
-                )
-                axis.set_title(f"{term_label}: {label}")
-                axis.set_xlabel("x / Lx")
-                axis.set_ylabel("y / Ly")
-                figure.colorbar(image, ax=axis, shrink=0.78)
-        figure.suptitle(
-            f"Arakawa comparison: {first_label} t={first_time:g}, "
+        figure, axis = plt.subplots(figsize=(8.2, 5.8))
+        first_k, first_energy = first_spectra[frame_index]
+        second_k, second_energy = second_spectra[frame_index]
+        axis.loglog(second_k[1:], second_energy[1:], color="black",
+                    linewidth=1.8, label=second_label)
+        axis.loglog(first_k[1:], first_energy[1:], color="tab:blue",
+                    linewidth=1.8, label=first_label)
+        axis.set_ylim(SPECTRUM_Y_MIN, ymax)
+        axis.set_xlabel(r"radial wavenumber $k$")
+        axis.set_ylabel(r"HW energy spectrum $E(k)$")
+        axis.set_title(
+            f"HW energy spectrum: {first_label} t={first_time:g}, "
             f"{second_label} t={second_times[second_index]:g}"
         )
+        axis.grid(True, which="both", alpha=0.3)
+        axis.legend()
         figure.tight_layout()
-        frame_path = frames_dir / f"arakawa_comparison_{frame_index:07d}.png"
+        frame_path = frames_dir / f"energy_spectrum_{frame_index:07d}.png"
         figure.savefig(frame_path, dpi=dpi, bbox_inches="tight")
         plt.close(figure)
         frame_paths.append(frame_path)
 
     return save_png_animation(
-        frame_paths, output_dir / "arakawa_comparison.gif", fps=fps
+        frame_paths, output_dir / "energy_spectrum_comparison.gif", fps=fps
+    )
+
+
+def save_field_animation(
+    dataset, output_dir: Path, dpi: int, fps: float,
+    overall_limits: bool = False,
+) -> Path:
+    """Animate the fields from one dataset without comparison panels."""
+    label, times, fields = dataset
+    times = times[:MAX_ANIMATION_FRAMES]
+    fields = fields[:MAX_ANIMATION_FRAMES]
+    limit_fields = fields if overall_limits else fields[
+        int(np.argmin(np.abs(times))):int(np.argmin(np.abs(times))) + 1
+    ]
+    field_limits = [
+        float(np.max(np.abs(limit_fields[:, channel]))) or 1.0
+        for channel in range(len(FIELD_NAMES))
+    ]
+
+    frames_dir = output_dir / "field_frames"
+    frames_dir.mkdir(parents=True, exist_ok=True)
+    frame_paths = []
+    for frame_index, time in enumerate(times):
+        figure, axes = plt.subplots(1, len(FIELD_NAMES), figsize=(14, 4.6))
+        for channel, name in enumerate(FIELD_NAMES):
+            limit = field_limits[channel]
+            image = axes[channel].imshow(
+                fields[frame_index, channel].T,
+                origin="lower",
+                extent=(0.0, 1.0, 0.0, 1.0),
+                aspect="equal",
+                interpolation="nearest",
+                cmap="RdBu_r",
+                vmin=-limit,
+                vmax=limit,
+            )
+            axes[channel].set_title(HW_FIELD_LABELS.get(name, name))
+            axes[channel].set_xlabel("x / Lx")
+            axes[channel].set_ylabel("y / Ly")
+            figure.colorbar(image, ax=axes[channel], shrink=0.78)
+        figure.suptitle(f"{label}: t={time:g}")
+        figure.tight_layout()
+        frame_path = frames_dir / f"fields_{frame_index:07d}.png"
+        figure.savefig(frame_path, dpi=dpi, bbox_inches="tight")
+        plt.close(figure)
+        frame_paths.append(frame_path)
+
+    return save_png_animation(
+        frame_paths, output_dir / "field_animation.gif", fps=fps
+    )
+
+
+def save_energy_spectrum_animation(
+    dataset, output_dir: Path, lx: float, ly: float, dpi: int, fps: float,
+    overall_limits: bool = False,
+) -> Path:
+    """Animate the HW energy spectrum from one dataset."""
+    label, times, fields = dataset
+    times = times[:MAX_ANIMATION_FRAMES]
+    fields = fields[:MAX_ANIMATION_FRAMES]
+    spectra = [
+        isotropic_hw_energy_spectrum(frame, lx, ly) for frame in fields
+    ]
+    limit_indices = range(len(times)) if overall_limits else (
+        int(np.argmin(np.abs(times))),
+    )
+    positive_energy = np.concatenate([
+        spectra[index][1][spectra[index][1] > 0.0]
+        for index in limit_indices
+    ])
+    ymax = (float(np.max(positive_energy)) if positive_energy.size
+            else 10.0 * SPECTRUM_Y_MIN)
+    ymax = max(ymax, 10.0 * SPECTRUM_Y_MIN)
+
+    frames_dir = output_dir / "energy_spectrum_frames"
+    frames_dir.mkdir(parents=True, exist_ok=True)
+    frame_paths = []
+    for frame_index, (time, (wavenumber, energy)) in enumerate(
+        zip(times, spectra)
+    ):
+        figure, axis = plt.subplots(figsize=(8.2, 5.8))
+        axis.loglog(wavenumber[1:], energy[1:], color="black",
+                    linewidth=1.8, label=label)
+        axis.set_ylim(SPECTRUM_Y_MIN, ymax)
+        axis.set_xlabel(r"radial wavenumber $k$")
+        axis.set_ylabel(r"HW energy spectrum $E(k)$")
+        axis.set_title(f"HW energy spectrum: {label} t={time:g}")
+        axis.grid(True, which="both", alpha=0.3)
+        axis.legend()
+        figure.tight_layout()
+        frame_path = frames_dir / f"energy_spectrum_{frame_index:07d}.png"
+        figure.savefig(frame_path, dpi=dpi, bbox_inches="tight")
+        plt.close(figure)
+        frame_paths.append(frame_path)
+
+    return save_png_animation(
+        frame_paths, output_dir / "energy_spectrum_animation.gif", fps=fps
     )
 
 
@@ -492,16 +613,22 @@ def main() -> None:
     if args.animations and args.fps <= 0:
         raise ValueError("fps must be positive")
 
-    unet_times, _, unet_fields = read_history(args.unet_fields, args.batch)
-    dns_times, _, dns_fields = read_history(args.dns_fields, args.batch)
-    datasets = (
-        (args.unet_fields.resolve().name, unet_times, unet_fields),
-        (args.dns_fields.resolve().name, dns_times, dns_fields),
+    optional_paths = (args.dataset2_fields, args.dataset3_fields)
+    dataset_paths = (args.unet_fields, args.dns_fields, *optional_paths)
+    input_paths = tuple(path for path in dataset_paths if path is not None)
+    datasets = []
+    for dataset_path in input_paths:
+        times, _, fields = read_history(dataset_path, args.batch)
+        datasets.append((dataset_path.resolve().name, times, fields))
+    reference_hints = tuple(path.resolve() for path in input_paths)
+    datasets = order_datasets_with_reference_first(
+        tuple(datasets), reference_hints
     )
+    comparison_datasets = ((datasets[1], datasets[0])
+                           if len(datasets) > 1 else None)
     output_directory = args.output_dir.resolve()
-    input_directories = (
-        args.unet_fields.resolve(),
-        args.dns_fields.resolve(),
+    input_directories = tuple(
+        path.resolve() for path in input_paths
     )
     if any(
         input_directory == output_directory
@@ -526,23 +653,36 @@ def main() -> None:
         datasets, args.output_dir / "energy_components_vs_time.png",
         args.lx, args.ly, args.dpi,
     )
-    initial_derivatives_path = save_initial_derivative_comparison(
-        datasets, args.output_dir / "field_derivatives_t0.png",
-        args.lx, args.ly, args.dpi,
-    )
     print(f"Saved {centerpoint_path}")
     print(f"Saved {energy_path}")
     print(f"Saved {energy_components_path}")
-    print(f"Saved {initial_derivatives_path}")
+    if comparison_datasets is not None:
+        initial_derivatives_path = save_initial_derivative_comparison(
+            comparison_datasets, args.output_dir / "field_derivatives_t0.png",
+            args.lx, args.ly, args.dpi,
+        )
+        print(f"Saved {initial_derivatives_path}")
     if args.animations:
-        animation_path = save_field_comparison_animation(
-            datasets, args.output_dir, args.dpi, args.fps
-        )
-        arakawa_animation_path = save_arakawa_comparison_animation(
-            datasets, args.output_dir, args.lx, args.ly, args.dpi, args.fps
-        )
+        if comparison_datasets is None:
+            animation_path = save_field_animation(
+                datasets[0], args.output_dir, args.dpi, args.fps,
+                args.overall_animation_limits,
+            )
+            spectrum_animation_path = save_energy_spectrum_animation(
+                datasets[0], args.output_dir, args.lx, args.ly, args.dpi,
+                args.fps, args.overall_animation_limits,
+            )
+        else:
+            animation_path = save_field_comparison_animation(
+                comparison_datasets, args.output_dir, args.dpi, args.fps,
+                args.overall_animation_limits,
+            )
+            spectrum_animation_path = save_energy_spectrum_comparison_animation(
+                comparison_datasets, args.output_dir, args.lx, args.ly,
+                args.dpi, args.fps, args.overall_animation_limits,
+            )
         print(f"Saved {animation_path}")
-        print(f"Saved {arakawa_animation_path}")
+        print(f"Saved {spectrum_animation_path}")
 
 
 if __name__ == "__main__":

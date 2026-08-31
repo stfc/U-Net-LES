@@ -16,7 +16,7 @@ not need an argument parser::
   PBOUT_UNET_RECONSTRUCT_CHANNELS=none    # mode-1 U-Net channels
   PBOUT_UNET_DEVICE=cuda                 # or cpu; default is automatic
   PBOUT_UNET_IMPLICIT=1                  # return -(DNS-LES) brackets
-  PBOUT_UNET_WRITE_DIAGNOSTICS=1         # 0=off, 1=all, 2=fields only
+  PBOUT_UNET_WRITE_DIAGNOSTICS=2         # 0=off, 1=all, 2=fields only (default)
   PBOUT_UNET_OMEGA_FROM_POTENTIAL=1      # omega = Laplacian(phi) at DNS scale
   PBOUT_UNET_LAPLACIAN_ORDER=2            # periodic Laplacian order (2 or 4)
   PBOUT_UNET_INVERSE_CUTOFF_FRACTION=none
@@ -134,7 +134,7 @@ IMPLICIT = os.environ.get("PBOUT_UNET_IMPLICIT", "1").lower() not in {
 }
 try:
     WRITE_DIAGNOSTICS = int(
-        os.environ.get("PBOUT_UNET_WRITE_DIAGNOSTICS", "1")
+        os.environ.get("PBOUT_UNET_WRITE_DIAGNOSTICS", "2")
     )
 except ValueError as error:
     raise ValueError(

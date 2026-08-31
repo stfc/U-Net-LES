@@ -20,14 +20,15 @@ from visualization_common import (
 
 def calculate_training_losses(
     model, coarse, filtered_target, dns_target, mean, std, dns_std,
+    vorticity_std,
     alpha, lx, ly, lambda_dns, lambda_first_derivative,
-    lambda_second_derivative, vorticity_from_potential,
+    lambda_second_derivative, lambda_vorticity, vorticity_from_potential,
     inverse_cutoff_fraction, inverse_cutoff_order,
     post_cutoff_fraction, post_cutoff_order, post_filter_type,
     inverse_method="exact", van_cittert_iterations=1,
     van_cittert_relaxation=1.0,
 ):
-    """Return the DNS-space value loss on density and potential only."""
+    """Return DNS value loss with an optional normalized vorticity term."""
     _, _, predicted_filtered, predicted_dns = calculate_losses(
         model, coarse, filtered_target, dns_target, mean, std, dns_std,
         alpha, lx, ly, lambda_dns, vorticity_from_potential,
@@ -40,12 +41,17 @@ def calculate_training_losses(
     )
     density_loss = dns_error[:, 0].mean()
     potential_loss = dns_error[:, 1].mean()
-    total = dns_error.mean()
+    value_loss = dns_error.mean()
+    vorticity_loss = torch.abs(
+        (predicted_dns[:, 2] - dns_target[:, 2]) / vorticity_std
+    ).mean()
+    total = value_loss + lambda_vorticity * vorticity_loss
     values = {
         "total": total,
-        "dns": total,
+        "dns": value_loss,
         "dns_U": density_loss,
         "dns_V": potential_loss,
+        "dns_P": vorticity_loss,
     }
     return total, values, predicted_filtered, predicted_dns
 
@@ -192,12 +198,14 @@ def save_epoch_diagnostics(
     mean,
     std,
     dns_std,
+    vorticity_std,
     alpha,
     lx,
     ly,
     lambda_dns,
     lambda_first_derivative,
     lambda_second_derivative,
+    lambda_vorticity,
     vorticity_from_potential,
     inverse_cutoff_fraction,
     inverse_cutoff_order,
@@ -224,12 +232,14 @@ def save_epoch_diagnostics(
         mean,
         std,
         dns_std,
+        vorticity_std,
         alpha,
         lx,
         ly,
         lambda_dns,
         lambda_first_derivative,
         lambda_second_derivative,
+        lambda_vorticity,
         vorticity_from_potential,
         inverse_cutoff_fraction,
         inverse_cutoff_order,
@@ -347,12 +357,14 @@ def run_epoch(
     mean,
     std,
     dns_std,
+    vorticity_std,
     alpha,
     lx,
     ly,
     lambda_dns,
     lambda_first_derivative,
     lambda_second_derivative,
+    lambda_vorticity,
     vorticity_from_potential,
     inverse_cutoff_fraction,
     inverse_cutoff_order,
@@ -371,6 +383,7 @@ def run_epoch(
         "dns",
         "dns_U",
         "dns_V",
+        "dns_P",
     ]
     totals = {
         name: 0.0
@@ -396,12 +409,14 @@ def run_epoch(
                 mean,
                 std,
                 dns_std,
+                vorticity_std,
                 alpha,
                 lx,
                 ly,
                 lambda_dns,
                 lambda_first_derivative,
                 lambda_second_derivative,
+                lambda_vorticity,
                 vorticity_from_potential,
                 inverse_cutoff_fraction,
                 inverse_cutoff_order,
@@ -456,9 +471,9 @@ def configure_tensorboard(writer, normalize):
                 )
             },
             (
-                "Per-field normalized DNS loss"
+                "Per-field DNS loss (vorticity normalized)"
                 if normalize
-                else "Per-field absolute DNS loss"
+                else "Per-field DNS loss (U/V absolute, vorticity normalized)"
             ): {
                 name: [
                     "Multiline",
@@ -467,7 +482,7 @@ def configure_tensorboard(writer, normalize):
                         f"metrics/validation/dns_{name}",
                     ],
                 ]
-                for name in HW_FIELD_NAMES[:2]
+                for name in HW_FIELD_NAMES
             },
         }
     )
@@ -531,7 +546,7 @@ def parse_args():
     p.add_argument("--test-fraction", type=float, default=0.1)
     p.add_argument("--epochs", type=int, default=300)
     p.add_argument("--batch-size", type=int, default=4)
-    p.add_argument("--learning-rate", type=float, default=2e-4)
+    p.add_argument("--learning-rate", type=float, default=1e-3)
     p.add_argument(
         "--learning-rate-policy",
         choices=("constant", "step"),
@@ -578,6 +593,13 @@ def parse_args():
     p.add_argument(
         "--lambda-second-derivative", type=float, default=1.0e-4,
         help="Deprecated and ignored; derivative losses are disabled",
+    )
+    p.add_argument(
+        "--lambda-vorticity", type=float, default=0.0,
+        help=(
+            "Weight of the DNS vorticity L1 error normalized by the training "
+            "vorticity standard deviation (default: 0, disabled)"
+        ),
     )
     p.add_argument(
         "--vorticity-from-potential",
@@ -720,6 +742,8 @@ def run_training(a):
         raise ValueError("lambda-first-derivative must be non-negative.")
     if a.lambda_second_derivative < 0:
         raise ValueError("lambda-second-derivative must be non-negative.")
+    if not np.isfinite(a.lambda_vorticity) or a.lambda_vorticity < 0:
+        raise ValueError("lambda-vorticity must be finite and non-negative.")
     all_directions_periodic = a.periodic_x and a.periodic_y
     use_random_periodic_shift = (
         a.random_periodic_shift and all_directions_periodic
@@ -776,6 +800,17 @@ def run_training(a):
             "Normalization disabled: LES inputs, filtered targets, model "
             "outputs, reconstructed DNS, and DNS losses use physical values."
         )
+    if a.normalize:
+        vorticity_std_np = dns_std_np[:, 2:3]
+    elif a.lambda_vorticity > 0:
+        print("Calculating vorticity normalization for vorticity loss.")
+        _, _, physical_dns_std_np = calculate_training_statistics(
+            tr, a.fields, a.fine_n, a.coarse_n, alpha, a.lx, a.ly,
+            dtype=numpy_dtype,
+        )
+        vorticity_std_np = physical_dns_std_np[:, 2:3]
+    else:
+        vorticity_std_np = np.ones((1, 1, 1, 1), dtype=numpy_dtype)
 
     def ds(files, random_periodic_shift=False):
         return GermanoSnapshotDataset(
@@ -808,8 +843,9 @@ def run_training(a):
     print("Precision:", a.precision)
     print(
         "Training objective: mean absolute DNS-space error in electron "
-        "density and electrostatic potential only (no filtered, vorticity, "
-        "or derivative losses)."
+        "density and electrostatic potential plus "
+        f"{a.lambda_vorticity:g} times normalized vorticity error "
+        "(no filtered or derivative losses)."
     )
     if device.type == "cuda":
         print("GPU:", torch.cuda.get_device_name(0))
@@ -835,6 +871,9 @@ def run_training(a):
     mean = torch.from_numpy(mean_np).to(device)
     std = torch.from_numpy(std_np).to(device)
     dns_std = torch.from_numpy(dns_std_np).to(device)
+    vorticity_std = torch.as_tensor(
+        vorticity_std_np.item(), device=device, dtype=torch_dtype
+    )
     start = 1
     best = float("inf")
     if a.resume:
@@ -866,6 +905,18 @@ def run_training(a):
         model.load_state_dict(c["model"])
         opt.load_state_dict(c["optimizer"])
         if "scheduler" in c:
+            scheduler_state = c["scheduler"]
+            checkpoint_uses_step = (
+                "step_size" in scheduler_state and "gamma" in scheduler_state
+            )
+            requested_uses_step = a.learning_rate_policy == "step"
+            if checkpoint_uses_step != requested_uses_step:
+                checkpoint_policy = "step" if checkpoint_uses_step else "constant"
+                raise ValueError(
+                    "--learning-rate-policy does not match the resumed "
+                    f"checkpoint: checkpoint uses {checkpoint_policy!r}, but "
+                    f"the command requested {a.learning_rate_policy!r}."
+                )
             scheduler.load_state_dict(c["scheduler"])
         else:
             completed_epoch = int(c["epoch"])
@@ -880,6 +931,19 @@ def run_training(a):
             scheduler._last_lr = [resumed_lr for _ in opt.param_groups]
         start = int(c["epoch"]) + 1
         best = float(c["validation_loss"])
+        checkpoint_lambda_vorticity = float(
+            c.get(
+                "lambda_vorticity",
+                c.get("training_parameters", {}).get("lambda_vorticity", 0.0),
+            )
+        )
+        if checkpoint_lambda_vorticity != a.lambda_vorticity:
+            print(
+                "Vorticity loss weight changed from "
+                f"{checkpoint_lambda_vorticity:g} to {a.lambda_vorticity:g}; "
+                "resetting best validation score for the new objective."
+            )
+            best = float("inf")
         print("Resumed from epoch", start - 1)
     tensorboard_dir = a.tensorboard_dir or a.output_dir / "tensorboard"
     writer = SummaryWriter(log_dir=tensorboard_dir, purge_step=start)
@@ -939,12 +1003,15 @@ def run_training(a):
         lambda_dns=1.0,
         lambda_first_derivative=0.0,
         lambda_second_derivative=0.0,
-        training_objective="dns_l1_density_potential_only",
-        loss_channels=list(a.fields[:2]),
+        lambda_vorticity=a.lambda_vorticity,
+        training_objective=(
+            "dns_l1_density_potential_plus_normalized_vorticity"
+        ),
+        loss_channels=list(a.fields),
         effective_loss_weights={
             "dns_density_potential": 1.0,
             "filtered": 0.0,
-            "vorticity": 0.0,
+            "vorticity": a.lambda_vorticity,
             "first_derivative": 0.0,
             "second_derivative": 0.0,
         },
@@ -970,6 +1037,7 @@ def run_training(a):
         normalization_mean=mean_np.reshape(-1).tolist(),
         normalization_std=std_np.reshape(-1).tolist(),
         dns_normalization_std=dns_std_np.reshape(-1).tolist(),
+        vorticity_normalization_std=float(vorticity_std_np.item()),
         normalization_enabled=a.normalize,
         device=str(device),
         gpu=torch.cuda.get_device_name(0) if device.type == "cuda" else None,
@@ -987,12 +1055,14 @@ def run_training(a):
             mean,
             std,
             dns_std,
+            vorticity_std,
             alpha,
             a.lx,
             a.ly,
             a.lambda_dns,
             a.lambda_first_derivative,
             a.lambda_second_derivative,
+            a.lambda_vorticity,
             a.vorticity_from_potential,
             inverse_cutoff_fraction,
             a.inverse_cutoff_order,
@@ -1014,12 +1084,14 @@ def run_training(a):
             mean,
             std,
             dns_std,
+            vorticity_std,
             alpha,
             a.lx,
             a.ly,
             a.lambda_dns,
             a.lambda_first_derivative,
             a.lambda_second_derivative,
+            a.lambda_vorticity,
             a.vorticity_from_potential,
             inverse_cutoff_fraction,
             a.inverse_cutoff_order,
@@ -1038,12 +1110,14 @@ def run_training(a):
             mean,
             std,
             dns_std,
+            vorticity_std,
             alpha,
             a.lx,
             a.ly,
             a.lambda_dns,
             a.lambda_first_derivative,
             a.lambda_second_derivative,
+            a.lambda_vorticity,
             a.vorticity_from_potential,
             inverse_cutoff_fraction,
             a.inverse_cutoff_order,
@@ -1079,6 +1153,7 @@ def run_training(a):
             "mean": mean_np,
             "std": std_np,
             "dns_std": dns_std_np,
+            "vorticity_std": vorticity_std_np,
             "field_names": list(a.fields),
             "physics_version": 1,
             "vorticity_operator": parameters["vorticity_operator"],
@@ -1094,6 +1169,7 @@ def run_training(a):
             "lambda_dns": 1.0,
             "lambda_first_derivative": 0.0,
             "lambda_second_derivative": 0.0,
+            "lambda_vorticity": a.lambda_vorticity,
             "training_objective": parameters["training_objective"],
             "loss_channels": parameters["loss_channels"],
             "effective_loss_weights": parameters["effective_loss_weights"],
@@ -1131,12 +1207,14 @@ def run_training(a):
                 mean,
                 std,
                 dns_std,
+                vorticity_std,
                 alpha,
                 a.lx,
                 a.ly,
                 a.lambda_dns,
                 a.lambda_first_derivative,
                 a.lambda_second_derivative,
+                a.lambda_vorticity,
                 a.vorticity_from_potential,
                 inverse_cutoff_fraction,
                 a.inverse_cutoff_order,
@@ -1167,12 +1245,14 @@ def run_training(a):
         mean,
         std,
         dns_std,
+        vorticity_std,
         alpha,
         a.lx,
         a.ly,
         a.lambda_dns,
         a.lambda_first_derivative,
         a.lambda_second_derivative,
+        a.lambda_vorticity,
         a.vorticity_from_potential,
         inverse_cutoff_fraction,
         a.inverse_cutoff_order,
