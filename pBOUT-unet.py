@@ -82,6 +82,7 @@ from germano_common import (
     INVERSE_METHODS,
     POST_FILTER_TYPES,
     enforce_zero_spatial_mean,
+    restore_channel_spatial_mean,
     germano_filter,
     reconstruct_germano_torch,
     load_checkpoint,
@@ -749,6 +750,21 @@ def _set_omega_from_potential(dns: torch.Tensor) -> torch.Tensor:
 
 
 @torch.inference_mode()
+def _restore_vorticity_mean(
+    dns: torch.Tensor, source_fields: torch.Tensor
+) -> torch.Tensor:
+    """Restore the vorticity zero mode carried by the BOUT++ state.
+
+    A periodic Laplacian inversion only determines the mean-free vorticity.
+    BOUT++ evolves the vorticity zero mode separately, so retain its incoming
+    spatial mean after reconstructing vorticity from the potential.
+    """
+    return restore_channel_spatial_mean(
+        dns, source_fields, FIELD_NAMES.index("P")
+    )
+
+
+@torch.inference_mode()
 def _append_vorticity_for_diagnostics(fields: torch.Tensor) -> torch.Tensor:
     """Return U,V,P diagnostics for a two-output U-Net field."""
     if fields.shape[1] == len(FIELD_NAMES):
@@ -822,8 +838,11 @@ def _reconstruct_dns(
     # Derive omega last from the reconstructed potential. This avoids
     # independently inverse-reconstructing omega.
     dns = _set_omega_from_potential(dns)
+    dns = enforce_zero_spatial_mean(dns)
+    dns = _restore_vorticity_mean(dns, coarse)
+    reconstructed_vorticity = dns[:, FIELD_NAMES.index("P"):][:, :1]
     return (
-        enforce_zero_spatial_mean(dns),
+        dns,
         _append_vorticity_for_diagnostics(unet_output),
         _append_vorticity_for_diagnostics(inverse_input),
         reconstructed_vorticity,
@@ -861,8 +880,11 @@ def _inverse_germano_only(
     )
     reconstructed_vorticity = dns[:, FIELD_NAMES.index("P"):][:, :1]
     dns = _set_omega_from_potential(dns)
+    dns = enforce_zero_spatial_mean(dns)
+    dns = _restore_vorticity_mean(dns, filtered_fields)
+    reconstructed_vorticity = dns[:, FIELD_NAMES.index("P"):][:, :1]
     return (
-        enforce_zero_spatial_mean(dns),
+        dns,
         inverse_input,
         reconstructed_vorticity,
     )

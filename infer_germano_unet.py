@@ -354,18 +354,32 @@ def main():
                     (pd_unconstrained, vorticity), dim=1
                 )
             pd = enforce_zero_spatial_mean(pd_unconstrained)
+            dns_reference = torch.from_numpy(dns[None]).to(
+                device=device, dtype=torch_dtype
+            )
+            pd = restore_channel_spatial_mean(pd, dns_reference, 2)
             diagnostic_filtered = pf
             diagnostic_inverse_input = inverse_input
             if vorticity_from_potential:
                 filtered_vorticity = periodic_laplacian_2nd_torch(
                     pf[:, 1:2], lx, ly
                 )
+                filtered_vorticity = restore_channel_spatial_mean(
+                    torch.cat((pf, filtered_vorticity), dim=1),
+                    dns_reference,
+                    2,
+                )[:, 2:3]
                 diagnostic_filtered = torch.cat(
                     (pf, filtered_vorticity), dim=1
                 )
                 filtered_vorticity = periodic_laplacian_2nd_torch(
                     inverse_input[:, 1:2], lx, ly
                 )
+                filtered_vorticity = restore_channel_spatial_mean(
+                    torch.cat((inverse_input, filtered_vorticity), dim=1),
+                    dns_reference,
+                    2,
+                )[:, 2:3]
                 diagnostic_inverse_input = torch.cat(
                     (inverse_input, filtered_vorticity), dim=1
                 )

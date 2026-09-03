@@ -222,6 +222,27 @@ def enforce_zero_spatial_mean(fields: torch.Tensor) -> torch.Tensor:
     return fields - fields.mean(dim=(-2, -1), keepdim=True)
 
 
+def restore_channel_spatial_mean(
+    fields: torch.Tensor,
+    reference: torch.Tensor,
+    channel_index: int,
+) -> torch.Tensor:
+    """Give one channel the spatial mean of its reference field."""
+    if fields.shape[0] != reference.shape[0]:
+        raise ValueError("Fields and reference must have the same batch size.")
+    if not 0 <= channel_index < fields.shape[1]:
+        raise IndexError(f"Channel index {channel_index} is out of range.")
+    reference_mean = reference[:, channel_index:channel_index + 1].mean(
+        dim=(-2, -1), keepdim=True
+    )
+    channels = list(fields.split(1, dim=1))
+    channel = channels[channel_index]
+    channels[channel_index] = (
+        channel - channel.mean(dim=(-2, -1), keepdim=True) + reference_mean
+    )
+    return torch.cat(channels, dim=1)
+
+
 def spectral_cutoff_torch(
     field: torch.Tensor,
     lx: float,
@@ -684,6 +705,7 @@ def calculate_losses(
         vorticity = periodic_laplacian_2nd_torch(pd[:, 1:2], lx, ly)
         pd = torch.cat((pd, vorticity), dim=1)
     pd = enforce_zero_spatial_mean(pd)
+    pd = restore_channel_spatial_mean(pd, dns_target, 2)
     lf = nn.functional.l1_loss(
         pn, filtered_target_normalised[:, :output_channels]
     )
