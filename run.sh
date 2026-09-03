@@ -33,7 +33,7 @@ OUTPUT_DIR="${OUTPUT_DIR:-germano_training_output_dns${DNS_N}_les${LES_N}}"
 python train_germano_unet.py \
   --dataset "${DATASET}" \
   --output-dir "${OUTPUT_DIR}" \
-  --epochs 500 \
+  --epochs 50 \
   --batch-size 4 \
   --fine-n "${DNS_N}" \
   --coarse-n "${LES_N}" \
