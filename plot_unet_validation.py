@@ -66,8 +66,8 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         default=DEFAULT_BOUT_RESULTS_ROOT,
         help=(
-            "Directory used to resolve input folder names that do not exist "
-            f"as given (default: {DEFAULT_BOUT_RESULTS_ROOT})"
+            "Directory prepended to every relative input dataset path "
+            f"(default: {DEFAULT_BOUT_RESULTS_ROOT})"
         ),
     )
     parser.add_argument("--lx", type=float, default=50.176)
@@ -128,15 +128,11 @@ def _select_field(values: np.ndarray, batch: int, source: Path) -> np.ndarray:
 
 
 def resolve_input_directory(path: Path, base_directory: Path) -> Path:
-    """Resolve an existing path or a folder name beneath the BOUT++ root."""
-    if path.exists():
-        return path
-    candidate = base_directory / path
+    """Resolve relative dataset paths beneath the shared BOUT++ results root."""
+    candidate = path if path.is_absolute() else base_directory / path
     if candidate.exists():
         return candidate
-    raise FileNotFoundError(
-        f"Input dataset does not exist as {path} or {candidate}"
-    )
+    raise FileNotFoundError(f"Input dataset does not exist: {candidate}")
 
 
 def read_history(
@@ -237,6 +233,21 @@ def order_datasets_with_reference_first(datasets, reference_hints=None):
     )
 
 
+def truncate_to_common_time(datasets):
+    """Restrict histories to the time interval covered by every dataset."""
+    final_time = min(float(times[-1]) for _, times, _ in datasets)
+    truncated = []
+    for label, times, fields in datasets:
+        keep = times <= final_time
+        if not np.any(keep):
+            raise ValueError(
+                f"Dataset {label} has no snapshots at or before the common "
+                f"final time {final_time:g}"
+            )
+        truncated.append((label, times[keep], fields[keep]))
+    return tuple(truncated), final_time
+
+
 def save_centerpoint_history(datasets, output_path: Path, dpi: int) -> Path:
     """Compare each field's value at the domain center versus time."""
     figure, axes = plt.subplots(
@@ -264,6 +275,38 @@ def save_centerpoint_history(datasets, output_path: Path, dpi: int) -> Path:
     axes[0, 0].legend()
     axes[-1, 0].set_xlabel("simulation time")
     figure.suptitle("Domain-center field trajectories")
+    figure.tight_layout()
+    figure.savefig(output_path, dpi=dpi, bbox_inches="tight")
+    plt.close(figure)
+    return output_path
+
+
+def save_field_extrema_history(datasets, output_path: Path, dpi: int) -> Path:
+    """Compare each field's spatial minimum and maximum versus time."""
+    figure, axes = plt.subplots(
+        len(FIELD_NAMES), 1, figsize=(9, 10), sharex=True, squeeze=False
+    )
+    colors = ("black", "tab:blue", "tab:orange", "tab:green")
+    for channel, name in enumerate(FIELD_NAMES):
+        axis = axes[channel, 0]
+        for (label, times, fields), color in zip(datasets, colors):
+            spatial_minimum = np.min(fields[:, channel], axis=(-2, -1))
+            spatial_maximum = np.max(fields[:, channel], axis=(-2, -1))
+            axis.plot(
+                times, spatial_minimum, color=color, linestyle="--",
+                linewidth=1.6, label=f"{label} min",
+            )
+            axis.plot(
+                times, spatial_maximum, color=color, linestyle="-",
+                linewidth=1.6, label=f"{label} max",
+            )
+        field_label = HW_FIELD_LABELS.get(name, name)
+        axis.set_title(f"{field_label} spatial extrema")
+        axis.set_ylabel(field_label)
+        axis.grid(True, alpha=0.3)
+    axes[0, 0].legend(ncol=2)
+    axes[-1, 0].set_xlabel("simulation time")
+    figure.suptitle("Field minima and maxima versus time")
     figure.tight_layout()
     figure.savefig(output_path, dpi=dpi, bbox_inches="tight")
     plt.close(figure)
@@ -930,6 +973,8 @@ def main() -> None:
     datasets = order_datasets_with_reference_first(
         tuple(datasets), reference_hints
     )
+    datasets, common_final_time = truncate_to_common_time(datasets)
+    print(f"Restricting all datasets to t <= {common_final_time:g}")
     comparison_datasets = ((datasets[1], datasets[0])
                            if len(datasets) > 1 else None)
     output_directory = args.output_dir.resolve()
@@ -951,6 +996,9 @@ def main() -> None:
     centerpoint_path = save_centerpoint_history(
         datasets, args.output_dir / "centerpoint_vs_time.png", args.dpi
     )
+    extrema_path = save_field_extrema_history(
+        datasets, args.output_dir / "field_minmax_vs_time.png", args.dpi
+    )
     energy_path = save_energy_comparison(
         datasets, args.output_dir / "energy_vs_time.png",
         args.lx, args.ly, args.dpi,
@@ -969,6 +1017,7 @@ def main() -> None:
         args.spectrum_cutoff_n,
     )
     print(f"Saved {centerpoint_path}")
+    print(f"Saved {extrema_path}")
     print(f"Saved {energy_path}")
     print(f"Saved {energy_components_path}")
     print(f"Saved {initial_spectra_path}")

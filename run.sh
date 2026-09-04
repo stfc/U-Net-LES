@@ -28,7 +28,7 @@ INVERSE_CUTOFF_ORDER="${INVERSE_CUTOFF_ORDER:-8}"
 CHECKPOINT_EVERY="${CHECKPOINT_EVERY:-25}"
 DIAGNOSTIC_EVERY="${DIAGNOSTIC_EVERY:-5}"
 DATASET="${DATASET:-../../data/BOUT_runs/HW_2D/Papers/PoP23/HW_N${DNS_N}/fields/}"
-OUTPUT_DIR="${OUTPUT_DIR:-germano_training_output_dns${DNS_N}_les${LES_N}}_filtDNS_noNorm"
+OUTPUT_DIR="${OUTPUT_DIR:-germano_training_output_dns${DNS_N}_les${LES_N}}"
 
 python train_germano_unet.py \
   --dataset "${DATASET}" \
