@@ -21,6 +21,7 @@ not need an argument parser::
   PBOUT_UNET_LAPLACIAN_ORDER=2            # periodic Laplacian order (2 or 4)
   PBOUT_UNET_INVERSE_CUTOFF_FRACTION=none
   PBOUT_UNET_INVERSE_CUTOFF_ORDER=8
+  PBOUT_UNET_INVERSE_FILTER=cutoff        # cutoff/filtered_dns_spectrum
   PBOUT_UNET_INVERSE_METHOD=exact          # exact or van_cittert
   PBOUT_UNET_VAN_CITTERT_ITERATIONS=1
   PBOUT_UNET_VAN_CITTERT_RELAXATION=1
@@ -79,11 +80,13 @@ import torch
 
 from germano_common import (
     ResidualUNetSR,
+    INVERSE_FILTER_TYPES,
     INVERSE_METHODS,
     POST_FILTER_TYPES,
     enforce_zero_spatial_mean,
     restore_channel_spatial_mean,
     germano_filter,
+    inverse_input_filter_torch,
     reconstruct_germano_torch,
     load_checkpoint,
     periodic_laplacian_2nd_torch,
@@ -417,6 +420,7 @@ def _print_init_metadata(initial_state: str) -> None:
         "van_cittert_relaxation": VAN_CITTERT_RELAXATION,
         "inverse_cutoff_fraction": CUTOFF_FRACTION,
         "inverse_cutoff_order": CUTOFF_ORDER,
+        "inverse_filter": INVERSE_FILTER_TYPE,
         "post_cutoff_fraction": POST_CUTOFF_FRACTION,
         "post_cutoff_order": POST_CUTOFF_ORDER,
         "post_filter": POST_FILTER_TYPE,
@@ -556,6 +560,31 @@ CUTOFF_ORDER = float(
     os.environ.get(
         "PBOUT_UNET_INVERSE_CUTOFF_ORDER",
         _checkpoint.get("inverse_cutoff_order", 8.0),
+    )
+)
+INVERSE_FILTER_TYPE = os.environ.get(
+    "PBOUT_UNET_INVERSE_FILTER",
+    _checkpoint.get(
+        "inverse_filter", _training_parameters.get("inverse_filter", "cutoff")
+    ),
+).lower().replace("-", "_")
+if INVERSE_FILTER_TYPE not in INVERSE_FILTER_TYPES:
+    raise ValueError(
+        "PBOUT_UNET_INVERSE_FILTER must be one of "
+        f"{', '.join(INVERSE_FILTER_TYPES)}."
+    )
+_filtered_dns_shell_power = _checkpoint.get("filtered_dns_shell_power")
+if (
+    INVERSE_FILTER_TYPE == "filtered_dns_spectrum"
+    and _filtered_dns_shell_power is None
+):
+    raise ValueError(
+        "Checkpoint has no filtered-DNS spectrum; retrain with "
+        "--inverse-filter filtered_dns_spectrum."
+    )
+FILTERED_DNS_SHELL_POWER = (
+    None if _filtered_dns_shell_power is None else torch.as_tensor(
+        _filtered_dns_shell_power, dtype=TORCH_DTYPE, device=DEVICE
     )
 )
 if CUTOFF_FRACTION is not None and not 0 < CUTOFF_FRACTION <= 1:
@@ -806,12 +835,14 @@ def _reconstruct_dns(
         inverse_input = torch.where(
             reconstruct_mask, inverse_input, incoming_filtered_fine
         )
-    inverse_input = spectral_cutoff_torch(
+    inverse_input = inverse_input_filter_torch(
         inverse_input,
         LX,
         LY,
+        INVERSE_FILTER_TYPE,
         CUTOFF_FRACTION,
         CUTOFF_ORDER,
+        FILTERED_DNS_SHELL_POWER,
     )
     dns = reconstruct_germano_torch(
         inverse_input,
@@ -854,12 +885,15 @@ def _inverse_germano_only(
     filtered_fields: torch.Tensor,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Reconstruct DNS and independent vorticity without U-Net or resizing."""
-    inverse_input = spectral_cutoff_torch(
-        filtered_fields,
+    filtered_reconstruction_fields = filtered_fields[:, :OUTPUT_CHANNELS]
+    inverse_input = inverse_input_filter_torch(
+        filtered_reconstruction_fields,
         LX,
         LY,
+        INVERSE_FILTER_TYPE,
         CUTOFF_FRACTION,
         CUTOFF_ORDER,
+        FILTERED_DNS_SHELL_POWER,
     )
     dns = reconstruct_germano_torch(
         inverse_input,

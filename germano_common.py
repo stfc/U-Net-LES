@@ -268,6 +268,92 @@ def spectral_cutoff_torch(
     return torch.fft.ifft2(multiplier * fh, dim=(-2, -1)).real
 
 
+INVERSE_FILTER_TYPES = ("cutoff", "filtered_dns_spectrum")
+
+
+def _spectral_shell_indices(n, lx, ly, device):
+    """Return rounded isotropic-shell indices for an ``n x n`` grid."""
+    kx = 2 * math.pi * torch.fft.fftfreq(n, d=lx / n, device=device)
+    ky = 2 * math.pi * torch.fft.fftfreq(n, d=ly / n, device=device)
+    dk = min(2 * math.pi / lx, 2 * math.pi / ly)
+    return torch.round(
+        torch.sqrt(kx[:, None] ** 2 + ky[None, :] ** 2) / dk
+    ).long()
+
+
+def filtered_dns_spectrum_filter_torch(
+    field, lx, ly, target_shell_power, min_wavenumber=1.0
+):
+    """Suppress Fourier shells whose power exceeds the training-DNS mean.
+
+    ``target_shell_power`` contains the mean power per Fourier mode for each
+    output channel and radial shell.  A single multiplier is used per shell,
+    preserving phases and relative modal structure.  The multiplier is capped
+    at one, so this operation can only remove excess energy.  Energy-containing
+    modes at ``k <= min_wavenumber`` pass through unchanged; the learned DNS
+    spectrum therefore regularizes only the smaller scales.
+    """
+    if target_shell_power is None:
+        raise ValueError(
+            "The filtered-DNS spectrum filter requires a spectrum stored in "
+            "the checkpoint."
+        )
+    if min_wavenumber < 0:
+        raise ValueError("min_wavenumber must be non-negative.")
+    target = torch.as_tensor(
+        target_shell_power, dtype=field.dtype, device=field.device
+    )
+    if target.ndim != 2 or target.shape[0] != field.shape[1]:
+        raise ValueError(
+            "Filtered-DNS target spectrum must have shape (channels, shells)."
+        )
+    fh = torch.fft.fft2(field, dim=(-2, -1))
+    shells = _spectral_shell_indices(field.shape[-1], lx, ly, field.device)
+    flat_shells = shells.flatten()
+    shell_count = target.shape[1]
+    if int(flat_shells.max()) >= shell_count:
+        raise ValueError("Stored filtered-DNS spectrum has too few shells.")
+    power = fh.abs().square().mean(dim=0).flatten(1)
+    sums = torch.zeros((field.shape[1], shell_count), dtype=field.dtype,
+                       device=field.device)
+    sums.scatter_add_(1, flat_shells.expand(field.shape[1], -1), power)
+    counts = torch.bincount(flat_shells, minlength=shell_count).to(field.dtype)
+    current = sums / counts.clamp_min(1).unsqueeze(0)
+    scale = torch.sqrt(
+        target / current.clamp_min(torch.finfo(field.dtype).tiny)
+    )
+    scale = scale.clamp(max=1.0)
+    multiplier = scale[:, flat_shells].reshape(1, field.shape[1], *shells.shape)
+    if min_wavenumber > 0:
+        wavenumber = torch.sqrt(
+            k2_torch(
+                field.shape[-1], lx, ly, field.device, field.dtype
+            )
+        )
+        multiplier = torch.where(
+            wavenumber[None, None] <= min_wavenumber,
+            torch.ones_like(multiplier),
+            multiplier,
+        )
+    return torch.fft.ifft2(fh * multiplier, dim=(-2, -1)).real
+
+
+def inverse_input_filter_torch(
+    field, lx, ly, filter_type="cutoff", cutoff_fraction=None,
+    cutoff_order=8, target_shell_power=None,
+):
+    """Apply the selected regularization before inverse reconstruction."""
+    if filter_type not in INVERSE_FILTER_TYPES:
+        raise ValueError(f"Unknown inverse filter {filter_type!r}.")
+    if filter_type == "cutoff":
+        return spectral_cutoff_torch(
+            field, lx, ly, cutoff_fraction, cutoff_order
+        )
+    return filtered_dns_spectrum_filter_torch(
+        field, lx, ly, target_shell_power
+    )
+
+
 POST_FILTER_TYPES = ("none", "high_order", "gaussian")
 
 
@@ -438,6 +524,40 @@ def filter_snapshot(
         [spectral_resize(channel, coarse_n) for channel in fine]
     ).astype(dtype)
     return coarse, fine
+
+
+def calculate_filtered_dns_shell_power(
+    files, field_names, fine_n, coarse_n, alpha, lx, ly,
+    output_channels, dtype=np.float32,
+):
+    """Average filtered-DNS Fourier power per channel and radial shell."""
+    kx = 2 * np.pi * np.fft.fftfreq(fine_n, d=lx / fine_n)
+    ky = 2 * np.pi * np.fft.fftfreq(fine_n, d=ly / fine_n)
+    dk = min(2 * np.pi / lx, 2 * np.pi / ly)
+    shells = np.rint(
+        np.sqrt(kx[:, None] ** 2 + ky[None, :] ** 2) / dk
+    ).astype(np.int64)
+    shell_count = int(shells.max()) + 1
+    counts = np.bincount(shells.ravel(), minlength=shell_count)
+    total = np.zeros((output_channels, shell_count), dtype=np.float64)
+    for index, path in enumerate(files, 1):
+        dns = load_dns_snapshot(
+            path, field_names, fine_n, lx, ly, dtype=dtype
+        )
+        _, filtered = filter_snapshot(
+            dns, alpha, lx, ly, coarse_n, dtype=dtype
+        )
+        power = np.abs(
+            np.fft.fft2(filtered[:output_channels], axes=(-2, -1))
+        ) ** 2
+        for channel in range(output_channels):
+            total[channel] += np.bincount(
+                shells.ravel(), weights=power[channel].ravel(),
+                minlength=shell_count,
+            )
+        if index == 1 or index % 100 == 0 or index == len(files):
+            print(f"Filtered-DNS spectrum: {index}/{len(files)}")
+    return (total / (len(files) * counts[None, :])).astype(dtype)
 
 
 def calculate_training_statistics(
@@ -671,18 +791,22 @@ def calculate_losses(
     inverse_method="exact",
     van_cittert_iterations=1,
     van_cittert_relaxation=1.0,
+    inverse_filter_type="cutoff",
+    filtered_dns_shell_power=None,
 ):
     output_channels = 2 if vorticity_from_potential else 3
     output_mean = mean[:, :output_channels]
     output_std = std[:, :output_channels]
     pf = model(coarse) * output_std + output_mean
     pn = (pf - output_mean) / output_std
-    inverse_input = spectral_cutoff_torch(
+    inverse_input = inverse_input_filter_torch(
         pf,
         lx,
         ly,
+        inverse_filter_type,
         inverse_cutoff_fraction,
         inverse_cutoff_order,
+        filtered_dns_shell_power,
     )
     pd = reconstruct_germano_torch(
         inverse_input,
@@ -704,8 +828,8 @@ def calculate_losses(
     if vorticity_from_potential:
         vorticity = periodic_laplacian_2nd_torch(pd[:, 1:2], lx, ly)
         pd = torch.cat((pd, vorticity), dim=1)
-    pd = enforce_zero_spatial_mean(pd)
-    pd = restore_channel_spatial_mean(pd, dns_target, 2)
+    # pd = enforce_zero_spatial_mean(pd)
+    # pd = restore_channel_spatial_mean(pd, dns_target, 2)
     lf = nn.functional.l1_loss(
         pn, filtered_target_normalised[:, :output_channels]
     )
@@ -780,7 +904,23 @@ def relative_l2(reference, prediction):
     return (num / den).mean()
 
 
-def isotropic_spectrum(field, lx, ly):
+def smooth_spectrum(values, window=5, preserve_bins=4):
+    """Return a moving-average spectrum while preserving its leading bins."""
+    values = np.asarray(values)
+    if values.ndim != 1:
+        raise ValueError("Spectrum values must be one-dimensional.")
+    if window <= 0:
+        raise ValueError("Spectrum smoothing window must be positive.")
+    if preserve_bins < 0:
+        raise ValueError("The number of preserved spectrum bins cannot be negative.")
+    if values.size < window:
+        return values.copy()
+    smoothed = np.convolve(values, np.ones(window) / window, mode="same")
+    smoothed[:preserve_bins] = values[:preserve_bins]
+    return smoothed
+
+
+def isotropic_spectrum(field, lx, ly, smooth=False):
     n = field.shape[0]
     kx = 2 * np.pi * np.fft.fftfreq(n, d=lx / n)
     ky = 2 * np.pi * np.fft.fftfreq(n, d=ly / n)
@@ -793,10 +933,13 @@ def isotropic_spectrum(field, lx, ly):
     c = np.bincount(shell.ravel())
     k = np.arange(p.size) * dk
     v = c > 0
-    return k[v], p[v]
+    p = p[v]
+    if smooth:
+        p = smooth_spectrum(p)
+    return k[v], p
 
 
-def isotropic_hw_energy_spectrum(fields, lx, ly):
+def isotropic_hw_energy_spectrum(fields, lx, ly, smooth=False):
     """Return the shell-summed HW energy spectrum from physical n and phi.
 
     E_k = 1/2 (n_k n_k* + (d_x phi)_k (d_x phi)_k*
@@ -824,6 +967,8 @@ def isotropic_hw_energy_spectrum(fields, lx, ly):
     shell = np.rint(wavenumber / dk).astype(int)
     shell_energy = np.bincount(shell.ravel(), weights=energy.ravel())
     k = np.arange(shell_energy.size) * dk
+    if smooth:
+        shell_energy = smooth_spectrum(shell_energy)
     return k, shell_energy
 
 
@@ -863,20 +1008,23 @@ def save_spectrum_plot(
     ly,
     path,
     inverse_input_label="U-Net filtered",
+    smooth_spectrum=False,
 ):
     spectra = {
-        "DNS": isotropic_hw_energy_spectrum(dns, lx, ly),
+        "DNS": isotropic_hw_energy_spectrum(
+            dns, lx, ly, smooth=smooth_spectrum
+        ),
         f"Filtered {filtered_fine.shape[-1]}": isotropic_hw_energy_spectrum(
-            filtered_fine, lx, ly
+            filtered_fine, lx, ly, smooth=smooth_spectrum
         ),
         f"Filtered {coarse_n}": isotropic_hw_energy_spectrum(
-            filtered_coarse, lx, ly
+            filtered_coarse, lx, ly, smooth=smooth_spectrum
         ),
         inverse_input_label: isotropic_hw_energy_spectrum(
-            predicted_filtered, lx, ly
+            predicted_filtered, lx, ly, smooth=smooth_spectrum
         ),
         "Reconstructed DNS": isotropic_hw_energy_spectrum(
-            predicted_dns, lx, ly
+            predicted_dns, lx, ly, smooth=smooth_spectrum
         ),
     }
     fig, ax = plt.subplots(figsize=(7.4, 5.6))

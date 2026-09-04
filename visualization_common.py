@@ -219,7 +219,7 @@ def save_field_spectrum_comparison(
                 ),
             )
         for values, label, color in plotted_fields:
-            k, power = isotropic_spectrum(values, lx, ly)
+            k, power = isotropic_spectrum(values, lx, ly, smooth=True)
             positive = (k > 0) & (power > 0)
             ax.loglog(k[positive], power[positive], color=color, label=label)
         _add_cutoff(ax, reconstructed.shape[-2:], lx, ly, cutoff_fraction)
@@ -413,7 +413,7 @@ def save_initial_dns_fields(
                 0, (reference_fields[channel], "Original DNS", "black")
             )
         for values, label, color in plotted_fields:
-            k, power = isotropic_spectrum(values, lx, ly)
+            k, power = isotropic_spectrum(values, lx, ly, smooth=True)
             positive = (k > 0) & (power > 0)
             ax.loglog(k[positive], power[positive], color=color, label=label)
         _add_cutoff(ax, fields.shape[-2:], lx, ly, cutoff_fraction)
@@ -892,7 +892,7 @@ def save_arakawa_comparison(
         if reference is not None:
             plotted_fields.insert(0, (reference[index], reference_label, "black"))
         for field, label, color in plotted_fields:
-            k, power = isotropic_spectrum(field, lx, ly)
+            k, power = isotropic_spectrum(field, lx, ly, smooth=True)
             positive = (k > 0) & (power > 0)
             ax.loglog(k[positive], power[positive], color=color, label=label)
         _add_cutoff(ax, (nx, ny), lx, ly, cutoff_fraction)

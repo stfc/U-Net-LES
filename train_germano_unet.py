@@ -24,6 +24,7 @@ def calculate_training_losses(
     alpha, lx, ly, lambda_dns, lambda_first_derivative,
     lambda_second_derivative, lambda_vorticity, vorticity_from_potential,
     inverse_cutoff_fraction, inverse_cutoff_order,
+    inverse_filter_type, filtered_dns_shell_power,
     post_cutoff_fraction, post_cutoff_order, post_filter_type,
     inverse_method="exact", van_cittert_iterations=1,
     van_cittert_relaxation=1.0,
@@ -32,9 +33,15 @@ def calculate_training_losses(
     _, _, predicted_filtered, predicted_dns = calculate_losses(
         model, coarse, filtered_target, dns_target, mean, std, dns_std,
         alpha, lx, ly, lambda_dns, vorticity_from_potential,
-        inverse_cutoff_fraction, inverse_cutoff_order, post_cutoff_fraction,
-        post_cutoff_order, post_filter_type, inverse_method,
-        van_cittert_iterations, van_cittert_relaxation,
+        inverse_cutoff_fraction, inverse_cutoff_order,
+        inverse_filter_type=inverse_filter_type,
+        filtered_dns_shell_power=filtered_dns_shell_power,
+        post_cutoff_fraction=post_cutoff_fraction,
+        post_cutoff_order=post_cutoff_order,
+        post_filter_type=post_filter_type,
+        inverse_method=inverse_method,
+        van_cittert_iterations=van_cittert_iterations,
+        van_cittert_relaxation=van_cittert_relaxation,
     )
     dns_error = torch.abs(
         (predicted_dns[:, :2] - dns_target[:, :2]) / dns_std[:, :2]
@@ -151,7 +158,9 @@ def save_training_sample_diagnostics(
     )
     for channel, (ax, name) in enumerate(zip(axes[0], field_names)):
         for stage, values in stages:
-            k, power = isotropic_spectrum(values[channel], lx, ly)
+            k, power = isotropic_spectrum(
+                values[channel], lx, ly, smooth=True
+            )
             positive = (k > 0) & (power > 0)
             ax.loglog(
                 k[positive],
@@ -209,6 +218,8 @@ def save_epoch_diagnostics(
     vorticity_from_potential,
     inverse_cutoff_fraction,
     inverse_cutoff_order,
+    inverse_filter_type,
+    filtered_dns_shell_power,
     post_cutoff_fraction,
     post_cutoff_order,
     post_filter_type,
@@ -243,6 +254,8 @@ def save_epoch_diagnostics(
         vorticity_from_potential,
         inverse_cutoff_fraction,
         inverse_cutoff_order,
+        inverse_filter_type,
+        filtered_dns_shell_power,
         post_cutoff_fraction,
         post_cutoff_order,
         post_filter_type,
@@ -368,6 +381,8 @@ def run_epoch(
     vorticity_from_potential,
     inverse_cutoff_fraction,
     inverse_cutoff_order,
+    inverse_filter_type,
+    filtered_dns_shell_power,
     post_cutoff_fraction,
     post_cutoff_order,
     post_filter_type,
@@ -420,6 +435,8 @@ def run_epoch(
                 vorticity_from_potential,
                 inverse_cutoff_fraction,
                 inverse_cutoff_order,
+                inverse_filter_type,
+                filtered_dns_shell_power,
                 post_cutoff_fraction,
                 post_cutoff_order,
                 post_filter_type,
@@ -643,6 +660,16 @@ def parse_args():
     )
     p.add_argument("--inverse-cutoff-order", type=float, default=8.0)
     p.add_argument(
+        "--inverse-filter",
+        choices=INVERSE_FILTER_TYPES,
+        default="cutoff",
+        help=(
+            "Regularization applied to the U-Net output before inversion: "
+            "the existing analytic cutoff, or a suppressive shell filter "
+            "matched to the mean filtered-DNS training spectrum"
+        ),
+    )
+    p.add_argument(
         "--inverse-method",
         choices=INVERSE_METHODS,
         default="exact",
@@ -780,6 +807,14 @@ def run_training(a):
     )
     delta = a.lx / a.fine_n
     alpha = a.alpha if a.alpha is not None else delta
+    model_output_channels = 2 if a.vorticity_from_potential else 3
+    filtered_dns_shell_power_np = None
+    if a.inverse_filter == "filtered_dns_spectrum":
+        print("Calculating mean filtered-DNS spectrum from training snapshots.")
+        filtered_dns_shell_power_np = calculate_filtered_dns_shell_power(
+            tr, a.fields, a.fine_n, a.coarse_n, alpha, a.lx, a.ly,
+            model_output_channels, dtype=numpy_dtype,
+        )
     if a.normalize:
         mean_np, std_np, dns_std_np = calculate_training_statistics(
             tr,
@@ -850,7 +885,6 @@ def run_training(a):
     if device.type == "cuda":
         print("GPU:", torch.cuda.get_device_name(0))
         torch.backends.cudnn.benchmark = True
-    model_output_channels = 2 if a.vorticity_from_potential else 3
     model = ResidualUNetSR(
         len(a.fields),
         a.base_channels,
@@ -873,6 +907,10 @@ def run_training(a):
     dns_std = torch.from_numpy(dns_std_np).to(device)
     vorticity_std = torch.as_tensor(
         vorticity_std_np.item(), device=device, dtype=torch_dtype
+    )
+    filtered_dns_shell_power = (
+        None if filtered_dns_shell_power_np is None
+        else torch.from_numpy(filtered_dns_shell_power_np).to(device)
     )
     start = 1
     best = float("inf")
@@ -1018,9 +1056,16 @@ def run_training(a):
         van_cittert_iterations=a.van_cittert_iterations,
         van_cittert_relaxation=a.van_cittert_relaxation,
         inverse_regularization=(
-            "truncated_relaxed_van_cittert"
+            "filtered_dns_spectrum"
+            if a.inverse_filter == "filtered_dns_spectrum"
+            else "truncated_relaxed_van_cittert"
             if a.inverse_method == "van_cittert"
             else "smooth_exponential_cutoff"
+        ),
+        inverse_filter=a.inverse_filter,
+        filtered_dns_spectrum_shells=(
+            None if filtered_dns_shell_power_np is None
+            else filtered_dns_shell_power_np.shape[1]
         ),
         inverse_cutoff_wavenumber=(
             inverse_cutoff_fraction * np.pi / delta
@@ -1066,6 +1111,8 @@ def run_training(a):
             a.vorticity_from_potential,
             inverse_cutoff_fraction,
             a.inverse_cutoff_order,
+            a.inverse_filter,
+            filtered_dns_shell_power,
             post_cutoff_fraction,
             a.post_cutoff_order,
             a.post_filter,
@@ -1095,6 +1142,8 @@ def run_training(a):
             a.vorticity_from_potential,
             inverse_cutoff_fraction,
             a.inverse_cutoff_order,
+            a.inverse_filter,
+            filtered_dns_shell_power,
             post_cutoff_fraction,
             a.post_cutoff_order,
             a.post_filter,
@@ -1121,6 +1170,8 @@ def run_training(a):
             a.vorticity_from_potential,
             inverse_cutoff_fraction,
             a.inverse_cutoff_order,
+            a.inverse_filter,
+            filtered_dns_shell_power,
             post_cutoff_fraction,
             a.post_cutoff_order,
             a.post_filter,
@@ -1183,6 +1234,8 @@ def run_training(a):
             "random_periodic_shift": use_random_periodic_shift,
             "inverse_cutoff_fraction": inverse_cutoff_fraction,
             "inverse_cutoff_order": a.inverse_cutoff_order,
+            "inverse_filter": a.inverse_filter,
+            "filtered_dns_shell_power": filtered_dns_shell_power_np,
             "inverse_method": a.inverse_method,
             "van_cittert_iterations": a.van_cittert_iterations,
             "van_cittert_relaxation": a.van_cittert_relaxation,
@@ -1218,6 +1271,8 @@ def run_training(a):
                 a.vorticity_from_potential,
                 inverse_cutoff_fraction,
                 a.inverse_cutoff_order,
+                a.inverse_filter,
+                filtered_dns_shell_power,
                 post_cutoff_fraction,
                 a.post_cutoff_order,
                 a.post_filter,
@@ -1256,6 +1311,8 @@ def run_training(a):
         a.vorticity_from_potential,
         inverse_cutoff_fraction,
         a.inverse_cutoff_order,
+        a.inverse_filter,
+        filtered_dns_shell_power,
         post_cutoff_fraction,
         a.post_cutoff_order,
         a.post_filter,

@@ -28,7 +28,7 @@ INVERSE_CUTOFF_ORDER="${INVERSE_CUTOFF_ORDER:-8}"
 CHECKPOINT_EVERY="${CHECKPOINT_EVERY:-25}"
 DIAGNOSTIC_EVERY="${DIAGNOSTIC_EVERY:-5}"
 DATASET="${DATASET:-../../data/BOUT_runs/HW_2D/Papers/PoP23/HW_N${DNS_N}/fields/}"
-OUTPUT_DIR="${OUTPUT_DIR:-germano_training_output_dns${DNS_N}_les${LES_N}}"
+OUTPUT_DIR="${OUTPUT_DIR:-germano_training_output_dns${DNS_N}_les${LES_N}}_filtDNS_noNorm"
 
 python train_germano_unet.py \
   --dataset "${DATASET}" \
@@ -47,8 +47,7 @@ python train_germano_unet.py \
   --save-every "${CHECKPOINT_EVERY}" \
   --diagnostic-every "${DIAGNOSTIC_EVERY}" \
   --post-filter none \
-  --inverse-method van_cittert \
-  --van-cittert-iterations 10 \
-  --van-cittert-relaxation 1.0
+  --no-normalize \
+  --inverse-filter filtered_dns_spectrum
 
 #python infer_germano_unet.py --checkpoint germano_training_output_32_v3/checkpoints/best.pt --input fields_HW_run0_time501.npz --output-dir inference_output

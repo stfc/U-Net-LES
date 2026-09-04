@@ -39,6 +39,7 @@ python train_germano_unet.py \
   --alpha 0.392 \
   --epochs 100 --batch-size 4 \
   --precision float64 --no-normalize \
+  --inverse-filter filtered_dns_spectrum \
   --inverse-cutoff-fraction 0.707107 \
   --inverse-cutoff-order 8 \
   --post-filter none
@@ -49,6 +50,12 @@ python train_germano_unet.py \
 Training with the default `--vorticity-from-potential` makes the U-Net predict
 `U` and `V`; `P` (vorticity) is then obtained from the periodic Laplacian of
 `V`. Use `--resume PATH/TO/checkpoint.pt` to resume a compatible run.
+
+`--inverse-filter filtered_dns_spectrum` computes the mean radial Fourier
+power of the actual filtered DNS over the training split before epoch 1. The
+reference is stored in the checkpoint, and the pre-inversion filter attenuates
+only U-Net shells whose power exceeds it. The default `cutoff` retains the
+existing smooth exponential cutoff and its fraction/order options.
 
 Important output files are:
 
@@ -97,14 +104,16 @@ the BOUT++ interface:
 ```bash
 export PBOUT_UNET_INVERSE_CUTOFF_FRACTION=0.707107
 export PBOUT_UNET_INVERSE_CUTOFF_ORDER=8
+export PBOUT_UNET_INVERSE_FILTER=filtered_dns_spectrum # or cutoff
 export PBOUT_UNET_POST_FILTER=none        # none, high_order, or gaussian
 export PBOUT_UNET_POST_CUTOFF_FRACTION=none
 export PBOUT_UNET_POST_CUTOFF_ORDER=8
 ```
 
 An unset override uses the checkpoint value. `none` disables an optional
-cutoff. The inverse cutoff is applied before inverse Germano reconstruction;
-the post filter/cutoff is applied afterward.
+cutoff. The selected inverse filter is applied before inverse Germano
+reconstruction; the post filter/cutoff is applied afterward. The
+`filtered_dns_spectrum` setting requires a checkpoint trained with that option.
 
 ## BOUT++ coupling
 

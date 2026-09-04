@@ -11,8 +11,10 @@ from visualization_common import (
 )
 
 
-def inverse_input_label(mode, cutoff_fraction=None):
+def inverse_input_label(mode, cutoff_fraction=None, filter_type="cutoff"):
     if mode == "unet":
+        if filter_type == "filtered_dns_spectrum":
+            return "Filtered-DNS-spectrum U-Net outcome (inverse input)"
         if cutoff_fraction is not None:
             return "Cutoff-filtered U-Net outcome (inverse input)"
         return "U-Net filtered (U-Net outcome)"
@@ -133,8 +135,19 @@ def parse_args():
         default="checkpoint",
         help="Reconstruction operator (default: checkpoint, falling back to exact)",
     )
+    p.add_argument(
+        "--inverse-filter", choices=("checkpoint",) + INVERSE_FILTER_TYPES,
+        default="checkpoint",
+        help="Pre-inversion spectral filter (default: checkpoint setting)",
+    )
     p.add_argument("--van-cittert-iterations", type=int)
     p.add_argument("--van-cittert-relaxation", type=float)
+    p.add_argument(
+        "--smooth-spectrum",
+        action="store_true",
+        help=("Smooth energy spectra with the StylES five-bin moving average; "
+              "the first four bins remain unsmoothed"),
+    )
     return p.parse_args()
 
 
@@ -216,6 +229,30 @@ def main():
             c.get("inverse_cutoff_order", 8.0),
         )
     )
+    inverse_filter_type = (
+        c.get(
+            "inverse_filter",
+            training_parameters.get("inverse_filter", "cutoff"),
+        )
+        if a.inverse_filter == "checkpoint" else a.inverse_filter
+    )
+    inverse_filter_type = os.environ.get(
+        "PBOUT_UNET_INVERSE_FILTER", inverse_filter_type
+    ).lower().replace("-", "_")
+    if inverse_filter_type not in INVERSE_FILTER_TYPES:
+        raise ValueError(
+            "PBOUT_UNET_INVERSE_FILTER must be one of "
+            f"{', '.join(INVERSE_FILTER_TYPES)}."
+        )
+    filtered_dns_shell_power_np = c.get("filtered_dns_shell_power")
+    if (
+        inverse_filter_type == "filtered_dns_spectrum"
+        and filtered_dns_shell_power_np is None
+    ):
+        raise ValueError(
+            "This checkpoint has no averaged filtered-DNS spectrum; train it "
+            "with --inverse-filter filtered_dns_spectrum."
+        )
     post_cutoff_fraction = optional_environment_float(
         "PBOUT_UNET_POST_CUTOFF_FRACTION",
         c.get("post_cutoff_fraction"),
@@ -270,6 +307,7 @@ def main():
         "van_cittert_relaxation": van_cittert_relaxation,
         "inverse_cutoff_fraction": cutoff_fraction,
         "inverse_cutoff_order": cutoff_order,
+        "inverse_filter": inverse_filter_type,
         "post_cutoff_fraction": post_cutoff_fraction,
         "post_cutoff_order": post_cutoff_order,
         "post_filter": post_filter_type,
@@ -295,6 +333,11 @@ def main():
     std = torch.from_numpy(std_np).to(device)
     output_mean = mean[:, :model_output_channels]
     output_std = std[:, :model_output_channels]
+    filtered_dns_shell_power = (
+        None if filtered_dns_shell_power_np is None else torch.as_tensor(
+            filtered_dns_shell_power_np, dtype=torch_dtype, device=device
+        )
+    )
     files = [a.input] if a.input.is_file() else recursive_npz_files(a.input)
     if not files:
         raise ValueError("No NPZ snapshots found.")
@@ -322,12 +365,14 @@ def main():
                 pf = torch.from_numpy(
                     fine[None, :model_output_channels]
                 ).to(device)
-            inverse_input = spectral_cutoff_torch(
+            inverse_input = inverse_input_filter_torch(
                 pf,
                 lx,
                 ly,
+                inverse_filter_type,
                 cutoff_fraction,
                 cutoff_order,
+                filtered_dns_shell_power,
             )
             pd_unconstrained = reconstruct_germano_torch(
                 inverse_input,
@@ -443,7 +488,8 @@ def main():
             )
             save_image(
                 inverse_input_np[ch],
-                f"{label}: {inverse_input_label(a.inverse_input, cutoff_fraction)}",
+                f"{label}: "
+                f"{inverse_input_label(a.inverse_input, cutoff_fraction, inverse_filter_type)}",
                 out / f"{name}_{inverse_input_filename(a.inverse_input)}.png",
                 cmap,
             )
@@ -477,7 +523,10 @@ def main():
             lx,
             ly,
             out / "HW_energy_spectrum_comparison.png",
-            inverse_input_label(a.inverse_input, cutoff_fraction),
+            inverse_input_label(
+                a.inverse_input, cutoff_fraction, inverse_filter_type
+            ),
+            a.smooth_spectrum,
         )
         save_field_spectrum_comparison(
             pd_np,
