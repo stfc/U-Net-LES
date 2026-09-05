@@ -165,6 +165,7 @@ def score_random_reconstructions(args: argparse.Namespace, run_dir: Path) -> Non
     model = ResidualUNetSR(
         len(fields), int(checkpoint["base_channels"]), fine_n // coarse_n,
         output_channels,
+        variational=checkpoint.get("variational", False),
     ).to(device=device, dtype=torch_dtype)
     model.load_state_dict(checkpoint["model"])
     model.eval()
@@ -198,6 +199,7 @@ def score_random_reconstructions(args: argparse.Namespace, run_dir: Path) -> Non
                 checkpoint.get("van_cittert_relaxation", 1.0),
                 checkpoint.get("inverse_filter", parameters.get("inverse_filter", "cutoff")),
                 shell_power,
+                inverse_min_wavenumber=checkpoint.get("inverse_min_wavenumber", 1.0),
             )
             error = reconstructed - dns
             rel = torch.linalg.vector_norm(error.flatten(1), dim=1) / torch.linalg.vector_norm(

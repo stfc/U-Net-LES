@@ -419,6 +419,7 @@ def _print_init_metadata(initial_state: str) -> None:
         "van_cittert_iterations": VAN_CITTERT_ITERATIONS,
         "van_cittert_relaxation": VAN_CITTERT_RELAXATION,
         "inverse_cutoff_fraction": CUTOFF_FRACTION,
+        "inverse_min_wavenumber": INVERSE_MIN_WAVENUMBER,
         "inverse_cutoff_order": CUTOFF_ORDER,
         "inverse_filter": INVERSE_FILTER_TYPE,
         "post_cutoff_fraction": POST_CUTOFF_FRACTION,
@@ -544,7 +545,8 @@ OUTPUT_CHANNELS = int(_checkpoint["model_output_channels"])
 SCALE_FACTOR = validate_grid_pair(FINE_N, COARSE_N)
 
 MODEL = ResidualUNetSR(
-    len(FIELD_NAMES), BASE_CHANNELS, SCALE_FACTOR, OUTPUT_CHANNELS
+    len(FIELD_NAMES), BASE_CHANNELS, SCALE_FACTOR, OUTPUT_CHANNELS,
+    variational=_checkpoint.get("variational", False),
 ).to(device=DEVICE, dtype=TORCH_DTYPE)
 MODEL.load_state_dict(_checkpoint["model"])
 MODEL.eval()
@@ -552,6 +554,12 @@ MODEL.requires_grad_(False)
 
 MEAN = torch.as_tensor(_checkpoint["mean"], dtype=TORCH_DTYPE, device=DEVICE)
 STD = torch.as_tensor(_checkpoint["std"], dtype=TORCH_DTYPE, device=DEVICE)
+INVERSE_MIN_WAVENUMBER = float(os.environ.get(
+    "PBOUT_UNET_INVERSE_MIN_WAVENUMBER",
+    _checkpoint.get("inverse_min_wavenumber", 1.0),
+))
+if not np.isfinite(INVERSE_MIN_WAVENUMBER) or INVERSE_MIN_WAVENUMBER < 0:
+    raise ValueError("PBOUT_UNET_INVERSE_MIN_WAVENUMBER must be finite and nonnegative")
 CUTOFF_FRACTION = _optional_float(
     "PBOUT_UNET_INVERSE_CUTOFF_FRACTION",
     _checkpoint.get("inverse_cutoff_fraction"),
@@ -843,6 +851,7 @@ def _reconstruct_dns(
         CUTOFF_FRACTION,
         CUTOFF_ORDER,
         FILTERED_DNS_SHELL_POWER,
+        min_wavenumber=INVERSE_MIN_WAVENUMBER,
     )
     dns = reconstruct_germano_torch(
         inverse_input,
@@ -894,6 +903,7 @@ def _inverse_germano_only(
         CUTOFF_FRACTION,
         CUTOFF_ORDER,
         FILTERED_DNS_SHELL_POWER,
+        min_wavenumber=INVERSE_MIN_WAVENUMBER,
     )
     dns = reconstruct_germano_torch(
         inverse_input,

@@ -298,8 +298,8 @@ def filtered_dns_spectrum_filter_torch(
             "The filtered-DNS spectrum filter requires a spectrum stored in "
             "the checkpoint."
         )
-    if min_wavenumber < 0:
-        raise ValueError("min_wavenumber must be non-negative.")
+    if not math.isfinite(min_wavenumber) or min_wavenumber < 0:
+        raise ValueError("min_wavenumber must be finite and non-negative.")
     target = torch.as_tensor(
         target_shell_power, dtype=field.dtype, device=field.device
     )
@@ -340,7 +340,7 @@ def filtered_dns_spectrum_filter_torch(
 
 def inverse_input_filter_torch(
     field, lx, ly, filter_type="cutoff", cutoff_fraction=None,
-    cutoff_order=8, target_shell_power=None,
+    cutoff_order=8, target_shell_power=None, min_wavenumber=1.0,
 ):
     """Apply the selected regularization before inverse reconstruction."""
     if filter_type not in INVERSE_FILTER_TYPES:
@@ -350,7 +350,7 @@ def inverse_input_filter_torch(
             field, lx, ly, cutoff_fraction, cutoff_order
         )
     return filtered_dns_spectrum_filter_torch(
-        field, lx, ly, target_shell_power
+        field, lx, ly, target_shell_power, min_wavenumber=min_wavenumber
     )
 
 
@@ -738,7 +738,8 @@ class UpBlock(nn.Module):
 
 class ResidualUNetSR(nn.Module):
     def __init__(
-        self, channels=3, base_channels=24, scale_factor=8, output_channels=2
+        self, channels=3, base_channels=24, scale_factor=8, output_channels=2,
+        variational=True
     ):
         super().__init__()
         b = base_channels
@@ -749,13 +750,22 @@ class ResidualUNetSR(nn.Module):
         self.e3 = ConvBlock(2 * b, 4 * b)
         self.e4 = ConvBlock(4 * b, 8 * b)
         self.bn = ConvBlock(8 * b, 8 * b)
+        self.variational = variational
+        if variational:
+            self.latent_mu = nn.Conv2d(8 * b, 8 * b, 1)
+            self.latent_logvar = nn.Conv2d(8 * b, 8 * b, 1)
         self.d3 = UpBlock(8 * b, 4 * b, 4 * b)
         self.d2 = UpBlock(4 * b, 2 * b, 2 * b)
         self.d1 = UpBlock(2 * b, b, b)
         self.output_channels = output_channels
         self.out = nn.Conv2d(b, output_channels, 1)
 
-    def forward(self, coarse):
+    def forward(self, coarse, *, sample=None, return_kl=False):
+        """Sample during training; use the posterior mean in evaluation.
+
+        Set sample=True for stochastic inference. KL is averaged over the
+        batch, latent channels and spatial cells, against a unit Gaussian.
+        """
         base = periodic_interpolate(
             coarse,
             self.scale_factor,
@@ -766,8 +776,16 @@ class ResidualUNetSR(nn.Module):
         e3 = self.e3(self.pool(e2))
         e4 = self.e4(self.pool(e3))
         bn = self.bn(e4)
+        kl = bn.new_zeros(())
+        if self.variational:
+            mu = self.latent_mu(bn)
+            logvar = self.latent_logvar(bn).clamp(-20.0, 10.0)
+            kl = 0.5 * (mu.square() + logvar.exp() - 1.0 - logvar).mean()
+            sample = self.training if sample is None else sample
+            bn = mu + torch.randn_like(mu) * (0.5 * logvar).exp() if sample else mu
         correction = self.out(self.d1(self.d2(self.d3(bn, e3), e2), e1))
-        return base[:, : self.output_channels] + correction
+        prediction = base[:, : self.output_channels] + correction
+        return (prediction, kl) if return_kl else prediction
 
 
 def calculate_losses(
@@ -793,11 +811,13 @@ def calculate_losses(
     van_cittert_relaxation=1.0,
     inverse_filter_type="cutoff",
     filtered_dns_shell_power=None,
+    inverse_min_wavenumber=1.0,
 ):
     output_channels = 2 if vorticity_from_potential else 3
     output_mean = mean[:, :output_channels]
     output_std = std[:, :output_channels]
-    pf = model(coarse) * output_std + output_mean
+    prediction, kl = model(coarse, return_kl=True)
+    pf = prediction * output_std + output_mean
     pn = (pf - output_mean) / output_std
     inverse_input = inverse_input_filter_torch(
         pf,
@@ -807,6 +827,7 @@ def calculate_losses(
         inverse_cutoff_fraction,
         inverse_cutoff_order,
         filtered_dns_shell_power,
+        min_wavenumber=inverse_min_wavenumber,
     )
     pd = reconstruct_germano_torch(
         inverse_input,
@@ -841,6 +862,7 @@ def calculate_losses(
         {
             "total": total,
             "filtered": lf,
+            "kl": kl,
             "dns": ld,
             "dns_U": dns_absolute_error[:, 0].mean(),
             "dns_V": dns_absolute_error[:, 1].mean(),

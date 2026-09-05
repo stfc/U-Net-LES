@@ -14,6 +14,27 @@ source /gpfs/mcc/HT04543/jxc06/jxc74-jxc06/programs/miniconda3/etc/profile.d/con
 conda activate py311
 ```
 
+## Variational U-Net
+
+New training runs use a Gaussian variational bottleneck by default. Two
+1x1 convolution heads predict latent means and log variances at the deepest
+encoder resolution. Training samples with the reparameterization trick and
+adds `--lambda-kl` (default `1e-4`) times KL divergence to a unit Gaussian,
+averaged over batch, latent channels, and spatial cells, to the existing DNS
+and vorticity objective. Log variance is clamped to [-20, 10] for stability.
+KL is logged as `train_kl` / `validation_kl` in CSV and in TensorBoard.
+
+Evaluation and BOUT++ use the posterior mean for reproducibility. Python
+callers can request stochastic predictions with `model(x, sample=True)`;
+`model(x, return_kl=True)` returns `(prediction, kl)`. Skip connections and
+the interpolated residual remain, so this is a conditional reconstruction
+model, not an unconditional generator. The KL weight may need tuning for
+your data, especially with normalization disabled.
+
+Existing deterministic checkpoints still load in inference and diagnostics.
+To resume their training, pass `--no-variational`. Train a new run to obtain
+a variational model; existing weights are not automatically converted.
+
 ## Training
 
 `train_germano_unet.py` recursively reads `.npz` DNS snapshots from the
@@ -54,7 +75,18 @@ Training with the default `--vorticity-from-potential` makes the U-Net predict
 `--inverse-filter filtered_dns_spectrum` computes the mean radial Fourier
 power of the actual filtered DNS over the training split before epoch 1. The
 reference is stored in the checkpoint, and the pre-inversion filter attenuates
-only U-Net shells whose power exceeds it. The default `cutoff` retains the
+only U-Net shells whose power exceeds it. Set `--inverse-min-wavenumber 2.0`
+to leave physical wavenumbers `k <= 2.0` unchanged. The default is `1.0`;
+`0` applies spectrum matching to all nonzero modes. This threshold is in
+physical angular wavenumber units (`k_x = 2*pi*m/Lx`), not a Nyquist fraction.
+It affects only `filtered_dns_spectrum`; `--inverse-cutoff-fraction` retains
+its separate meaning for `cutoff`.
+
+With the SLURM wrapper, use `INVERSE_MIN_WAVENUMBER=2.0 sbatch run.sh`.
+The threshold is saved in checkpoints. Standalone inference accepts
+`--inverse-min-wavenumber 2.0` to override it; BOUT++ accepts
+`PBOUT_UNET_INVERSE_MIN_WAVENUMBER=2.0`. Old checkpoints default to `1.0`.
+ The default `cutoff` retains the
 existing smooth exponential cutoff and its fraction/order options.
 
 Important output files are:

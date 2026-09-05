@@ -23,6 +23,7 @@ LX="${LX:-50.176}"
 
 ALPHA="${ALPHA:-$(awk -v lx="${LX}" -v n="${LES_N}" 'BEGIN {print lx / n}')}"
 INVERSE_CUTOFF_FRACTION=0.707107
+INVERSE_MIN_WAVENUMBER="${INVERSE_MIN_WAVENUMBER:-1.0}"
 INVERSE_CUTOFF_ORDER="${INVERSE_CUTOFF_ORDER:-8}"
 
 CHECKPOINT_EVERY="${CHECKPOINT_EVERY:-25}"
@@ -40,6 +41,7 @@ python train_germano_unet.py \
   --alpha "${ALPHA}" \
   --inverse-cutoff-fraction "${INVERSE_CUTOFF_FRACTION}" \
   --inverse-cutoff-order "${INVERSE_CUTOFF_ORDER}" \
+  --inverse-min-wavenumber "${INVERSE_MIN_WAVENUMBER}" \
   --precision float64 \
   --lx "${LX}" \
   --ly 50.176 \
@@ -48,6 +50,8 @@ python train_germano_unet.py \
   --diagnostic-every "${DIAGNOSTIC_EVERY}" \
   --post-filter none \
   --no-normalize \
-  --inverse-filter filtered_dns_spectrum
+  --inverse-filter filtered_dns_spectrum \
+  --inverse-min-wavenumber 10.0
+
 
 #python infer_germano_unet.py --checkpoint germano_training_output_32_v3/checkpoints/best.pt --input fields_HW_run0_time501.npz --output-dir inference_output

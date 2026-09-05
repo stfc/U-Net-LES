@@ -140,6 +140,8 @@ def parse_args():
         default="checkpoint",
         help="Pre-inversion spectral filter (default: checkpoint setting)",
     )
+    p.add_argument("--inverse-min-wavenumber", type=float,
+                   help="Physical k threshold for filtered_dns_spectrum (default: checkpoint)")
     p.add_argument("--van-cittert-iterations", type=int)
     p.add_argument("--van-cittert-relaxation", type=float)
     p.add_argument(
@@ -219,6 +221,13 @@ def main():
         if vorticity_from_potential
         else "independent_channel",
     )
+    inverse_min_wavenumber = (
+        a.inverse_min_wavenumber if a.inverse_min_wavenumber is not None else
+        float(os.environ.get("PBOUT_UNET_INVERSE_MIN_WAVENUMBER",
+                             c.get("inverse_min_wavenumber", 1.0)))
+    )
+    if not np.isfinite(inverse_min_wavenumber) or inverse_min_wavenumber < 0:
+        raise ValueError("inverse-min-wavenumber must be finite and nonnegative")
     cutoff_fraction = optional_environment_float(
         "PBOUT_UNET_INVERSE_CUTOFF_FRACTION",
         c.get("inverse_cutoff_fraction"),
@@ -306,6 +315,7 @@ def main():
         "van_cittert_iterations": van_cittert_iterations,
         "van_cittert_relaxation": van_cittert_relaxation,
         "inverse_cutoff_fraction": cutoff_fraction,
+        "inverse_min_wavenumber": inverse_min_wavenumber,
         "inverse_cutoff_order": cutoff_order,
         "inverse_filter": inverse_filter_type,
         "post_cutoff_fraction": post_cutoff_fraction,
@@ -324,6 +334,7 @@ def main():
         base_channels,
         fine_n // coarse_n,
         model_output_channels,
+        variational=c.get("variational", False),
     ).to(device=device, dtype=torch_dtype)
     model.load_state_dict(c["model"])
     model.eval()
@@ -373,6 +384,7 @@ def main():
                 cutoff_fraction,
                 cutoff_order,
                 filtered_dns_shell_power,
+                min_wavenumber=inverse_min_wavenumber,
             )
             pd_unconstrained = reconstruct_germano_torch(
                 inverse_input,

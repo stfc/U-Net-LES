@@ -27,15 +27,17 @@ def calculate_training_losses(
     inverse_filter_type, filtered_dns_shell_power,
     post_cutoff_fraction, post_cutoff_order, post_filter_type,
     inverse_method="exact", van_cittert_iterations=1,
-    van_cittert_relaxation=1.0,
+    van_cittert_relaxation=1.0, lambda_kl=1e-4,
+    inverse_min_wavenumber=1.0,
 ):
     """Return DNS value loss with an optional normalized vorticity term."""
-    _, _, predicted_filtered, predicted_dns = calculate_losses(
+    _, auxiliary, predicted_filtered, predicted_dns = calculate_losses(
         model, coarse, filtered_target, dns_target, mean, std, dns_std,
         alpha, lx, ly, lambda_dns, vorticity_from_potential,
         inverse_cutoff_fraction, inverse_cutoff_order,
         inverse_filter_type=inverse_filter_type,
         filtered_dns_shell_power=filtered_dns_shell_power,
+        inverse_min_wavenumber=inverse_min_wavenumber,
         post_cutoff_fraction=post_cutoff_fraction,
         post_cutoff_order=post_cutoff_order,
         post_filter_type=post_filter_type,
@@ -52,10 +54,12 @@ def calculate_training_losses(
     vorticity_loss = torch.abs(
         (predicted_dns[:, 2] - dns_target[:, 2]) / vorticity_std
     ).mean()
-    total = value_loss + lambda_vorticity * vorticity_loss
+    kl = auxiliary["kl"]
+    total = value_loss + lambda_vorticity * vorticity_loss + lambda_kl * kl
     values = {
         "total": total,
         "dns": value_loss,
+        "kl": kl,
         "dns_U": density_loss,
         "dns_V": potential_loss,
         "dns_P": vorticity_loss,
@@ -228,6 +232,7 @@ def save_epoch_diagnostics(
     van_cittert_relaxation,
     field_names,
     output_root,
+    inverse_min_wavenumber=1.0,
 ):
     """Save model and DNS diagnostics for a fixed validation snapshot."""
     coarse, filtered_target, dns_target = dataset[0]
@@ -262,6 +267,7 @@ def save_epoch_diagnostics(
         inverse_method,
         van_cittert_iterations,
         van_cittert_relaxation,
+        inverse_min_wavenumber=inverse_min_wavenumber,
     )
     coarse_physical = (coarse_batch * std + mean)[0].cpu().numpy()
     predicted_filtered = predicted_filtered[0].cpu().numpy()
@@ -390,6 +396,8 @@ def run_epoch(
     van_cittert_iterations,
     van_cittert_relaxation,
     optimizer=None,
+    lambda_kl=1e-4,
+    inverse_min_wavenumber=1.0,
 ):
     training = optimizer is not None
     model.train(training)
@@ -399,6 +407,7 @@ def run_epoch(
         "dns_U",
         "dns_V",
         "dns_P",
+        "kl",
     ]
     totals = {
         name: 0.0
@@ -443,6 +452,8 @@ def run_epoch(
                 inverse_method,
                 van_cittert_iterations,
                 van_cittert_relaxation,
+                lambda_kl=lambda_kl,
+                inverse_min_wavenumber=inverse_min_wavenumber,
             )
             if training:
                 loss.backward()
@@ -583,6 +594,10 @@ def parse_args():
         help="Learning-rate multiplier at each step (default: 0.5)",
     )
     p.add_argument("--base-channels", type=int, default=24)
+    p.add_argument("--variational", action=argparse.BooleanOptionalAction, default=True,
+                   help="Use a Gaussian variational bottleneck (default: enabled)")
+    p.add_argument("--lambda-kl", type=float, default=1e-4,
+                   help="Weight of mean latent KL divergence (default: 1e-4)")
     p.add_argument(
         "--precision",
         choices=("float32", "float64"),
@@ -659,6 +674,11 @@ def parse_args():
         ),
     )
     p.add_argument("--inverse-cutoff-order", type=float, default=8.0)
+    p.add_argument(
+        "--inverse-min-wavenumber", type=float, default=1.0,
+        help="Physical k threshold for filtered_dns_spectrum: modes k <= this "
+             "pass unchanged (default: 1.0; 0 protects only the mean)",
+    )
     p.add_argument(
         "--inverse-filter",
         choices=INVERSE_FILTER_TYPES,
@@ -769,6 +789,8 @@ def run_training(a):
         raise ValueError("lambda-first-derivative must be non-negative.")
     if a.lambda_second_derivative < 0:
         raise ValueError("lambda-second-derivative must be non-negative.")
+    if not np.isfinite(a.lambda_kl) or a.lambda_kl < 0:
+        raise ValueError("--lambda-kl must be finite and nonnegative")
     if not np.isfinite(a.lambda_vorticity) or a.lambda_vorticity < 0:
         raise ValueError("lambda-vorticity must be finite and non-negative.")
     all_directions_periodic = a.periodic_x and a.periodic_y
@@ -788,6 +810,8 @@ def run_training(a):
             "Random periodic shift disabled because not all directions are "
             f"periodic (nonperiodic: {', '.join(nonperiodic)})."
         )
+    if not np.isfinite(a.inverse_min_wavenumber) or a.inverse_min_wavenumber < 0:
+        raise ValueError("inverse-min-wavenumber must be finite and nonnegative")
     inverse_cutoff_fraction = a.inverse_cutoff_fraction or None
     post_cutoff_fraction = a.post_cutoff_fraction or None
     if a.post_filter in ("high_order", "gaussian"):
@@ -880,7 +904,7 @@ def run_training(a):
         "Training objective: mean absolute DNS-space error in electron "
         "density and electrostatic potential plus "
         f"{a.lambda_vorticity:g} times normalized vorticity error "
-        "(no filtered or derivative losses)."
+        f"plus {a.lambda_kl if a.variational else 0:g} times mean latent KL."
     )
     if device.type == "cuda":
         print("GPU:", torch.cuda.get_device_name(0))
@@ -890,6 +914,7 @@ def run_training(a):
         a.base_channels,
         scale_factor,
         model_output_channels,
+        variational=a.variational,
     ).to(device=device, dtype=torch_dtype)
     opt = torch.optim.AdamW(
         model.parameters(), lr=a.learning_rate, weight_decay=1e-6
@@ -917,6 +942,8 @@ def run_training(a):
     if a.resume:
         c = load_checkpoint(a.resume, device)
         validate_hw_checkpoint(c)
+        if c.get("variational", False) != a.variational:
+            raise ValueError("Resume architecture mismatch: use --no-variational for legacy checkpoints.")
         checkpoint_derives_vorticity = (
             c["vorticity_mode"] == "laplacian_of_potential"
         )
@@ -969,6 +996,10 @@ def run_training(a):
             scheduler._last_lr = [resumed_lr for _ in opt.param_groups]
         start = int(c["epoch"]) + 1
         best = float(c["validation_loss"])
+        if c.get("inverse_min_wavenumber", 1.0) != a.inverse_min_wavenumber:
+            best = float("inf")
+        if c.get("lambda_kl", 0.0) != a.lambda_kl:
+            best = float("inf")
         checkpoint_lambda_vorticity = float(
             c.get(
                 "lambda_vorticity",
@@ -1003,6 +1034,8 @@ def run_training(a):
         optimizer_amsgrad=opt.param_groups[0]["amsgrad"],
         gradient_clip_norm=1.0,
         model="ResidualUNetSR",
+        variational=a.variational,
+        lambda_kl=a.lambda_kl,
         model_input_channels=len(a.fields),
         model_output_channels=model_output_channels,
         trainable_model_parameters=sum(
@@ -1043,11 +1076,12 @@ def run_training(a):
         lambda_second_derivative=0.0,
         lambda_vorticity=a.lambda_vorticity,
         training_objective=(
-            "dns_l1_density_potential_plus_normalized_vorticity"
+            "dns_l1_density_potential_plus_normalized_vorticity_plus_kl"
         ),
         loss_channels=list(a.fields),
         effective_loss_weights={
             "dns_density_potential": 1.0,
+            "kl": a.lambda_kl if a.variational else 0.0,
             "filtered": 0.0,
             "vorticity": a.lambda_vorticity,
             "first_derivative": 0.0,
@@ -1121,6 +1155,7 @@ def run_training(a):
             a.van_cittert_relaxation,
             a.fields,
             a.output_dir / "training_diagnostics",
+            inverse_min_wavenumber=a.inverse_min_wavenumber,
         )
     history = []
     for epoch in range(start, a.epochs + 1):
@@ -1151,6 +1186,8 @@ def run_training(a):
             a.van_cittert_iterations,
             a.van_cittert_relaxation,
             opt,
+            lambda_kl=a.lambda_kl,
+            inverse_min_wavenumber=a.inverse_min_wavenumber,
         )
         vm = run_epoch(
             model,
@@ -1178,6 +1215,8 @@ def run_training(a):
             a.inverse_method,
             a.van_cittert_iterations,
             a.van_cittert_relaxation,
+            lambda_kl=a.lambda_kl,
+            inverse_min_wavenumber=a.inverse_min_wavenumber,
         )
         row = {
             "epoch": epoch,
@@ -1196,6 +1235,8 @@ def run_training(a):
         c = {
             "epoch": epoch,
             "model": model.state_dict(),
+            "variational": a.variational,
+            "lambda_kl": a.lambda_kl,
             "optimizer": opt.state_dict(),
             "scheduler": scheduler.state_dict(),
             "validation_loss": vm["total"],
@@ -1233,6 +1274,7 @@ def run_training(a):
             "random_periodic_shift_requested": a.random_periodic_shift,
             "random_periodic_shift": use_random_periodic_shift,
             "inverse_cutoff_fraction": inverse_cutoff_fraction,
+            "inverse_min_wavenumber": a.inverse_min_wavenumber,
             "inverse_cutoff_order": a.inverse_cutoff_order,
             "inverse_filter": a.inverse_filter,
             "filtered_dns_shell_power": filtered_dns_shell_power_np,
@@ -1281,6 +1323,7 @@ def run_training(a):
                 a.van_cittert_relaxation,
                 a.fields,
                 a.output_dir / "training_diagnostics",
+                inverse_min_wavenumber=a.inverse_min_wavenumber,
             )
         with (a.output_dir / "training_history.csv").open("w", newline="") as f:
             w = csv.DictWriter(f, fieldnames=list(history[0]))
@@ -1319,6 +1362,8 @@ def run_training(a):
         a.inverse_method,
         a.van_cittert_iterations,
         a.van_cittert_relaxation,
+        lambda_kl=a.lambda_kl,
+        inverse_min_wavenumber=a.inverse_min_wavenumber,
     )
     for name, value in test.items():
         writer.add_scalar(f"metrics/test/{name}", value, int(c["epoch"]))
