@@ -58,8 +58,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("dataset3_fields", type=Path, nargs="?",
                         help="Optional third model dataset directory")
     parser.add_argument(
-        "--output-dir", type=Path, default=Path("results_U-Net/comparison"),
-        help="Output directory (default: results_U-Net/comparison)",
+        "--output-dir", type=Path, default=Path("validation_U-Net/comparison"),
+        help="Output directory (default: validation_U-Net/comparison)",
     )
     parser.add_argument(
         "--base-dir",
