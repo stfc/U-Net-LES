@@ -12,10 +12,11 @@ not need an argument parser::
   PBOUT_UNET_CHECKPOINT=/path/to/best.pt
   PBOUT_UNET_DNS_PATH=/path/to/dns_snapshot.npz
   PBOUT_UNET_ALPHA=0.25                  # physical Germano filter width
-  PBOUT_UNET_DNS_INIT=0                  # 0=filtered LES, 1=filtered DNS, 2=DNS
+  PBOUT_UNET_DNS_INIT=0                  # 0=filtered LES, 1=filtered DNS, 2=DNS, 3=DNS replay
   PBOUT_UNET_RECONSTRUCT_CHANNELS=none    # mode-1 U-Net channels
   PBOUT_UNET_DEVICE=cuda                 # or cpu; default is automatic
-  PBOUT_UNET_IMPLICIT=1                  # return -(DNS-LES) brackets
+  PBOUT_UNET_IMPLICIT=1                  # 0=DNS brackets, 1=-(DNS-LES)
+  PBOUT_UNET_DNS_FIELD_DIR=results_U-Net_DNS/fields  # mode-3 snapshots
   PBOUT_UNET_WRITE_DIAGNOSTICS=2         # 0=off, 1=all, 2=fields only (default)
   PBOUT_UNET_OMEGA_FROM_POTENTIAL=1      # omega = Laplacian(phi) at DNS scale
   PBOUT_UNET_LAPLACIAN_ORDER=2            # periodic Laplacian order (2 or 4)
@@ -25,7 +26,7 @@ not need an argument parser::
   PBOUT_UNET_INVERSE_METHOD=exact          # exact or van_cittert
   PBOUT_UNET_VAN_CITTERT_ITERATIONS=1
   PBOUT_UNET_VAN_CITTERT_RELAXATION=1
-  PBOUT_UNET_POST_CUTOFF_FRACTION=none
+  PBOUT_UNET_POST_CUTOFF_FRACTION=none    # auto = LES Nyquist (coarse_n/fine_n)
   PBOUT_UNET_POST_CUTOFF_ORDER=8
   PBOUT_UNET_POST_FILTER=none             # none/high_order/gaussian
 The training-consistent inverse cutoff regularizes the U-Net output before
@@ -46,25 +47,27 @@ import warnings
 
 from pathlib import Path
 
-# BOUT++ embeds Python, so activating conda in the shell does not always add
-# that environment's site-packages to the embedded interpreter.  Make the
-# PyTorch environment explicit before importing torch.  This can be overridden
-# for another installation without editing this file.
-_DEFAULT_SITE_PACKAGES = (
-    "/gpfs/mcc/HT04543/jxc06/jxc74-jxc06/programs/miniconda3/envs/py311/"
-    "lib/python3.11/site-packages"
-)
+# BOUT++ embeds Python and may not discover an activated virtual environment.
+# Select packages matching its ABI, including the BOUT-Hermes3 Python 3.13 env.
+_DEFAULT_SITE_PACKAGES = {
+    (3, 11): (
+        "/gpfs/mcc/HT04543/jxc06/jxc74-jxc06/programs/miniconda3/envs/py311/"
+        "lib/python3.11/site-packages"
+    ),
+    (3, 13): str(Path.home() / ".pyenvs/BOUT-Hermes3/lib/python3.13/site-packages"),
+}.get(sys.version_info[:2], "")
 _SITE_PACKAGES = os.environ.get(
     "PBOUT_UNET_SITE_PACKAGES", _DEFAULT_SITE_PACKAGES
 )
-if _SITE_PACKAGES and sys.version_info[:2] != (3, 11):
+_SITE_PACKAGES = os.path.expanduser(_SITE_PACKAGES)
+_site_version = re.search(r"(?:^|/)python(\d+)\.(\d+)(?:/|$)", _SITE_PACKAGES)
+if _site_version and tuple(map(int, _site_version.groups())) != sys.version_info[:2]:
     raise RuntimeError(
-        "pBOUT-unet uses the py311 PyTorch environment, but the BOUT++ "
+        f"PBOUT_UNET_SITE_PACKAGES={_SITE_PACKAGES!r} targets Python "
+        f"{_site_version.group(1)}.{_site_version.group(2)}, but the BOUT++ "
         f"executable embeds Python {sys.version_info.major}."
-        f"{sys.version_info.minor}. Rebuild hasegawa-wakatani against "
-        "/gpfs/mcc/HT04543/jxc06/jxc74-jxc06/programs/miniconda3/envs/"
-        "py311/lib/libpython3.11.so, or set PBOUT_UNET_SITE_PACKAGES to a "
-        "PyTorch installation matching the embedded Python version."
+        f"{sys.version_info.minor}. Unset PBOUT_UNET_SITE_PACKAGES to use "
+        "the default matching environment, or set it to a matching installation."
     )
 if _SITE_PACKAGES and _SITE_PACKAGES not in sys.path:
     site.addsitedir(_SITE_PACKAGES)
@@ -77,6 +80,8 @@ warnings.filterwarnings(
 
 import numpy as np
 import torch
+
+from dns_time_series import DNSTimeSeries
 
 from germano_common import (
     ResidualUNetSR,
@@ -104,6 +109,8 @@ from visualization_common import (
     save_arakawa_comparison,
     save_arakawa_dns_field_comparison,
     save_dns_snapshot,
+    save_dns_replay_comparison,
+    save_les_arakawa_spectra,
     save_energy_history,
     save_field_centerline_comparison,
     save_field_error_images,
@@ -122,20 +129,47 @@ CHECKPOINT = Path(os.environ.get("PBOUT_UNET_CHECKPOINT", _DEFAULT_CHECKPOINT))
 _dns_path = os.environ.get("PBOUT_UNET_DNS_PATH")
 DNS_PATH = Path(_dns_path).expanduser() if _dns_path else None
 
+_dns_init_value = os.environ.get("PBOUT_UNET_DNS_INIT", "0")
+_dns_init_error = (
+    f"PBOUT_UNET_DNS_INIT must be 0, 1, 2, or 3; got {_dns_init_value!r}. "
+    "Choose 0=filtered LES, 1=filtered DNS, 2=unfiltered DNS, or 3=DNS replay."
+)
 try:
-    DNS_INIT = int(os.environ.get("PBOUT_UNET_DNS_INIT", "0"))
+    DNS_INIT = int(_dns_init_value)
 except ValueError as error:
-    raise ValueError("PBOUT_UNET_DNS_INIT must be 0, 1, or 2") from error
-if DNS_INIT not in (0, 1, 2):
-    raise ValueError("PBOUT_UNET_DNS_INIT must be 0, 1, or 2")
+    raise ValueError(_dns_init_error) from error
+if DNS_INIT not in (0, 1, 2, 3):
+    raise ValueError(_dns_init_error)
 
-# DNS_INIT is the single switch for the three requested behaviors.
+# DNS_INIT selects the field source independently of the Arakawa return format.
 BOUT_INPUT = Path(
     os.environ.get("PBOUT_UNET_BOUT_INP", "data/BOUT.inp")
 ).expanduser()
-IMPLICIT = os.environ.get("PBOUT_UNET_IMPLICIT", "1").lower() not in {
-    "0", "false", "no", "off"
-}
+_implicit_value = os.environ.get("PBOUT_UNET_IMPLICIT", "1").strip().lower()
+if _implicit_value not in {"0", "1"}:
+    raise ValueError(
+        f"PBOUT_UNET_IMPLICIT must be 0 or 1; got {_implicit_value!r}. "
+        "For DNS replay, set PBOUT_UNET_DNS_INIT=3."
+    )
+DNS_REPLAY = DNS_INIT == 3
+IMPLICIT = _implicit_value == "1"
+DNS_FIELD_DIR = Path(os.environ.get(
+    "PBOUT_UNET_DNS_FIELD_DIR", "results_U-Net_DNS/fields"
+)).expanduser()
+_DNS_TIME_SERIES = None
+
+
+def _dns_at_time(simtime, batch_size=1):
+    global _DNS_TIME_SERIES
+    if _DNS_TIME_SERIES is None:
+        _DNS_TIME_SERIES = DNSTimeSeries(DNS_FIELD_DIR, FINE_N, NUMPY_DTYPE)
+    fields = _DNS_TIME_SERIES.interpolate(simtime)
+    if fields.shape[0] == 1 and batch_size != 1:
+        fields = np.repeat(fields, batch_size, axis=0)
+    if fields.shape[0] != batch_size:
+        raise ValueError("DNS snapshot batch size does not match incoming BOUT++ fields")
+    return torch.as_tensor(fields, device=DEVICE, dtype=TORCH_DTYPE)
+
 try:
     WRITE_DIAGNOSTICS = int(
         os.environ.get("PBOUT_UNET_WRITE_DIAGNOSTICS", "2")
@@ -392,6 +426,7 @@ def _print_init_metadata(initial_state: str) -> None:
         "dns_init": DNS_INIT,
         "initial_state": initial_state,
         "implicit": IMPLICIT,
+        "dns_field_dir": str(DNS_FIELD_DIR) if DNS_REPLAY else None,
         "write_diagnostics": WRITE_DIAGNOSTICS,
         "vorticity_mode": VORTICITY_MODE,
         "dns_vorticity_mode": DNS_VORTICITY_MODE,
@@ -601,10 +636,13 @@ if CUTOFF_FRACTION is not None and not 0 < CUTOFF_FRACTION <= 1:
     )
 if not np.isfinite(CUTOFF_ORDER) or CUTOFF_ORDER <= 0:
     raise ValueError("PBOUT_UNET_INVERSE_CUTOFF_ORDER must be positive.")
-POST_CUTOFF_FRACTION = _optional_float(
-    "PBOUT_UNET_POST_CUTOFF_FRACTION",
-    _checkpoint.get("post_cutoff_fraction"),
-)
+if os.environ.get("PBOUT_UNET_POST_CUTOFF_FRACTION", "").strip().lower() == "auto":
+    POST_CUTOFF_FRACTION = COARSE_N / FINE_N
+else:
+    POST_CUTOFF_FRACTION = _optional_float(
+        "PBOUT_UNET_POST_CUTOFF_FRACTION",
+        _checkpoint.get("post_cutoff_fraction"),
+    )
 POST_CUTOFF_ORDER = float(
     os.environ.get(
         "PBOUT_UNET_POST_CUTOFF_ORDER",
@@ -1041,6 +1079,9 @@ def initFlow(npv):
         and use the fine DNS grid when no reconstruction channels are selected.
         With selected channels, downsample BOUT++ to the coarse grid and use
         the U-Net to reconstruct a fine-grid inverse-Germano DNS for Arakawa.
+    DNS_INIT=3:
+        initialize as mode 0; use time-interpolated DNS snapshots instead
+        of reconstruction, then filter and downsample the Arakawa terms.
     DNS_INIT=2:
         initialize from the reference DNS field, do not apply filtering
         or downsampling, and use the DNS fields directly.
@@ -1060,7 +1101,7 @@ def initFlow(npv):
     if DNS_PATH is None:
         raise ValueError(
             "PBOUT_UNET_DNS_PATH is required for PBOUT_UNET_DNS_INIT "
-            "modes 0, 1, and 2."
+            "modes 0, 1, 2, and 3."
         )
     if not DNS_PATH.is_file():
         raise FileNotFoundError(
@@ -1071,7 +1112,7 @@ def initFlow(npv):
     simulation_fields = _load_dns_uvp(DNS_PATH)
     _INITIAL_DNS_REFERENCE = simulation_fields.copy()
 
-    if DNS_INIT in (0, 1):
+    if DNS_INIT in (0, 1, 3):
         source_fields = np.stack(
             [
                 germano_filter(channel, ALPHA, LX, LY)
@@ -1084,7 +1125,7 @@ def initFlow(npv):
     source_torch = torch.from_numpy(source_fields[None]).to(
         device=DEVICE, dtype=TORCH_DTYPE
     )
-    if DNS_INIT == 0:
+    if DNS_INIT in (0, 3):
         coarse_torch = _spectral_resize_torch(source_torch, COARSE_N)
         fields = coarse_torch[0].detach().cpu().numpy().astype(
             NUMPY_DTYPE, copy=False
@@ -1108,7 +1149,11 @@ def initFlow(npv):
         initial_state = "original unfiltered DNS snapshot"
 
     with torch.inference_mode():
-        if DNS_INIT == 0:
+        if DNS_REPLAY:
+            initial_dns = _dns_at_time(0.0)
+            initial_reconstructed_vorticity = initial_dns[:, 2:3]
+            diagnostic_mode = "time-interpolated DNS snapshots"
+        elif DNS_INIT == 0:
             initial_dns, _, _, initial_reconstructed_vorticity = _reconstruct_dns(
                 coarse_torch
             )
@@ -1184,7 +1229,7 @@ def initFlow(npv):
             reference_label="Reference DNS Arakawa",
             current_terms_label=(
                 "Reconstructed DNS Arakawa"
-                if DNS_INIT in (0, 1)
+                if DNS_INIT in (0, 1, 3)
                 else (
                     "Filtered DNS Arakawa"
                     if DNS_INIT == 1
@@ -1200,10 +1245,11 @@ def initFlow(npv):
     print("\n\n", flush=True)
 
     print(
-        f"Initialized BOUT++ from {initial_state} {DNS_PATH};\n"
+        f"Initialized BOUT++ from {initial_state} "
+        f"{DNS_PATH};\n"
         f"resolution={fields.shape[-1]}, Lx={LX}, Ly={LY};\n"
         f"Germano filter="
-        f"{'enabled' if DNS_INIT in (0, 1) else 'disabled'}"
+        f"{'enabled' if DNS_INIT in (0, 1, 3) else 'disabled'}"
         f", alpha={ALPHA:g}; diagnostic mode={diagnostic_mode};\n"
         + (
             f"saved fields to {fields_image_output} and spectra to "
@@ -1221,6 +1267,47 @@ def initFlow(npv):
     )
 
     return fields.reshape(-1).astype(np.float64, copy=False)
+
+
+@torch.inference_mode()
+def _save_replay_comparisons(les_fields, interpolated_dns, time_step, simtime):
+    # Reconstruct only for diagnostics; the solver continues to use replay DNS.
+    reconstructed, _, _, _ = _reconstruct_dns(les_fields)
+    reconstructed_terms = _arakawa_terms_torch(reconstructed)
+    interpolated_terms = _arakawa_terms_torch(interpolated_dns)
+
+    def coarse_terms(terms):
+        return torch.cat([
+            _spectral_resize_torch(
+                _germano_filter_torch(term) if ALPHA > 0 else term, COARSE_N
+            ) for term in terms
+        ], dim=1)
+
+    comparisons = (
+        ("fields", reconstructed, interpolated_dns, FIELD_NAMES),
+        ("arakawa_dns", torch.cat(reconstructed_terms, dim=1),
+         torch.cat(interpolated_terms, dim=1), ("J(V,P)", "J(V,U)")),
+        ("arakawa_les", coarse_terms(reconstructed_terms),
+         coarse_terms(interpolated_terms), ("Filtered J(V,P)", "Filtered J(V,U)")),
+    )
+    for name, current, reference, labels in comparisons:
+        current_np = current.detach().cpu().double().numpy()
+        reference_np = reference.detach().cpu().double().numpy()
+        for batch in range(current.shape[0]):
+            suffix = "" if current.shape[0] == 1 else f"_batch{batch:03d}"
+            if name == "arakawa_les":
+                save_les_arakawa_spectra(
+                    current_np[batch], reference_np[batch], LX, LY,
+                    Path("results_U-Net") / "images" /
+                    f"arakawa_les_spectra_time{time_step:07d}{suffix}.png",
+                    simtime, dns_n=FINE_N,
+                )
+            save_dns_replay_comparison(
+                current_np[batch], reference_np[batch], labels,
+                Path("results_U-Net") / "images" /
+                f"{name}_unet_vs_interpolated_time{time_step:07d}{suffix}.png",
+                f"{name}: U-Net vs interpolated DNS, step {time_step}, t={simtime:g}",
+            )
 
 
 @torch.inference_mode()
@@ -1248,7 +1335,12 @@ def findLESTerms(pLES):
     )
 
     coarse_fields = None
-    if DNS_INIT == 0:
+    if DNS_REPLAY:
+        dns = _dns_at_time(simtime, simulation_fields.shape[0])
+        unet_output = dns
+        inverse_filtered_output = dns
+        reconstructed_vorticity = dns[:, 2:3]
+    elif DNS_INIT == 0:
         coarse_fields = simulation_fields
         (
             dns,
@@ -1284,9 +1376,30 @@ def findLESTerms(pLES):
         inverse_filtered_output = simulation_fields
         reconstructed_vorticity = _vorticity_from_potential(dns)
 
+    # if DNS_INIT in (0, 1, 3):
+    #     if _INITIAL_DNS_REFERENCE is None:
+    #         raise RuntimeError("initFlow must load the initial DNS before findLESTerms")
+    #     # Match each reconstructed U/V plane to its initial DNS absolute maximum.
+    #     initial_max = torch.as_tensor(
+    #         np.max(np.abs(_INITIAL_DNS_REFERENCE[:2]), axis=(-2, -1)),
+    #         device=dns.device,
+    #         dtype=dns.dtype,
+    #     ).view(1, 2, 1, 1)
+    #     reconstructed_max = dns[:, :2].abs().amax(dim=(-2, -1), keepdim=True)
+    #     denominator = torch.where(
+    #         reconstructed_max > 0, reconstructed_max, torch.ones_like(reconstructed_max)
+    #     )
+    #     dns = torch.cat((dns[:, :2] * (initial_max / denominator), dns[:, 2:]), dim=1)
+    #     # Update potential-derived omega before calculating the vorticity terms.
+    #     dns = _set_omega_from_potential(dns)
+    #     dns = _restore_vorticity_mean(dns, simulation_fields)
+    #     reconstructed_vorticity = dns[:, FIELD_NAMES.index("P"):][:, :1]
+
     diagnostics_due = WRITE_DIAGNOSTICS and _field_output_due(simtime)
     simulation_fields_np = None
     if diagnostics_due:
+        if DNS_REPLAY and WRITE_DIAGNOSTICS == 1:
+            _save_replay_comparisons(simulation_fields, dns, time_step, simtime)
         dns_np = dns.detach().cpu().double().numpy()
         les_input_np = (
             coarse_fields if coarse_fields is not None else simulation_fields
@@ -1390,7 +1503,7 @@ def findLESTerms(pLES):
                         },
                     )
 
-    arakawa_fields = simulation_fields if DNS_INIT == 2 else dns
+    arakawa_fields = simulation_fields if DNS_INIT == 2 and not DNS_REPLAY else dns
     dx_dns = LX / arakawa_fields.shape[-2]
     dy_dns = LY / arakawa_fields.shape[-1]
 
@@ -1402,11 +1515,11 @@ def findLESTerms(pLES):
     # grid on which BOUT++ evolves the fields.  In DNS_INIT=1 with no selected
     # reconstruction channels, the filtered Arakawa terms stay on the fine
     # grid; selecting channels requires returning them on the coarse grid.
-    if DNS_INIT in (0, 1) and ALPHA > 0:
+    if DNS_INIT in (0, 1, 3) and ALPHA > 0:
         bracket_vort = _germano_filter_torch(bracket_vort)
         bracket_n = _germano_filter_torch(bracket_n)
 
-    if DNS_INIT == 0 or (DNS_INIT == 1 and RECONSTRUCT_CHANNELS):
+    if DNS_INIT in (0, 3) or (DNS_INIT == 1 and RECONSTRUCT_CHANNELS):
         bracket_vort = _spectral_resize_torch(bracket_vort, COARSE_N)
         bracket_n = _spectral_resize_torch(bracket_n, COARSE_N)
 

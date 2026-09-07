@@ -90,6 +90,72 @@ def save_png_animation(
     return output_path
 
 
+def save_les_arakawa_spectra(reconstructed, interpolated, lx, ly, output_path, simtime, dns_n=None):
+    """Compare spectra of filtered/downsampled brackets before implicit subtraction."""
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    spectrum_n = reconstructed.shape[-1] if dns_n is None else dns_n
+    axis_k, _ = isotropic_spectrum(np.zeros((spectrum_n, spectrum_n)), lx, ly)
+    positive_k = axis_k[axis_k > 0]
+    fig, axes = plt.subplots(1, 2, figsize=(12.2, 5.2))
+    for index, (ax, label) in enumerate(zip(axes, ("J(V,P)", "J(V,U)"))):
+        for fields, name, color in (
+            (reconstructed, "U-Net reconstructed DNS", "tab:blue"),
+            (interpolated, "Interpolated DNS", "black"),
+        ):
+            k, power = isotropic_spectrum(fields[index], lx, ly, smooth=True)
+            positive = (k > 0) & (power > 0)
+            ax.loglog(k[positive], power[positive], color=color, label=name)
+        ax.set_title(label)
+        ax.set_xlabel("wavenumber k")
+        ax.set_ylabel("shell-summed power")
+        # Use DNS shell locations for a fixed range, even for LES curves.
+        if positive_k.size > 1:
+            ax.set_xlim(positive_k[0], positive_k[-1])
+        ax.set_ylim(SPECTRUM_Y_MIN, SPECTRUM_Y_MAX)
+        ax.grid(True, which="both", alpha=0.25)
+        ax.legend()
+    fig.suptitle(f"LES Arakawa spectra, t={simtime:g}")
+    fig.tight_layout()
+    fig.savefig(output_path, dpi=180)
+    plt.close(fig)
+    return output_path
+
+
+def save_dns_replay_comparison(reconstructed, interpolated, labels, output_path, title):
+    """Compare matched channel-first arrays with shared scales and differences."""
+    reconstructed = np.asarray(reconstructed)
+    interpolated = np.asarray(interpolated)
+    if reconstructed.shape != interpolated.shape or reconstructed.ndim != 3:
+        raise ValueError("Comparison arrays must have matching (channels, nx, ny) shapes")
+    if len(labels) != reconstructed.shape[0]:
+        raise ValueError("Comparison labels must match the channel count")
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    fig, axes = plt.subplots(len(labels), 3, figsize=(15, 4 * len(labels)), squeeze=False)
+    for row, label in enumerate(labels):
+        current, reference = reconstructed[row], interpolated[row]
+        difference = current - reference
+        limit = max(np.max(np.abs(current)), np.max(np.abs(reference)), 1e-15)
+        error_limit = max(np.max(np.abs(difference)), 1e-15)
+        for column, (values, scale, heading) in enumerate((
+            (current, limit, "U-Net reconstructed DNS"),
+            (reference, limit, "Interpolated DNS"),
+            (difference, error_limit, "U-Net − interpolated"),
+        )):
+            ax = axes[row, column]
+            im = ax.imshow(values.T, origin="lower", cmap="RdBu_r", vmin=-scale, vmax=scale)
+            ax.set_title(f"{label}: {heading}")
+            ax.set_xlabel("x [pixels]")
+            ax.set_ylabel("y [pixels]")
+            fig.colorbar(im, ax=ax)
+    fig.suptitle(title)
+    fig.tight_layout()
+    fig.savefig(output_path, dpi=180)
+    plt.close(fig)
+    return output_path
+
+
 def save_field_images(
     fields: np.ndarray,
     field_names,

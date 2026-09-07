@@ -149,6 +149,13 @@ reconstruction; the post filter/cutoff is applied afterward. The
 
 ## BOUT++ coupling
 
+The interface selects packages matching the embedded Python: Python 3.13 uses
+`~/.pyenvs/BOUT-Hermes3/lib/python3.13/site-packages`, and Python 3.11 uses the
+local conda `py311` installation. Set `PBOUT_UNET_SITE_PACKAGES` to override
+this directory with an installation for the same Python major/minor version.
+An empty override uses the interpreter's existing package paths. Activating
+a virtual environment does not change BOUT++'s linked Python library.
+
 `pBOUT-unet.py` exposes `initFlow()` and `findLESTerms()` to the embedded
 Python interface used by the Hasegawa--Wakatani BOUT++ executable. A typical
 launch configuration is:
@@ -184,7 +191,7 @@ At the start of every fresh BOUT++ inference, pBOUT removes any existing
 
 ### Initialization modes and required BOUT++ grid
 
-`PBOUT_UNET_DNS_INIT` accepts only `0`, `1`, or `2`. Mode `3` is not supported.
+`PBOUT_UNET_DNS_INIT` accepts `0`, `1`, `2`, or `3`.
 Any other value causes pBOUT to stop with a configuration error.
 
 | `PBOUT_UNET_DNS_INIT` | Initialization and runtime behavior | BOUT++ active grid |
@@ -193,6 +200,8 @@ Any other value causes pBOUT to stop with a configuration error.
 | `1` with reconstruction channels | Germano-filter and downsample the initial DNS. Reconstruct only the selected `U,V` channels; unselected channels use the spectrally resized incoming fields. Apply inverse Germano reconstruction, calculate fine-grid Arakawa terms, filter them when `ALPHA > 0`, and downsample the terms. | `coarse_n` |
 | `1` with `none` | Keep the Germano-filtered initial fields on the fine grid. No U-Net is used, but inverse Germano reconstruction and its configured cutoffs are still applied before the Arakawa calculation. The resulting terms are Germano-filtered when `ALPHA > 0`. | `fine_n` |
 | `2` | Use and evolve the original DNS snapshot directly. No U-Net, inverse Germano reconstruction, or Germano filtering of the Arakawa terms is used. | `fine_n` |
+
+Mode `3` uses `coarse_n` active points, like mode `0`, and ignores reconstruction-channel selection.
 
 BOUT++ `nx` includes four X guard cells, while `nz` has no periodic guard
 cells. For the 256-to-128 checkpoint, use the following for a coarse-grid run
@@ -245,3 +254,42 @@ export PBOUT_UNET_POST_CUTOFF_ORDER=8
 At startup, `pBOUT-unet.py` prints checkpoint metadata and the effective
 runtime configuration. Check this output first when diagnosing checkpoint,
 resolution, alpha, precision, or filtering mismatches.
+
+Set `PBOUT_UNET_DNS_INIT=3` to compute Arakawa terms from saved DNS fields
+instead of reconstructing them. `PBOUT_UNET_DNS_FIELD_DIR` defaults to
+`results_U-Net_DNS/fields`; override it if your snapshots are stored elsewhere
+(for example, in a `fields` directory). Each `.npz` must contain `U`, `V`, `P`
+and a scalar physical timestamp `simtime`. The fields are linearly interpolated
+between the two snapshots surrounding the current BOUT++ physical time, then
+used to calculate the Arakawa brackets. Saved `P` is used directly, without
+replacing it with a Laplacian of `V`. Times outside the saved range are rejected.
+
+Mode 3 initializes exactly as mode 0: load `PBOUT_UNET_DNS_PATH`, apply the
+Germano filter, and downsample to the coarse LES grid. During each callback,
+it reads and interpolates the saved DNS fields instead of reconstructing them,
+calculates fine-grid Arakawa brackets, applies the Germano filter when `ALPHA > 0`,
+and downsamples the brackets to the coarse grid. The series must cover time zero
+for initial diagnostics and every requested simulation time. The checkpoint
+still supplies grid/domain and filter configuration.
+
+`PBOUT_UNET_IMPLICIT` independently accepts only `0` or `1` (default `1`):
+`0` returns the filtered, downsampled DNS brackets in mode 3; `1` returns
+the incoming BOUT++ brackets minus those filtered, downsampled brackets. This must match `implicitStylES` in `hw.cxx` (`false` for `0`,
+`true` for `1`), which determines whether BOUT++ passes three or five channels.
+
+In replay mode (`PBOUT_UNET_DNS_INIT=3`), set `PBOUT_UNET_WRITE_DIAGNOSTICS=1`
+to also reconstruct DNS with the U-Net at each diagnostic output time and save
+comparisons under `results_U-Net/images`. Files named
+`fields_unet_vs_interpolated_time*.png` compare U/V/P, while
+`arakawa_dns_unet_vs_interpolated_time*.png` compare fine-grid brackets and
+`arakawa_les_unet_vs_interpolated_time*.png` compare filtered, downsampled brackets
+before implicit subtraction. Each image shows the two sources and their difference.
+This adds diagnostic reconstruction work; the solver still uses interpolated DNS.
+
+Replay comparisons also save `arakawa_les_spectra_time*.png`, showing the
+U-Net and interpolated-DNS spectra of both filtered/downsampled Arakawa terms
+before implicit subtraction, with fixed axes across frames. The x-axis covers
+all positive wavenumber shells of the DNS grid (`fine_n`); the plotted curves
+still represent filtered/downsampled LES terms. At the final BOUT++
+output these are assembled into `results_U-Net/images/arakawa_les_spectra_animation.gif`
+(with separate batch suffixes when applicable). This requires diagnostic mode `1`.

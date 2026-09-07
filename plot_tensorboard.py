@@ -14,29 +14,27 @@ from tensorboard.backend.event_processing.event_accumulator import (
 
 
 PLOT_GROUPS = {
-    "losses": ("total", "dns", "dns_P"),
-    "legacy_derivative_losses": ("first_derivative", "second_derivative"),
+    "losses": ("total", "filtered", "filtered_P", "kl"),
     "relative_l2": ("filtered_relative_l2", "dns_relative_l2"),
-    "dns_field_losses": ("dns_U", "dns_V"),
+    "filtered_field_losses": ("filtered_U", "filtered_V"),
 }
 
 PANEL_LAYOUT = [
     ["definitions", "definitions", "total", "learning_rate"],
-    ["dns", "dns_U", "dns_V", "dns_P"],
-    ["first_derivative", "second_derivative",
+    ["filtered", "filtered_U", "filtered_V", "filtered_P"],
+    ["kl", "kl",
      "filtered_relative_l2", "dns_relative_l2"],
 ]
 
 METRIC_TITLES = {
     "total": "Total Training Objective",
-    "dns": "DNS Density/Potential L1",
-    "dns_U": "DNS Density L1",
-    "dns_V": "DNS Potential L1",
-    "dns_P": "DNS Vorticity L1 (Normalized)",
-    "first_derivative": "First-Derivative Loss (Legacy)",
-    "second_derivative": "Second-Derivative Loss (Legacy)",
+    "filtered": "U-Net Density/Potential L1",
+    "filtered_U": "U-Net Density L1",
+    "filtered_V": "U-Net Potential L1",
+    "filtered_P": "Filtered Vorticity L1 (Normalized)",
+    "kl": "Mean Latent KL Divergence",
     "filtered_relative_l2": "Filtered Relative L2 (Diagnostic Only)",
-    "dns_relative_l2": "DNS Density/Potential Relative L2",
+    "dns_relative_l2": "DNS Density/Potential Relative L2 (Diagnostic Only)",
 }
 
 
@@ -103,14 +101,13 @@ def plot_all_metrics(
     for metric in (
         "total",
         "learning_rate",
-        "dns",
-        "first_derivative",
-        "second_derivative",
+        "filtered",
+        "kl",
         "filtered_relative_l2",
         "dns_relative_l2",
-        "dns_U",
-        "dns_V",
-        "dns_P",
+        "filtered_U",
+        "filtered_V",
+        "filtered_P",
     ):
         ax = axes[metric]
         if metric == "learning_rate":
@@ -159,15 +156,21 @@ def plot_all_metrics(
         vorticity_weight = training_parameters.get(
             "effective_loss_weights", {}
         ).get("vorticity")
+    kl_weight = training_parameters.get("effective_loss_weights", {}).get(
+        "kl", training_parameters.get("lambda_kl")
+    )
+    if training_parameters.get("variational") is False:
+        kl_weight = 0.0
     normalization = (
-        "Errors in n and phi are scaled by their training standard deviations."
+        "Errors in n and phi are scaled by their filtered training standard deviations."
         if training_parameters.get("normalize", True)
         else "Errors in n and phi use physical values (no normalization)."
     )
     definitions = (
         "Active training objective\n"
         r"$\mathcal{L}_{total}=\mathcal{L}_{n,\phi}"
-        r"+\lambda_{\omega}\mathcal{L}_{\omega}$"
+        r"+\lambda_{\omega}\mathcal{L}_{\omega}"
+        r"+\lambda_{KL}\mathcal{L}_{KL}$"
         "\n"
         r"$\mathcal{L}_{n,\phi}=\dfrac{1}{2}\left("
         r"\operatorname{mean}|\Delta n/\sigma_n|+"
@@ -178,8 +181,10 @@ def plot_all_metrics(
         rf"\lambda_{{\omega}}={format_weight(vorticity_weight)}$"
         "\n"
         + normalization
-        + "\nFiltered and derivative losses are disabled in the current objective; "
-        "derivative panels retain legacy histories.\n"
+        + "\nErrors compare U-Net reconstruction with filtered targets before inversion."
+        + "\nVorticity uses its filtered training standard deviation."
+        + f"\nMean latent KL weight: {format_weight(kl_weight)}. "
+        "Germano inversion is diagnostic only.\n"
         r"$L_{2,\mathrm{relative}}="
         r"\dfrac{\|\hat{q}-q\|_2}{\|q\|_2}$ (diagnostic only)."
     )

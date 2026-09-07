@@ -29,7 +29,7 @@ INVERSE_CUTOFF_ORDER="${INVERSE_CUTOFF_ORDER:-8}"
 CHECKPOINT_EVERY="${CHECKPOINT_EVERY:-25}"
 DIAGNOSTIC_EVERY="${DIAGNOSTIC_EVERY:-5}"
 DATASET="${DATASET:-../../data/BOUT_runs/HW_2D/Papers/PoP23/HW_N${DNS_N}/fields/}"
-OUTPUT_DIR="${OUTPUT_DIR:-germano_training_output_dns${DNS_N}_les${LES_N}}"
+OUTPUT_DIR="${OUTPUT_DIR:-germano_training_output_dns${DNS_N}_les${LES_N}}b"
 
 python train_germano_unet.py \
   --dataset "${DATASET}" \
@@ -51,7 +51,7 @@ python train_germano_unet.py \
   --post-filter none \
   --no-normalize \
   --inverse-filter filtered_dns_spectrum \
-  --inverse-min-wavenumber 10.0
+  --inverse-min-wavenumber 2.0 
 
 
 #python infer_germano_unet.py --checkpoint germano_training_output_32_v3/checkpoints/best.pt --input fields_HW_run0_time501.npz --output-dir inference_output
