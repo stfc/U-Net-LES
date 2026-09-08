@@ -11,7 +11,8 @@ import numpy as np
 import torch
 from PIL import Image
 
-from germano_common import (
+from germano_common import \
+(
     HW_FIELD_LABELS,
     SPECTRUM_Y_MAX,
     SPECTRUM_Y_MIN,
@@ -19,7 +20,8 @@ from germano_common import (
 )
 
 
-def save_energy_history(
+def save_energy_history \
+(
     times: np.ndarray,
     energy: np.ndarray,
     output_dir: Path,
@@ -43,7 +45,8 @@ def save_energy_history(
         ax.plot(times, energy.reshape(-1), "o-", linewidth=1.5)
     else:
         for batch_index in range(energy.shape[1]):
-            ax.plot(
+            ax.plot \
+            (
                 times,
                 energy[:, batch_index],
                 "o-",
@@ -61,7 +64,8 @@ def save_energy_history(
     return data_path, figure_path
 
 
-def save_png_animation(
+def save_png_animation \
+(
     frame_paths,
     output_path: Path,
     fps: float = 5.0,
@@ -77,7 +81,8 @@ def save_png_animation(
             with Image.open(path) as image:
                 frames.append(image.convert("RGB").copy())
         output_path.parent.mkdir(parents=True, exist_ok=True)
-        frames[0].save(
+        frames[0].save \
+        (
             output_path,
             save_all=True,
             append_images=frames[1:],
@@ -99,7 +104,8 @@ def save_les_arakawa_spectra(reconstructed, interpolated, lx, ly, output_path, s
     positive_k = axis_k[axis_k > 0]
     fig, axes = plt.subplots(1, 2, figsize=(12.2, 5.2))
     for index, (ax, label) in enumerate(zip(axes, ("J(V,P)", "J(V,U)"))):
-        for fields, name, color in (
+        for fields, name, color in \
+        (
             (reconstructed, "U-Net reconstructed DNS", "tab:blue"),
             (interpolated, "Interpolated DNS", "black"),
         ):
@@ -138,11 +144,15 @@ def save_dns_replay_comparison(reconstructed, interpolated, labels, output_path,
         difference = current - reference
         limit = max(np.max(np.abs(current)), np.max(np.abs(reference)), 1e-15)
         error_limit = max(np.max(np.abs(difference)), 1e-15)
-        for column, (values, scale, heading) in enumerate((
-            (current, limit, "U-Net reconstructed DNS"),
-            (reference, limit, "Interpolated DNS"),
-            (difference, error_limit, "U-Net − interpolated"),
-        )):
+        for column, (values, scale, heading) in enumerate \
+        (
+             \
+            (
+                (current, limit, "U-Net reconstructed DNS"),
+                (reference, limit, "Interpolated DNS"),
+                (difference, error_limit, "U-Net − interpolated"),
+            )
+        ):
             ax = axes[row, column]
             im = ax.imshow(values.T, origin="lower", cmap="RdBu_r", vmin=-scale, vmax=scale)
             ax.set_title(f"{label}: {heading}")
@@ -156,7 +166,8 @@ def save_dns_replay_comparison(reconstructed, interpolated, labels, output_path,
     return output_path
 
 
-def save_field_images(
+def save_field_images \
+(
     fields: np.ndarray,
     field_names,
     output_path: Path,
@@ -165,20 +176,23 @@ def save_field_images(
 ) -> Path:
     """Save channel-first physical fields and their horizontal centerlines."""
     if fields.ndim != 3 or fields.shape[0] != len(field_names):
-        raise ValueError(
+        raise ValueError \
+        (
             "fields must have shape (len(field_names), nx, ny)"
         )
     nx, ny = fields.shape[-2:]
     center = ny // 2
     x_pixels = np.arange(nx)
-    fig, axes = plt.subplots(
+    fig, axes = plt.subplots \
+    (
         2, len(field_names),
         figsize=(5.8 * len(field_names), 9.2),
         squeeze=False,
     )
     for channel, name in enumerate(field_names):
         ax = axes[0, channel]
-        cmap = {
+        cmap = \
+        {
             "U": "Blues",
             "V": "Reds_r",
             "P": "hot",
@@ -188,7 +202,8 @@ def save_field_images(
             lower, upper = field_limits[channel]
             if lower < upper:
                 image_limits = {"vmin": lower, "vmax": upper}
-        image = ax.imshow(
+        image = ax.imshow \
+        (
             fields[channel].T,
             origin="lower",
             extent=(0, nx, 0, ny),
@@ -201,11 +216,13 @@ def save_field_images(
         ax.set_ylabel("y [pixels]")
         fig.colorbar(image, ax=ax)
         center_ax = axes[1, channel]
-        center_ax.plot(
+        center_ax.plot \
+        (
             x_pixels, fields[channel, :, center], linewidth=1.2
         )
         center_ax.axhline(0.0, color="0.5", linewidth=0.7)
-        center_ax.set_title(
+        center_ax.set_title \
+        (
             f"{HW_FIELD_LABELS.get(name, name)}: centerline y={center}"
         )
         center_ax.set_xlabel("x [pixels]")
@@ -219,22 +236,26 @@ def save_field_images(
     return output_path
 
 
-def arakawa_bracket(
+def arakawa_bracket \
+(
     f: torch.Tensor, g: torch.Tensor, dx: float, dy: float
 ) -> torch.Tensor:
     """Return the periodic three-Jacobian Arakawa bracket."""
     tr = lambda a, i, j: torch.roll(a, shifts=(i, j), dims=(-2, -1))
-    jpp = (
+    jpp = \
+    (
         (tr(f, 0, 1) - tr(f, 0, -1)) * (tr(g, 1, 0) - tr(g, -1, 0))
         - (tr(f, 1, 0) - tr(f, -1, 0)) * (tr(g, 0, 1) - tr(g, 0, -1))
     )
-    jpx = (
+    jpx = \
+    (
         tr(g, 1, 0) * (tr(f, 1, 1) - tr(f, 1, -1))
         - tr(g, -1, 0) * (tr(f, -1, 1) - tr(f, -1, -1))
         - tr(g, 0, 1) * (tr(f, 1, 1) - tr(f, -1, 1))
         + tr(g, 0, -1) * (tr(f, 1, -1) - tr(f, -1, -1))
     )
-    jxp = (
+    jxp = \
+    (
         tr(g, 1, 1) * (tr(f, 0, 1) - tr(f, 1, 0))
         - tr(g, -1, -1) * (tr(f, -1, 0) - tr(f, 0, -1))
         - tr(g, -1, 1) * (tr(f, 0, 1) - tr(f, -1, 0))
@@ -243,7 +264,8 @@ def arakawa_bracket(
     return (jpp + jpx + jxp) / (12.0 * dx * dy)
 
 
-def save_field_spectrum_comparison(
+def save_field_spectrum_comparison \
+(
     reconstructed: np.ndarray,
     dns: np.ndarray,
     field_names,
@@ -260,23 +282,27 @@ def save_field_spectrum_comparison(
     count = len(field_names)
     fig, axes = plt.subplots(1, count, figsize=(5.8 * count, 5.2), squeeze=False)
     for channel, (ax, name) in enumerate(zip(axes[0], field_names)):
-        plotted_fields = [
+        plotted_fields = \
+        [
             (dns[channel], reference_label, "black"),
             (reconstructed[channel], "Reconstructed DNS", "tab:blue"),
         ]
         if les_input is not None:
-            plotted_fields.insert(
+            plotted_fields.insert \
+            (
                 1, (les_input[channel], "LES input", "tab:orange")
             )
         insert_at = 2 if les_input is not None else 1
         if unet_output is not None:
-            plotted_fields.insert(
+            plotted_fields.insert \
+            (
                 insert_at,
                 (unet_output[channel], "U-Net output", "tab:green"),
             )
             insert_at += 1
         if inverse_filtered_output is not None:
-            plotted_fields.insert(
+            plotted_fields.insert \
+            (
                 insert_at,
                 (
                     inverse_filtered_output[channel],
@@ -301,7 +327,8 @@ def save_field_spectrum_comparison(
     return output_path
 
 
-def save_field_error_images(
+def save_field_error_images \
+(
     reconstructed: np.ndarray,
     reference: np.ndarray,
     field_names,
@@ -311,14 +338,16 @@ def save_field_error_images(
     """Save per-channel signed-error images with symmetric color limits."""
     error = reconstructed - reference
     count = len(field_names)
-    fig, axes = plt.subplots(
+    fig, axes = plt.subplots \
+    (
         1, count, figsize=(5.8 * count, 5.2), squeeze=False
     )
     for channel, (ax, name) in enumerate(zip(axes[0], field_names)):
         limit = float(np.max(np.abs(error[channel])))
         if limit == 0:
             limit = np.finfo(error.dtype).eps
-        image = ax.imshow(
+        image = ax.imshow \
+        (
             error[channel].T,
             origin="lower",
             extent=(0, error.shape[-2], 0, error.shape[-1]),
@@ -337,14 +366,16 @@ def save_field_error_images(
     return output_path
 
 
-def save_field_centerline_comparison(
+def save_field_centerline_comparison \
+(
     reconstructed: np.ndarray,
     reference: np.ndarray,
     field_names,
     output_path: Path,
     reconstructed_label: str = "Reconstructed DNS",
     reference_label: str = "Target DNS",
-    additional_channel_lines: dict[
+    additional_channel_lines: dict \
+    [
         int, tuple[np.ndarray, str]
     ] | None = None,
 ) -> Path:
@@ -352,18 +383,21 @@ def save_field_centerline_comparison(
     count = len(field_names)
     center = reference.shape[-1] // 2
     x = np.arange(reference.shape[-2])
-    fig, axes = plt.subplots(
+    fig, axes = plt.subplots \
+    (
         1, count, figsize=(5.8 * count, 4.8), squeeze=False
     )
     for channel, (ax, name) in enumerate(zip(axes[0], field_names)):
-        ax.plot(
+        ax.plot \
+        (
             x,
             reference[channel, :, center],
             color="black",
             linewidth=1.6,
             label=reference_label,
         )
-        ax.plot(
+        ax.plot \
+        (
             x,
             reconstructed[channel, :, center],
             color="tab:blue",
@@ -374,11 +408,13 @@ def save_field_centerline_comparison(
         if additional_channel_lines and channel in additional_channel_lines:
             values, label = additional_channel_lines[channel]
             if values.shape != reconstructed[channel].shape:
-                raise ValueError(
+                raise ValueError \
+                (
                     "Additional centerline field must match its reconstructed "
                     "channel shape."
                 )
-            ax.plot(
+            ax.plot \
+            (
                 x,
                 values[:, center],
                 color="tab:orange",
@@ -386,7 +422,8 @@ def save_field_centerline_comparison(
                 linewidth=1.5,
                 label=label,
             )
-        ax.set_title(
+        ax.set_title \
+        (
             f"{HW_FIELD_LABELS.get(name, name)} centerline, y={center}"
         )
         ax.set_xlabel("x [pixels]")
@@ -399,7 +436,8 @@ def save_field_centerline_comparison(
     return output_path
 
 
-def save_vorticity_comparison(
+def save_vorticity_comparison \
+(
     reconstructed: np.ndarray,
     laplacian: np.ndarray,
     output_path: Path,
@@ -407,12 +445,14 @@ def save_vorticity_comparison(
 ) -> Path:
     """Plot two vorticities, their difference, and horizontal centerlines."""
     if reconstructed.shape != laplacian.shape or reconstructed.ndim != 2:
-        raise ValueError(
+        raise ValueError \
+        (
             "reconstructed and laplacian vorticity must be matching 2-D arrays"
         )
     difference = reconstructed - laplacian
     fields = (reconstructed, laplacian, difference)
-    titles = (
+    titles = \
+    (
         "Reconstructed vorticity",
         r"Vorticity from $\nabla^2\phi$",
         r"Difference: reconstructed $-\nabla^2\phi$",
@@ -424,7 +464,8 @@ def save_vorticity_comparison(
     for column, (values, title) in enumerate(zip(fields, titles)):
         maximum = float(np.max(np.abs(values)))
         limits = {"vmin": -maximum, "vmax": maximum} if maximum > 0 else {}
-        image = axes[0, column].imshow(
+        image = axes[0, column].imshow \
+        (
             values.T,
             origin="lower",
             extent=(0, nx, 0, ny),
@@ -450,7 +491,8 @@ def save_vorticity_comparison(
     return output_path
 
 
-def save_initial_dns_fields(
+def save_initial_dns_fields \
+(
     fields: np.ndarray,
     reference_fields: np.ndarray | None,
     field_names,
@@ -462,20 +504,23 @@ def save_initial_dns_fields(
     """Save initial DNS fields and their original/reconstructed spectra."""
     output_dir.mkdir(parents=True, exist_ok=True)
     field_path = output_dir / "fields_DNS_initial.png"
-    current_label = (
+    current_label = \
+    (
         "Reconstructed DNS" if reference_fields is not None else "DNS"
     )
     save_field_images(fields, field_names, field_path, current_label)
 
     spectrum_path = output_dir / "fields_DNS_spectrum_initial.png"
     count = len(field_names)
-    fig, axes = plt.subplots(
+    fig, axes = plt.subplots \
+    (
         1, count, figsize=(5.8 * count, 5.2), squeeze=False
     )
     for channel, (ax, name) in enumerate(zip(axes[0], field_names)):
         plotted_fields = [(fields[channel], current_label, "tab:blue")]
         if reference_fields is not None:
-            plotted_fields.insert(
+            plotted_fields.insert \
+            (
                 0, (reference_fields[channel], "Original DNS", "black")
             )
         for values, label, color in plotted_fields:
@@ -506,7 +551,8 @@ def prepare_run_output(output_dir: Path) -> tuple[Path, Path]:
     return fields_dir, images_dir
 
 
-def save_dns_snapshot(
+def save_dns_snapshot \
+(
     dns: np.ndarray,
     field_names,
     time_step: int,
@@ -525,25 +571,30 @@ def save_dns_snapshot(
 ) -> Path:
     """Save one reconstructed DNS batch and optional fields/spectra images."""
     if dns.ndim != 4 or dns.shape[1] != len(field_names):
-        raise ValueError(
+        raise ValueError \
+        (
             "dns must have shape (batch, len(field_names), nx, ny)"
         )
     if reference_dns is not None:
         if reference_dns.shape != dns.shape:
             raise ValueError("reference_dns must have the same shape as dns")
         if lx is None or ly is None:
-            raise ValueError(
+            raise ValueError \
+            (
                 "lx and ly are required when saving spectrum comparisons"
             )
-    for name, values in (
+    for name, values in \
+    (
         ("les_input", les_input),
         ("unet_output", unet_output),
         ("inverse_filtered_output", inverse_filtered_output),
     ):
-        if values is not None and (
+        if values is not None and \
+        (
             values.ndim != 4 or values.shape[:2] != dns.shape[:2]
         ):
-            raise ValueError(
+            raise ValueError \
+            (
                 f"{name} must have shape "
                 "(batch, len(field_names), nx_les, ny_les)"
             )
@@ -552,11 +603,13 @@ def save_dns_snapshot(
     output_fields = dns[0] if len(dns) == 1 else dns.transpose(1, 0, 2, 3)
     snapshot_path = fields_dir / f"fields_DNS_{time_step:07d}.npz"
     archive_names = tuple(field_names)
-    np.savez_compressed(
+    np.savez_compressed \
+    (
         snapshot_path,
         pStep=np.asarray(time_step),
         simtime=np.asarray(simtime),
-        **{
+        ** \
+        {
             name: output_fields[channel]
             for channel, name in enumerate(archive_names)
         },
@@ -566,7 +619,8 @@ def save_dns_snapshot(
         images_dir.mkdir(parents=True, exist_ok=True)
         for batch_index, fields in enumerate(dns):
             suffix = "" if len(dns) == 1 else f"_batch{batch_index:03d}"
-            save_field_images(
+            save_field_images \
+            (
                 fields,
                 field_names,
                 images_dir / f"fields_DNS_{time_step:07d}{suffix}.png",
@@ -574,7 +628,8 @@ def save_dns_snapshot(
                 field_limits=field_limits,
             )
             if les_input is not None:
-                save_field_images(
+                save_field_images \
+                (
                     les_input[batch_index],
                     field_names,
                     images_dir
@@ -582,7 +637,8 @@ def save_dns_snapshot(
                     f"LES input, step {time_step}, t={simtime:g}",
                 )
             if reference_dns is not None:
-                save_field_spectrum_comparison(
+                save_field_spectrum_comparison \
+                (
                     fields,
                     reference_dns[batch_index],
                     field_names,
@@ -591,17 +647,20 @@ def save_dns_snapshot(
                     images_dir
                     / f"fields_DNS_spectrum_{time_step:07d}{suffix}.png",
                     cutoff_fraction,
-                    les_input=(
+                    les_input= \
+                    (
                         None
                         if les_input is None
                         else les_input[batch_index]
                     ),
-                    unet_output=(
+                    unet_output= \
+                    (
                         None
                         if unet_output is None
                         else unet_output[batch_index]
                     ),
-                    inverse_filtered_output=(
+                    inverse_filtered_output= \
+                    (
                         None
                         if inverse_filtered_output is None
                         else inverse_filtered_output[batch_index]
@@ -611,14 +670,16 @@ def save_dns_snapshot(
     return snapshot_path
 
 
-def calculate_arakawa_terms(
+def calculate_arakawa_terms \
+(
     fields: np.ndarray, lx: float, ly: float
 ) -> tuple[np.ndarray, np.ndarray]:
     """Calculate J(phi, omega) and J(phi, density) for U,V,P fields."""
     tensor = torch.as_tensor(fields[None])
     potential = tensor[:, 1:2]
     dx, dy = lx / fields.shape[-2], ly / fields.shape[-1]
-    terms = (
+    terms = \
+    (
         arakawa_bracket(potential, tensor[:, 2:3], dx, dy),
         arakawa_bracket(potential, tensor[:, 0:1], dx, dy),
     )
@@ -629,13 +690,15 @@ def _add_cutoff(ax, shape, lx, ly, cutoff_fraction):
     if cutoff_fraction is None:
         return
     nyquist = min(np.pi / (lx / shape[0]), np.pi / (ly / shape[1]))
-    ax.axvline(
+    ax.axvline \
+    (
         cutoff_fraction * nyquist, color="tab:red", linestyle="--",
         label=f"cutoff ({cutoff_fraction:g} Nyquist)",
     )
 
 
-def _plot_arakawa_fields(
+def _plot_arakawa_fields \
+(
     fields: tuple[np.ndarray, np.ndarray],
     titles: tuple[str, str],
     figure_title: str,
@@ -652,7 +715,8 @@ def _plot_arakawa_fields(
     for column, (values, title) in enumerate(zip(fields, titles)):
         maximum = float(np.max(np.abs(values)))
         limits = {"vmin": -maximum, "vmax": maximum} if maximum > 0 else {}
-        image = axes[0, column].imshow(
+        image = axes[0, column].imshow \
+        (
             values.T,
             origin="lower",
             extent=(0, nx, 0, ny),
@@ -667,14 +731,16 @@ def _plot_arakawa_fields(
 
         center_ax = axes[1, column]
         if reference_fields is not None:
-            center_ax.plot(
+            center_ax.plot \
+            (
                 x_pixels,
                 reference_fields[column][:, center],
                 color="black",
                 linewidth=1.0,
                 label=reference_label,
             )
-        center_ax.plot(
+        center_ax.plot \
+        (
             x_pixels,
             values[:, center],
             color="tab:blue",
@@ -695,7 +761,8 @@ def _plot_arakawa_fields(
     return output_path
 
 
-def save_arakawa_diagnostics(
+def save_arakawa_diagnostics \
+(
     time_step: int,
     diagnostic_sets,
     output_dir: Path,
@@ -707,7 +774,8 @@ def save_arakawa_diagnostics(
         batch_count = len(vorticity)
         for batch_index, fields in enumerate(zip(vorticity, density)):
             suffix = "" if batch_count == 1 else f"_batch{batch_index:03d}"
-            _plot_arakawa_fields(
+            _plot_arakawa_fields \
+            (
                 fields,
                 titles,
                 f"{figure_title}, step {time_step}",
@@ -716,7 +784,8 @@ def save_arakawa_diagnostics(
             )
 
 
-def save_arakawa_closure_comparison(
+def save_arakawa_closure_comparison \
+(
     time_step: int,
     simtime: float,
     filtered_terms: tuple[np.ndarray, np.ndarray],
@@ -728,7 +797,8 @@ def save_arakawa_closure_comparison(
     """Compare filtered, BOUT++, calculated LES, and returned brackets."""
     output_dir.mkdir(parents=True, exist_ok=True)
     row_titles = (r"$J(\phi,\omega)$", r"$J(\phi,n)$")
-    column_titles = (
+    column_titles = \
+    (
         "Filtered Arakawa",
         "Arakawa provided by BOUT++",
         "Arakawa calculated from LES fields",
@@ -738,7 +808,8 @@ def save_arakawa_closure_comparison(
     for batch_index in range(batch_count):
         fig, axes = plt.subplots(2, 4, figsize=(20.5, 9.5))
         for row, row_title in enumerate(row_titles):
-            row_fields = (
+            row_fields = \
+            (
                 filtered_terms[row][batch_index],
                 bout_terms[row][batch_index],
                 calculated_les_terms[row][batch_index],
@@ -746,10 +817,12 @@ def save_arakawa_closure_comparison(
             )
             maximum = max(float(np.max(np.abs(field))) for field in row_fields)
             limits = {"vmin": -maximum, "vmax": maximum} if maximum > 0 else {}
-            for column, (field, column_title) in enumerate(
+            for column, (field, column_title) in enumerate \
+            (
                 zip(row_fields, column_titles)
             ):
-                image = axes[row, column].imshow(
+                image = axes[row, column].imshow \
+                (
                     field.T,
                     origin="lower",
                     extent=(0, field.shape[0], 0, field.shape[1]),
@@ -761,12 +834,14 @@ def save_arakawa_closure_comparison(
                 axes[row, column].set_xlabel("x [pixels]")
                 axes[row, column].set_ylabel("y [pixels]")
                 fig.colorbar(image, ax=axes[row, column], shrink=0.82)
-        fig.suptitle(
+        fig.suptitle \
+        (
             f"Arakawa closure terms, step {time_step}, t={simtime:g}"
         )
         fig.tight_layout()
         suffix = "" if batch_count == 1 else f"_batch{batch_index:03d}"
-        fig.savefig(
+        fig.savefig \
+        (
             output_dir
             / f"arakawa_closure_terms_time{time_step:07d}{suffix}.png",
             dpi=180,
@@ -774,7 +849,8 @@ def save_arakawa_closure_comparison(
         plt.close(fig)
 
 
-def save_arakawa_implementation_comparison(
+def save_arakawa_implementation_comparison \
+(
     time_step: int,
     calculated_terms: tuple[np.ndarray, np.ndarray],
     bout_terms: tuple[np.ndarray, np.ndarray],
@@ -782,17 +858,20 @@ def save_arakawa_implementation_comparison(
 ) -> None:
     """Compare Python and BOUT++ Arakawa fields and centerlines."""
     output_dir.mkdir(parents=True, exist_ok=True)
-    diagnostics = (
+    diagnostics = \
+    (
         ("vorticity", calculated_terms[0], bout_terms[0], r"$J(V,P)$"),
         ("density", calculated_terms[1], bout_terms[1], r"$J(V,U)$"),
     )
     for name, calculated, bout, title in diagnostics:
-        for batch_index, (calculated_field, bout_field) in enumerate(
+        for batch_index, (calculated_field, bout_field) in enumerate \
+        (
             zip(calculated, bout)
         ):
             difference = calculated_field - bout_field
             fields = (calculated_field, bout_field, difference)
-            labels = (
+            labels = \
+            (
                 "Calculated in pBOUT-unet",
                 "Provided by BOUT++",
                 "Calculated - BOUT++",
@@ -803,11 +882,13 @@ def save_arakawa_implementation_comparison(
             fig, axes = plt.subplots(2, 3, figsize=(17.5, 9.2))
             for column, (values, label) in enumerate(zip(fields, labels)):
                 maximum = float(np.max(np.abs(values)))
-                limits = (
+                limits = \
+                (
                     {"vmin": -maximum, "vmax": maximum}
                     if maximum > 0 else {}
                 )
-                image = axes[0, column].imshow(
+                image = axes[0, column].imshow \
+                (
                     values.T,
                     origin="lower",
                     extent=(0, nx, 0, ny),
@@ -819,42 +900,50 @@ def save_arakawa_implementation_comparison(
                 axes[0, column].set_xlabel("x [pixels]")
                 axes[0, column].set_ylabel("y [pixels]")
                 fig.colorbar(image, ax=axes[0, column])
-                axes[1, column].plot(
+                axes[1, column].plot \
+                (
                     x_pixels, values[:, center], linewidth=1.2
                 )
-                axes[1, column].axhline(
+                axes[1, column].axhline \
+                (
                     0.0, color="0.5", linewidth=0.7
                 )
-                axes[1, column].set_title(
+                axes[1, column].set_title \
+                (
                     f"{label}: centerline y={center}"
                 )
                 axes[1, column].set_xlabel("x [pixels]")
                 axes[1, column].set_ylabel("Arakawa term")
                 axes[1, column].grid(True, alpha=0.25)
-            fig.suptitle(
+            fig.suptitle \
+            (
                 f"LES Arakawa implementation comparison, step {time_step}"
             )
             fig.tight_layout()
-            suffix = (
+            suffix = \
+            (
                 "" if len(calculated) == 1 else f"_batch{batch_index:03d}"
             )
-            fig.savefig(
+            fig.savefig \
+            (
                 output_dir
                 / f"arakawa_LES_{name}_comparison_time{time_step:07d}"
-                  f"{suffix}.png",
+                f"{suffix}.png",
                 dpi=180,
             )
             plt.close(fig)
 
 
-def save_bout_arakawa_image(
+def save_bout_arakawa_image \
+(
     terms: np.ndarray,
     time_step: int,
     simtime: float,
     output_path: Path,
 ) -> Path:
     """Save BOUT++ Arakawa terms and their horizontal centerlines."""
-    return _plot_arakawa_fields(
+    return _plot_arakawa_fields \
+    (
         (terms[0], terms[1]),
         (r"$J(\phi,\omega)$", r"$J(\phi,n)$"),
         f"DNS Arakawa terms, step {time_step}, t={simtime:g}",
@@ -874,7 +963,8 @@ def save_bout_arakawa_terms(payload, output_dir: Path) -> tuple[Path, Path]:
     nz = int(values[3])
     plane = nx * nz
     if nx <= 0 or nz <= 0 or values.size != 4 + 2 * plane:
-        raise ValueError(
+        raise ValueError \
+        (
             f"saveArakawaTerms received {values.size} values; expected "
             f"{4 + 2 * plane} for a {nx}x{nz} grid"
         )
@@ -883,7 +973,8 @@ def save_bout_arakawa_terms(payload, output_dir: Path) -> tuple[Path, Path]:
     output_dir.mkdir(parents=True, exist_ok=True)
     stem = f"arakawa_terms_time{time_step:07d}"
     snapshot_path = output_dir / f"{stem}.npz"
-    np.savez_compressed(
+    np.savez_compressed \
+    (
         snapshot_path,
         pStep=np.asarray(time_step),
         simtime=np.asarray(simtime),
@@ -895,7 +986,8 @@ def save_bout_arakawa_terms(payload, output_dir: Path) -> tuple[Path, Path]:
     return snapshot_path, image_path
 
 
-def save_arakawa_comparison(
+def save_arakawa_comparison \
+(
     reconstructed: np.ndarray,
     dns: np.ndarray | None,
     lx: float,
@@ -909,24 +1001,28 @@ def save_arakawa_comparison(
     filtered_terms: tuple[np.ndarray, np.ndarray] | None = None,
     current_terms_label: str | None = None,
     filtered_terms_label: str = "Post-filtered Arakawa",
-    spectrum_variants: list[
+    spectrum_variants: list \
+    [
         tuple[str, tuple[np.ndarray, np.ndarray], str]
     ] | None = None,
 ) -> tuple[Path, Path]:
     """Save Arakawa fields and spectra, optionally including filtered terms."""
     output_dir.mkdir(parents=True, exist_ok=True)
     current = calculate_arakawa_terms(reconstructed, lx, ly)
-    reference = (
+    reference = \
+    (
         calculate_arakawa_terms(dns, lx, ly) if dns is not None else None
     )
     titles = (r"$J(V,P)$", r"$J(V,U)$")
     nx, ny = reconstructed.shape[-2:]
 
     field_path = output_dir / f"{stem}.png"
-    current_label = current_terms_label or (
+    current_label = current_terms_label or \
+    (
         "Reconstructed DNS" if reference is not None else "DNS"
     )
-    _plot_arakawa_fields(
+    _plot_arakawa_fields \
+    (
         current,
         titles,
         figure_title or current_label,
@@ -936,14 +1032,16 @@ def save_arakawa_comparison(
         reference_label=reference_label,
     )
 
-    spectrum_path = output_dir / (
+    spectrum_path = output_dir / \
+    (
         spectrum_stem or f"{stem}_spectrum_comparison.png"
     )
     fig, axes = plt.subplots(1, 2, figsize=(12.2, 5.2))
     for index, (ax, values, title) in enumerate(zip(axes, current, titles)):
         plotted_fields = [(values, current_label, "tab:blue")]
         if filtered_terms is not None:
-            plotted_fields.append(
+            plotted_fields.append \
+            (
                 (
                     filtered_terms[index],
                     filtered_terms_label,
@@ -951,7 +1049,8 @@ def save_arakawa_comparison(
                 )
             )
         if spectrum_variants is not None:
-            plotted_fields.extend(
+            plotted_fields.extend \
+            (
                 (terms[index], label, color)
                 for label, terms, color in spectrum_variants
             )
@@ -976,7 +1075,8 @@ def save_arakawa_comparison(
     return field_path, spectrum_path
 
 
-def save_arakawa_dns_field_comparison(
+def save_arakawa_dns_field_comparison \
+(
     reconstructed_dns: np.ndarray,
     incoming_dns: np.ndarray,
     lx: float,
@@ -993,17 +1093,20 @@ def save_arakawa_dns_field_comparison(
     center = ny // 2
     x = np.arange(nx)
     fig, axes = plt.subplots(2, 4, figsize=(21.0, 10.0), squeeze=False)
-    column_titles = (
+    column_titles = \
+    (
         "Incoming BOUT++ DNS",
         "Reconstructed DNS",
         "Reconstructed − incoming",
         f"Centerline y={center}",
     )
-    for row, (reconstructed, incoming, term_title) in enumerate(
+    for row, (reconstructed, incoming, term_title) in enumerate \
+    (
         zip(reconstructed_terms, incoming_terms, term_titles)
     ):
         difference = reconstructed - incoming
-        common_limit = max(
+        common_limit = max \
+        (
             float(np.max(np.abs(reconstructed))),
             float(np.max(np.abs(incoming))),
         )
@@ -1012,14 +1115,16 @@ def save_arakawa_dns_field_comparison(
             common_limit = np.finfo(np.float64).eps
         if difference_limit == 0:
             difference_limit = np.finfo(np.float64).eps
-        for column, (values, limit) in enumerate(
+        for column, (values, limit) in enumerate \
+        (
             (
                 (incoming, common_limit),
                 (reconstructed, common_limit),
                 (difference, difference_limit),
             )
         ):
-            image = axes[row, column].imshow(
+            image = axes[row, column].imshow \
+            (
                 values.T,
                 origin="lower",
                 extent=(0, nx, 0, ny),
@@ -1028,7 +1133,8 @@ def save_arakawa_dns_field_comparison(
                 vmin=-limit,
                 vmax=limit,
             )
-            axes[row, column].set_title(
+            axes[row, column].set_title \
+            (
                 f"{term_title}: {column_titles[column]}"
             )
             axes[row, column].set_xlabel("x [pixels]")
@@ -1036,21 +1142,24 @@ def save_arakawa_dns_field_comparison(
             fig.colorbar(image, ax=axes[row, column])
 
         centerline = axes[row, 3]
-        centerline.plot(
+        centerline.plot \
+        (
             x,
             incoming[:, center],
             color="black",
             linewidth=1.2,
             label="Incoming BOUT++ DNS",
         )
-        centerline.plot(
+        centerline.plot \
+        (
             x,
             reconstructed[:, center],
             color="tab:blue",
             linewidth=1.2,
             label="Reconstructed DNS",
         )
-        centerline.plot(
+        centerline.plot \
+        (
             x,
             difference[:, center],
             color="tab:red",

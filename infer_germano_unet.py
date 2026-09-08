@@ -5,7 +5,8 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 import numpy as np, torch
 from germano_common import *
-from visualization_common import (
+from visualization_common import \
+(
     save_arakawa_comparison,
     save_field_spectrum_comparison,
 )
@@ -39,13 +40,15 @@ def optional_environment_float(name, default):
 
 def print_checkpoint_metadata(checkpoint_path, effective_inference):
     """Load/print arbitrary training metadata and effective runtime overrides."""
-    candidates = (
+    candidates = \
+    (
         checkpoint_path.parent / "metadata.json",
         checkpoint_path.parent.parent / "metadata.json",
     )
     metadata_path = next((path for path in candidates if path.is_file()), None)
     if metadata_path is None:
-        print(
+        print \
+        (
             "Checkpoint metadata: metadata.json was not found beside the "
             "checkpoint directory."
         )
@@ -59,7 +62,8 @@ def print_checkpoint_metadata(checkpoint_path, effective_inference):
     def print_values(value, prefix=""):
         if isinstance(value, dict):
             for name, nested_value in value.items():
-                if not prefix and name in {
+                if not prefix and name in \
+                {
                     "tensorboard_dir",
                     "test_metrics",
                     "training_parameters",
@@ -82,20 +86,23 @@ def save_dns_centerline_plots(source, fields, dns, reconstructed, output_dir):
     x_index = np.arange(dns.shape[-2])
     for channel, name in enumerate(fields):
         fig, ax = plt.subplots(figsize=(8.0, 4.8))
-        ax.plot(
+        ax.plot \
+        (
             x_index,
             dns[channel, :, center_y],
             linewidth=1.8,
             label="DNS",
         )
-        ax.plot(
+        ax.plot \
+        (
             x_index,
             reconstructed[channel, :, center_y],
             "--",
             linewidth=1.8,
             label="Reconstructed DNS",
         )
-        ax.set_title(
+        ax.set_title \
+        (
             f"{HW_FIELD_LABELS[name]} centerline comparison, "
             f"y={center_y}: {source}"
         )
@@ -104,7 +111,8 @@ def save_dns_centerline_plots(source, fields, dns, reconstructed, output_dir):
         ax.grid(True, alpha=0.3)
         ax.legend()
         fig.tight_layout()
-        fig.savefig(
+        fig.savefig \
+        (
             output_dir / f"{name}_DNS_centerline_comparison.png", dpi=180
         )
         plt.close(fig)
@@ -114,41 +122,53 @@ def parse_args():
     p = argparse.ArgumentParser()
     p.add_argument("--checkpoint", type=Path, required=True)
     p.add_argument("--input", type=Path, required=True)
-    p.add_argument(
+    p.add_argument \
+    (
         "--output-dir", type=Path, default=Path("germano_inference_output")
     )
-    p.add_argument(
+    p.add_argument \
+    (
         "--inverse-input",
         choices=("unet", "filtered-dns"),
         default="unet",
         help="Field passed to the inverse Germano filter (default: unet)",
     )
-    p.add_argument(
+    p.add_argument \
+    (
         "--precision",
         choices=("checkpoint", "float32", "float64"),
         default="checkpoint",
         help="U-Net and physics precision (default: use checkpoint precision)",
     )
-    p.add_argument(
+    p.add_argument \
+    (
         "--inverse-method",
         choices=("checkpoint",) + INVERSE_METHODS,
         default="checkpoint",
         help="Reconstruction operator (default: checkpoint, falling back to exact)",
     )
-    p.add_argument(
+    p.add_argument \
+    (
         "--inverse-filter", choices=("checkpoint",) + INVERSE_FILTER_TYPES,
         default="checkpoint",
         help="Pre-inversion spectral filter (default: checkpoint setting)",
     )
-    p.add_argument("--inverse-min-wavenumber", type=float,
-                   help="Physical k threshold for filtered_dns_spectrum (default: checkpoint)")
+    p.add_argument \
+    (
+        "--inverse-min-wavenumber", type=float,
+        help="Physical k threshold for filtered_dns_spectrum (default: checkpoint)"
+    )
     p.add_argument("--van-cittert-iterations", type=int)
     p.add_argument("--van-cittert-relaxation", type=float)
-    p.add_argument(
+    p.add_argument \
+    (
         "--smooth-spectrum",
         action="store_true",
-        help=("Smooth energy spectra with the StylES five-bin moving average; "
-              "the first four bins remain unsmoothed"),
+        help= \
+        (
+            "Smooth energy spectra with the StylES five-bin moving average; "
+            "the first four bins remain unsmoothed"
+        ),
     )
     return p.parse_args()
 
@@ -172,7 +192,8 @@ def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     c = load_checkpoint(a.checkpoint, device)
     validate_hw_checkpoint(c)
-    precision = (
+    precision = \
+    (
         c.get("precision", "float32")
         if a.precision == "checkpoint"
         else a.precision
@@ -186,21 +207,26 @@ def main():
     ly = float(c["ly"])
     alpha = float(c["alpha"])
     training_parameters = c.get("training_parameters", {})
-    inverse_method = (
+    inverse_method = \
+    (
         c.get("inverse_method", training_parameters.get("inverse_method", "exact"))
         if a.inverse_method == "checkpoint"
         else a.inverse_method
     )
-    van_cittert_iterations = (
-        c.get(
+    van_cittert_iterations = \
+    (
+        c.get \
+        (
             "van_cittert_iterations",
             training_parameters.get("van_cittert_iterations", 1),
         )
         if a.van_cittert_iterations is None
         else a.van_cittert_iterations
     )
-    van_cittert_relaxation = (
-        c.get(
+    van_cittert_relaxation = \
+    (
+        c.get \
+        (
             "van_cittert_relaxation",
             training_parameters.get("van_cittert_relaxation", 1.0),
         )
@@ -215,66 +241,88 @@ def main():
     model_output_channels = int(c["model_output_channels"])
     vorticity_mode = c["vorticity_mode"]
     vorticity_from_potential = vorticity_mode == "laplacian_of_potential"
-    dns_vorticity_mode = c.get(
+    dns_vorticity_mode = c.get \
+    (
         "dns_vorticity_mode",
         "derived_from_potential"
         if vorticity_from_potential
         else "independent_channel",
     )
-    inverse_min_wavenumber = (
+    inverse_min_wavenumber = \
+    (
         a.inverse_min_wavenumber if a.inverse_min_wavenumber is not None else
-        float(os.environ.get("PBOUT_UNET_INVERSE_MIN_WAVENUMBER",
-                             c.get("inverse_min_wavenumber", 1.0)))
+        float \
+        (
+            os.environ.get \
+            (
+                "PBOUT_UNET_INVERSE_MIN_WAVENUMBER",
+                c.get("inverse_min_wavenumber", 1.0)
+            )
+        )
     )
     if not np.isfinite(inverse_min_wavenumber) or inverse_min_wavenumber < 0:
         raise ValueError("inverse-min-wavenumber must be finite and nonnegative")
-    cutoff_fraction = optional_environment_float(
+    cutoff_fraction = optional_environment_float \
+    (
         "PBOUT_UNET_INVERSE_CUTOFF_FRACTION",
         c.get("inverse_cutoff_fraction"),
     )
-    cutoff_order = float(
-        os.environ.get(
+    cutoff_order = float \
+    (
+        os.environ.get \
+        (
             "PBOUT_UNET_INVERSE_CUTOFF_ORDER",
             c.get("inverse_cutoff_order", 8.0),
         )
     )
-    inverse_filter_type = (
-        c.get(
+    inverse_filter_type = \
+    (
+        c.get \
+        (
             "inverse_filter",
             training_parameters.get("inverse_filter", "cutoff"),
         )
         if a.inverse_filter == "checkpoint" else a.inverse_filter
     )
-    inverse_filter_type = os.environ.get(
+    inverse_filter_type = os.environ.get \
+    (
         "PBOUT_UNET_INVERSE_FILTER", inverse_filter_type
     ).lower().replace("-", "_")
     if inverse_filter_type not in INVERSE_FILTER_TYPES:
-        raise ValueError(
+        raise ValueError \
+        (
             "PBOUT_UNET_INVERSE_FILTER must be one of "
             f"{', '.join(INVERSE_FILTER_TYPES)}."
         )
     filtered_dns_shell_power_np = c.get("filtered_dns_shell_power")
-    if (
+    if \
+    (
         inverse_filter_type == "filtered_dns_spectrum"
         and filtered_dns_shell_power_np is None
     ):
-        raise ValueError(
+        raise ValueError \
+        (
             "This checkpoint has no averaged filtered-DNS spectrum; train it "
             "with --inverse-filter filtered_dns_spectrum."
         )
-    post_cutoff_fraction = optional_environment_float(
+    post_cutoff_fraction = optional_environment_float \
+    (
         "PBOUT_UNET_POST_CUTOFF_FRACTION",
         c.get("post_cutoff_fraction"),
     )
-    post_cutoff_order = float(
-        os.environ.get(
+    post_cutoff_order = float \
+    (
+        os.environ.get \
+        (
             "PBOUT_UNET_POST_CUTOFF_ORDER",
             c.get("post_cutoff_order", 8.0),
         )
     )
-    post_filter_type = os.environ.get(
+    post_filter_type = os.environ.get \
+    (
         "PBOUT_UNET_POST_FILTER",
-        c.get(
+        c.get \
+        (
             "post_filter",
             c.get("training_parameters", {}).get("post_filter", "high_order"),
         ),
@@ -282,27 +330,32 @@ def main():
     if post_filter_type == "smooth_exponential_cutoff":
         post_filter_type = "high_order"
     if post_filter_type not in POST_FILTER_TYPES:
-        raise ValueError(
+        raise ValueError \
+        (
             "PBOUT_UNET_POST_FILTER must be one of "
             f"{', '.join(POST_FILTER_TYPES)}."
         )
     if cutoff_fraction is not None and not 0 < cutoff_fraction <= 1:
-        raise ValueError(
+        raise ValueError \
+        (
             "PBOUT_UNET_INVERSE_CUTOFF_FRACTION must be in (0, 1]."
         )
     if post_cutoff_fraction is not None and not 0 < post_cutoff_fraction <= 1:
-        raise ValueError(
+        raise ValueError \
+        (
             "PBOUT_UNET_POST_CUTOFF_FRACTION must be in (0, 1]."
         )
     if cutoff_order <= 0:
         raise ValueError("PBOUT_UNET_INVERSE_CUTOFF_ORDER must be positive.")
     if post_cutoff_order <= 0:
         raise ValueError("PBOUT_UNET_POST_CUTOFF_ORDER must be positive.")
-    normalization_enabled = c.get(
+    normalization_enabled = c.get \
+    (
         "normalize",
         c.get("training_parameters", {}).get("normalize", True),
     )
-    effective_inference = {
+    effective_inference = \
+    {
         "checkpoint": str(a.checkpoint),
         "checkpoint_epoch": c.get("epoch"),
         "input": str(a.input),
@@ -321,7 +374,8 @@ def main():
         "post_cutoff_fraction": post_cutoff_fraction,
         "post_cutoff_order": post_cutoff_order,
         "post_filter": post_filter_type,
-        "cutoff_application": {
+        "cutoff_application": \
+        {
             "inverse": "inverse_input_before_inverse_germano",
             "post": "reconstructed_dns_after_inverse_germano",
         },
@@ -329,7 +383,8 @@ def main():
         "dns_vorticity_mode": dns_vorticity_mode,
         "vorticity_operator": c.get("vorticity_operator"),
     }
-    model = ResidualUNetSR(
+    model = ResidualUNetSR \
+    (
         len(fields),
         base_channels,
         fine_n // coarse_n,
@@ -344,8 +399,10 @@ def main():
     std = torch.from_numpy(std_np).to(device)
     output_mean = mean[:, :model_output_channels]
     output_std = std[:, :model_output_channels]
-    filtered_dns_shell_power = (
-        None if filtered_dns_shell_power_np is None else torch.as_tensor(
+    filtered_dns_shell_power = \
+    (
+        None if filtered_dns_shell_power_np is None else torch.as_tensor \
+        (
             filtered_dns_shell_power_np, dtype=torch_dtype, device=device
         )
     )
@@ -354,18 +411,22 @@ def main():
         raise ValueError("No NPZ snapshots found.")
     recreate_output_directory(a.output_dir)
     effective_inference["snapshots_processed"] = len(files)
-    checkpoint_metadata_path, checkpoint_metadata = print_checkpoint_metadata(
+    checkpoint_metadata_path, checkpoint_metadata = print_checkpoint_metadata \
+    (
         a.checkpoint, effective_inference
     )
     rows = []
     for i, p in enumerate(files, 1):
-        dns = load_dns_snapshot(
+        dns = load_dns_snapshot \
+        (
             p, fields, fine_n, lx, ly, dtype=numpy_dtype
         )
-        coarse, fine = filter_snapshot(
+        coarse, fine = filter_snapshot \
+        (
             dns, alpha, lx, ly, coarse_n, dtype=numpy_dtype
         )
-        x = (
+        x = \
+        (
             torch.from_numpy(((coarse - mean_np[0]) / std_np[0])[None])
             .to(device=device, dtype=torch_dtype)
         )
@@ -373,10 +434,12 @@ def main():
             if a.inverse_input == "unet":
                 pf = model(x) * output_std + output_mean
             else:
-                pf = torch.from_numpy(
+                pf = torch.from_numpy \
+                (
                     fine[None, :model_output_channels]
                 ).to(device)
-            inverse_input = inverse_input_filter_torch(
+            inverse_input = inverse_input_filter_torch \
+            (
                 pf,
                 lx,
                 ly,
@@ -386,7 +449,8 @@ def main():
                 filtered_dns_shell_power,
                 min_wavenumber=inverse_min_wavenumber,
             )
-            pd_unconstrained = reconstruct_germano_torch(
+            pd_unconstrained = reconstruct_germano_torch \
+            (
                 inverse_input,
                 alpha,
                 lx,
@@ -395,7 +459,8 @@ def main():
                 van_cittert_iterations,
                 van_cittert_relaxation,
             )
-            pd_unconstrained = post_filter_torch(
+            pd_unconstrained = post_filter_torch \
+            (
                 pd_unconstrained,
                 lx,
                 ly,
@@ -404,40 +469,49 @@ def main():
                 post_cutoff_order,
             )
             if vorticity_from_potential:
-                vorticity = periodic_laplacian_2nd_torch(
+                vorticity = periodic_laplacian_2nd_torch \
+                (
                     pd_unconstrained[:, 1:2], lx, ly
                 )
-                pd_unconstrained = torch.cat(
+                pd_unconstrained = torch.cat \
+                (
                     (pd_unconstrained, vorticity), dim=1
                 )
             pd = enforce_zero_spatial_mean(pd_unconstrained)
-            dns_reference = torch.from_numpy(dns[None]).to(
+            dns_reference = torch.from_numpy(dns[None]).to \
+            (
                 device=device, dtype=torch_dtype
             )
             pd = restore_channel_spatial_mean(pd, dns_reference, 2)
             diagnostic_filtered = pf
             diagnostic_inverse_input = inverse_input
             if vorticity_from_potential:
-                filtered_vorticity = periodic_laplacian_2nd_torch(
+                filtered_vorticity = periodic_laplacian_2nd_torch \
+                (
                     pf[:, 1:2], lx, ly
                 )
-                filtered_vorticity = restore_channel_spatial_mean(
+                filtered_vorticity = restore_channel_spatial_mean \
+                (
                     torch.cat((pf, filtered_vorticity), dim=1),
                     dns_reference,
                     2,
                 )[:, 2:3]
-                diagnostic_filtered = torch.cat(
+                diagnostic_filtered = torch.cat \
+                (
                     (pf, filtered_vorticity), dim=1
                 )
-                filtered_vorticity = periodic_laplacian_2nd_torch(
+                filtered_vorticity = periodic_laplacian_2nd_torch \
+                (
                     inverse_input[:, 1:2], lx, ly
                 )
-                filtered_vorticity = restore_channel_spatial_mean(
+                filtered_vorticity = restore_channel_spatial_mean \
+                (
                     torch.cat((inverse_input, filtered_vorticity), dim=1),
                     dns_reference,
                     2,
                 )[:, 2:3]
-                diagnostic_inverse_input = torch.cat(
+                diagnostic_inverse_input = torch.cat \
+                (
                     (inverse_input, filtered_vorticity), dim=1
                 )
         pf_np = diagnostic_filtered[0].cpu().numpy()
@@ -446,7 +520,8 @@ def main():
         out = a.output_dir / p.stem
         out.mkdir(parents=True, exist_ok=True)
         save_dns_centerline_plots(p.name, fields, dns, pd_np, out)
-        reconstruction = {
+        reconstruction = \
+        {
             "dns_256": dns,
             "filtered_256": fine,
             "filtered_32": coarse,
@@ -466,39 +541,46 @@ def main():
             label = HW_FIELD_LABELS[name]
             de = pd_np[ch] - dns[ch]
             fe = pf_np[ch] - fine[ch]
-            rows.append(
+            rows.append \
+            (
                 {
                     "snapshot": p.name,
                     "field": name,
-                    "filtered_relative_l2": float(
+                    "filtered_relative_l2": float \
+                    (
                         np.linalg.norm(fe.ravel())
                         / np.linalg.norm(fine[ch].ravel())
                     ),
-                    "dns_relative_l2": float(
+                    "dns_relative_l2": float \
+                    (
                         np.linalg.norm(de.ravel())
                         / np.linalg.norm(dns[ch].ravel())
                     ),
                 }
             )
-            save_image(
+            save_image \
+            (
                 dns[ch],
                 f"{label}: DNS (original DNS)",
                 out / f"{name}_DNS.png",
                 cmap,
             )
-            save_image(
+            save_image \
+            (
                 fine[ch],
                 f"{label}: Filtered {fine_n} (filtered DNS)",
                 out / f"{name}_Filtered_{fine_n}.png",
                 cmap,
             )
-            save_image(
+            save_image \
+            (
                 coarse[ch],
                 f"{label}: Filtered {coarse_n} (downsampled filtered image)",
                 out / f"{name}_Filtered_{coarse_n}.png",
                 cmap,
             )
-            save_image(
+            save_image \
+            (
                 inverse_input_np[ch],
                 f"{label}: "
                 f"{inverse_input_label(a.inverse_input, cutoff_fraction, inverse_filter_type)}",
@@ -506,26 +588,30 @@ def main():
                 cmap,
             )
             if a.inverse_input == "unet":
-                save_image(
+                save_image \
+                (
                     fine[ch] - pf_np[ch],
                     f"{label}: Filtered DNS minus U-Net filtered",
                     out / f"{name}_Filtered_DNS_minus_U-Net_filtered.png",
                     "coolwarm",
                     symmetric=True,
                 )
-            save_image(
+            save_image \
+            (
                 pd_np[ch],
                 f"{label}: Reconstructed DNS",
                 out / f"{name}_Reconstructed_DNS.png",
                 cmap,
             )
-            save_image(
+            save_image \
+            (
                 de,
                 f"{label}: DNS reconstruction error",
                 out / f"{name}_DNS_reconstruction_error.png",
                 cmap,
             )
-        save_spectrum_plot(
+        save_spectrum_plot \
+        (
             dns,
             fine,
             coarse,
@@ -535,12 +621,14 @@ def main():
             lx,
             ly,
             out / "HW_energy_spectrum_comparison.png",
-            inverse_input_label(
+            inverse_input_label \
+            (
                 a.inverse_input, cutoff_fraction, inverse_filter_type
             ),
             a.smooth_spectrum,
         )
-        save_field_spectrum_comparison(
+        save_field_spectrum_comparison \
+        (
             pd_np,
             dns,
             fields,
@@ -549,7 +637,8 @@ def main():
             out / "reconstructed_DNS_spectrum_comparison.png",
             post_cutoff_fraction,
         )
-        save_arakawa_comparison(
+        save_arakawa_comparison \
+        (
             pd_np,
             dns,
             lx,
@@ -562,16 +651,19 @@ def main():
         w = csv.DictWriter(f, fieldnames=list(rows[0]))
         w.writeheader()
         w.writerows(rows)
-    effective_inference["checkpoint_metadata_file"] = (
+    effective_inference["checkpoint_metadata_file"] = \
+    (
         str(checkpoint_metadata_path)
         if checkpoint_metadata_path is not None
         else None
     )
-    metadata = {
+    metadata = \
+    {
         "checkpoint_metadata": checkpoint_metadata,
         "effective_inference": effective_inference,
     }
-    (a.output_dir / "inference_metadata.json").write_text(
+    (a.output_dir / "inference_metadata.json").write_text \
+    (
         json.dumps(metadata, indent=2)
     )
 

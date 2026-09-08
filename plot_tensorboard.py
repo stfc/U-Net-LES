@@ -8,25 +8,31 @@ import json
 from pathlib import Path
 
 import matplotlib.pyplot as plt
-from tensorboard.backend.event_processing.event_accumulator import (
+from tensorboard.backend.event_processing.event_accumulator import \
+(
     EventAccumulator,
 )
 
 
-PLOT_GROUPS = {
+PLOT_GROUPS = \
+{
     "losses": ("total", "filtered", "filtered_P", "kl"),
     "relative_l2": ("filtered_relative_l2", "dns_relative_l2"),
     "filtered_field_losses": ("filtered_U", "filtered_V"),
 }
 
-PANEL_LAYOUT = [
+PANEL_LAYOUT = \
+[
     ["definitions", "definitions", "total", "learning_rate"],
     ["filtered", "filtered_U", "filtered_V", "filtered_P"],
-    ["kl", "kl",
-     "filtered_relative_l2", "dns_relative_l2"],
+    [
+        "kl", "kl",
+        "filtered_relative_l2", "dns_relative_l2"
+    ],
 ]
 
-METRIC_TITLES = {
+METRIC_TITLES = \
+{
     "total": "Total Training Objective",
     "filtered": "U-Net Density/Potential L1",
     "filtered_U": "U-Net Density L1",
@@ -39,22 +45,27 @@ METRIC_TITLES = {
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(
+    parser = argparse.ArgumentParser \
+    (
         description="Plot scalar metrics stored in TensorBoard event files."
     )
-    parser.add_argument(
+    parser.add_argument \
+    (
         "run_dir",
         type=Path,
-        help=(
+        help= \
+        (
             "Training output directory or its tensorboard subdirectory"
         ),
     )
-    parser.add_argument(
+    parser.add_argument \
+    (
         "--output-dir",
         type=Path,
         help="PNG destination (default: RUN_DIR/tensorboard_plots)",
     )
-    parser.add_argument(
+    parser.add_argument \
+    (
         "--linear-scale",
         action="store_true",
         help="Use a linear y-axis instead of logarithmic scaling",
@@ -84,7 +95,8 @@ def format_weight(value):
     return "unknown" if value is None else f"{value:g}"
 
 
-def plot_all_metrics(
+def plot_all_metrics \
+(
     accumulator,
     output_path,
     log_scale,
@@ -92,13 +104,15 @@ def plot_all_metrics(
 ):
     training_parameters = training_parameters or {}
     available = set(accumulator.Tags().get("scalars", ()))
-    fig, axes = plt.subplot_mosaic(
+    fig, axes = plt.subplot_mosaic \
+    (
         PANEL_LAYOUT,
         figsize=(20.8, 13.4),
         gridspec_kw={"height_ratios": (1, 1, 1)},
     )
     plotted = False
-    for metric in (
+    for metric in \
+    (
         "total",
         "learning_rate",
         "filtered",
@@ -111,7 +125,8 @@ def plot_all_metrics(
     ):
         ax = axes[metric]
         if metric == "learning_rate":
-            steps, values = scalar_series(
+            steps, values = scalar_series \
+            (
                 accumulator, "optimizer/learning_rate"
             ) if "optimizer/learning_rate" in available else ([], [])
             if steps:
@@ -119,7 +134,8 @@ def plot_all_metrics(
                 plotted = True
             ax.set_title("Learning Rate")
         else:
-            for split, color in (
+            for split, color in \
+            (
                 ("train", "tab:blue"),
                 ("validation", "tab:orange"),
             ):
@@ -129,9 +145,13 @@ def plot_all_metrics(
                 steps, values = scalar_series(accumulator, tag)
                 ax.plot(steps, values, color=color, label=split)
                 plotted = True
-            ax.set_title(METRIC_TITLES.get(
-                metric, metric.replace("_", " ").title()
-            ))
+            ax.set_title \
+            (
+                METRIC_TITLES.get \
+                (
+                    metric, metric.replace("_", " ").title()
+                )
+            )
         ax.set_xlabel("Epoch")
         ax.set_ylabel("Value")
         if log_scale:
@@ -141,7 +161,8 @@ def plot_all_metrics(
             if metric != "learning_rate":
                 ax.legend()
         else:
-            ax.text(
+            ax.text \
+            (
                 0.5,
                 0.5,
                 "No scalar data",
@@ -153,20 +174,24 @@ def plot_all_metrics(
     definition_ax.set_axis_off()
     vorticity_weight = training_parameters.get("lambda_vorticity")
     if vorticity_weight is None:
-        vorticity_weight = training_parameters.get(
+        vorticity_weight = training_parameters.get \
+        (
             "effective_loss_weights", {}
         ).get("vorticity")
-    kl_weight = training_parameters.get("effective_loss_weights", {}).get(
+    kl_weight = training_parameters.get("effective_loss_weights", {}).get \
+    (
         "kl", training_parameters.get("lambda_kl")
     )
     if training_parameters.get("variational") is False:
         kl_weight = 0.0
-    normalization = (
+    normalization = \
+    (
         "Errors in n and phi are scaled by their filtered training standard deviations."
         if training_parameters.get("normalize", True)
         else "Errors in n and phi use physical values (no normalization)."
     )
-    definitions = (
+    definitions = \
+    (
         "Active training objective\n"
         r"$\mathcal{L}_{total}=\mathcal{L}_{n,\phi}"
         r"+\lambda_{\omega}\mathcal{L}_{\omega}"
@@ -188,7 +213,8 @@ def plot_all_metrics(
         r"$L_{2,\mathrm{relative}}="
         r"\dfrac{\|\hat{q}-q\|_2}{\|q\|_2}$ (diagnostic only)."
     )
-    definition_ax.text(
+    definition_ax.text \
+    (
         0.5,
         0.5,
         definitions,
@@ -197,7 +223,8 @@ def plot_all_metrics(
         fontsize=10,
         linespacing=1.25,
         transform=definition_ax.transAxes,
-        bbox={
+        bbox= \
+        {
             "boxstyle": "round,pad=0.6",
             "facecolor": "whitesmoke",
             "edgecolor": "0.35",
@@ -220,27 +247,31 @@ def main():
     if not log_dir.is_dir():
         raise FileNotFoundError(f"TensorBoard directory not found: {log_dir}")
     if not list(log_dir.glob("events.out.tfevents.*")):
-        raise FileNotFoundError(
+        raise FileNotFoundError \
+        (
             f"No TensorBoard event files were found in {log_dir}"
         )
 
     output_dir = args.output_dir or args.run_dir / "tensorboard_plots"
     output_dir.mkdir(parents=True, exist_ok=True)
-    accumulator = EventAccumulator(
+    accumulator = EventAccumulator \
+    (
         str(log_dir), size_guidance={"scalars": 0}
     )
     accumulator.Reload()
     training_parameters = load_training_parameters(args.run_dir) or {}
 
     output_path = output_dir / "tensorboard_summary.png"
-    if not plot_all_metrics(
+    if not plot_all_metrics \
+    (
         accumulator,
         output_path,
         log_scale=not args.linear_scale,
         training_parameters=training_parameters,
     ):
         available = accumulator.Tags().get("scalars", ())
-        raise RuntimeError(
+        raise RuntimeError \
+        (
             "No recognized training scalars were found. Available tags: "
             + ", ".join(available)
         )

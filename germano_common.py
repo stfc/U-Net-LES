@@ -17,7 +17,8 @@ if not math.isfinite(SPECTRUM_Y_MIN) or SPECTRUM_Y_MIN <= 0:
 SPECTRUM_Y_MAX = 10.0
 
 HW_FIELD_NAMES = ("U", "V", "P")
-HW_FIELD_LABELS = {
+HW_FIELD_LABELS = \
+{
     "U": r"electron density $n_e$",
     "V": r"electrostatic potential $\phi$",
     "P": r"vorticity $\omega$",
@@ -37,22 +38,26 @@ def load_checkpoint(path: Path, device: torch.device):
 def validate_hw_checkpoint(checkpoint: dict) -> None:
     fields = tuple(checkpoint.get("field_names", ()))
     if fields != HW_FIELD_NAMES or checkpoint.get("physics_version") != 1:
-        raise ValueError(
+        raise ValueError \
+        (
             "This checkpoint predates the Hasegawa-Wakatani constraints. "
             "Retrain it with fields U, V, P before inference or resuming."
         )
     mode = checkpoint.get("vorticity_mode")
     if mode not in ("learned_channel", "laplacian_of_potential"):
-        raise ValueError(
+        raise ValueError \
+        (
             "Checkpoint vorticity mode must be learned_channel or "
             "laplacian_of_potential."
         )
     expected_outputs = 3 if mode == "learned_channel" else 2
     if checkpoint.get("model_output_channels") != expected_outputs:
-        raise ValueError(
+        raise ValueError \
+        (
             f"{mode} checkpoints require {expected_outputs} model outputs."
         )
-    validate_grid_pair(
+    validate_grid_pair \
+    (
         int(checkpoint["fine_n"]),
         int(checkpoint["coarse_n"]),
     )
@@ -65,11 +70,13 @@ def validate_grid_pair(fine_n: int, coarse_n: int) -> int:
     if coarse_n > fine_n:
         raise ValueError("LES coarse_n cannot exceed DNS fine_n.")
     if fine_n % coarse_n:
-        raise ValueError(
+        raise ValueError \
+        (
             "DNS fine_n must be an integer multiple of LES coarse_n."
         )
     if fine_n % 8:
-        raise ValueError(
+        raise ValueError \
+        (
             "DNS fine_n must be divisible by 8 for the three-level U-Net."
         )
     return fine_n // coarse_n
@@ -90,11 +97,13 @@ def k2_numpy(n: int, lx: float, ly: float) -> np.ndarray:
     return kxg**2 + kyg**2
 
 
-def germano_filter(
+def germano_filter \
+(
     field: np.ndarray, alpha: float, lx: float, ly: float
 ) -> np.ndarray:
     fh = np.fft.fft2(field)
-    return np.fft.ifft2(
+    return np.fft.ifft2 \
+    (
         fh / (1 + alpha**2 * k2_numpy(field.shape[0], lx, ly))
     ).real
 
@@ -108,27 +117,32 @@ def spectral_resize(field: np.ndarray, target_n: int) -> np.ndarray:
     copy_n = min(source_n, target_n)
     ss = (source_n - copy_n) // 2
     ts = (target_n - copy_n) // 2
-    th[ts : ts + copy_n, ts : ts + copy_n] = sh[
+    th[ts : ts + copy_n, ts : ts + copy_n] = sh \
+    [
         ss : ss + copy_n, ss : ss + copy_n
     ]
     th *= (target_n / source_n) ** 2
     return np.fft.ifft2(np.fft.ifftshift(th)).real
 
 
-def k2_torch(
+def k2_torch \
+(
     n: int, lx: float, ly: float, device: torch.device, dtype: torch.dtype
 ) -> torch.Tensor:
-    kx = (
+    kx = \
+    (
         2 * math.pi * torch.fft.fftfreq(n, d=lx / n, device=device, dtype=dtype)
     )
-    ky = (
+    ky = \
+    (
         2 * math.pi * torch.fft.fftfreq(n, d=ly / n, device=device, dtype=dtype)
     )
     kxg, kyg = torch.meshgrid(kx, ky, indexing="ij")
     return kxg.square() + kyg.square()
 
 
-def inverse_germano_torch(
+def inverse_germano_torch \
+(
     filtered: torch.Tensor,
     alpha: float,
     lx: float,
@@ -147,7 +161,8 @@ def inverse_germano_torch(
             raise ValueError("cutoff_order must be positive.")
         grid_nyquist = min(math.pi / (lx / n), math.pi / (ly / n))
         cutoff_wavenumber = cutoff_fraction * grid_nyquist
-        mult = mult * torch.exp(
+        mult = mult * torch.exp \
+        (
             -(torch.sqrt(k2) / cutoff_wavenumber) ** cutoff_order
         )
     reconstructed = torch.fft.ifft2(mult * fh, dim=(-2, -1)).real
@@ -157,7 +172,8 @@ def inverse_germano_torch(
 INVERSE_METHODS = ("exact", "van_cittert")
 
 
-def van_cittert_torch(
+def van_cittert_torch \
+(
     filtered: torch.Tensor,
     alpha: float,
     lx: float,
@@ -184,14 +200,16 @@ def van_cittert_torch(
     estimate = filtered
     for _ in range(iterations):
         estimate_hat = torch.fft.fft2(estimate, dim=(-2, -1))
-        refiltered = torch.fft.ifft2(
+        refiltered = torch.fft.ifft2 \
+        (
             filter_multiplier * estimate_hat, dim=(-2, -1)
         ).real
         estimate = estimate + relaxation * (filtered - refiltered)
     return enforce_zero_spatial_mean(estimate)
 
 
-def reconstruct_germano_torch(
+def reconstruct_germano_torch \
+(
     filtered: torch.Tensor,
     alpha: float,
     lx: float,
@@ -204,7 +222,8 @@ def reconstruct_germano_torch(
     if method == "exact":
         return inverse_germano_torch(filtered, alpha, lx, ly)
     if method == "van_cittert":
-        return van_cittert_torch(
+        return van_cittert_torch \
+        (
             filtered,
             alpha,
             lx,
@@ -212,7 +231,8 @@ def reconstruct_germano_torch(
             van_cittert_iterations,
             van_cittert_relaxation,
         )
-    raise ValueError(
+    raise ValueError \
+    (
         f"Unknown inverse method {method!r}; choose from {INVERSE_METHODS}."
     )
 
@@ -222,7 +242,8 @@ def enforce_zero_spatial_mean(fields: torch.Tensor) -> torch.Tensor:
     return fields - fields.mean(dim=(-2, -1), keepdim=True)
 
 
-def restore_channel_spatial_mean(
+def restore_channel_spatial_mean \
+(
     fields: torch.Tensor,
     reference: torch.Tensor,
     channel_index: int,
@@ -232,18 +253,21 @@ def restore_channel_spatial_mean(
         raise ValueError("Fields and reference must have the same batch size.")
     if not 0 <= channel_index < fields.shape[1]:
         raise IndexError(f"Channel index {channel_index} is out of range.")
-    reference_mean = reference[:, channel_index:channel_index + 1].mean(
+    reference_mean = reference[:, channel_index:channel_index + 1].mean \
+    (
         dim=(-2, -1), keepdim=True
     )
     channels = list(fields.split(1, dim=1))
     channel = channels[channel_index]
-    channels[channel_index] = (
+    channels[channel_index] = \
+    (
         channel - channel.mean(dim=(-2, -1), keepdim=True) + reference_mean
     )
     return torch.cat(channels, dim=1)
 
 
-def spectral_cutoff_torch(
+def spectral_cutoff_torch \
+(
     field: torch.Tensor,
     lx: float,
     ly: float,
@@ -261,7 +285,8 @@ def spectral_cutoff_torch(
     k2 = k2_torch(n, lx, ly, field.device, field.dtype)
     grid_nyquist = min(math.pi / (lx / n), math.pi / (ly / n))
     cutoff_wavenumber = cutoff_fraction * grid_nyquist
-    multiplier = torch.exp(
+    multiplier = torch.exp \
+    (
         -(torch.sqrt(k2) / cutoff_wavenumber) ** cutoff_order
     )
     fh = torch.fft.fft2(field, dim=(-2, -1))
@@ -276,12 +301,14 @@ def _spectral_shell_indices(n, lx, ly, device):
     kx = 2 * math.pi * torch.fft.fftfreq(n, d=lx / n, device=device)
     ky = 2 * math.pi * torch.fft.fftfreq(n, d=ly / n, device=device)
     dk = min(2 * math.pi / lx, 2 * math.pi / ly)
-    return torch.round(
+    return torch.round \
+    (
         torch.sqrt(kx[:, None] ** 2 + ky[None, :] ** 2) / dk
     ).long()
 
 
-def filtered_dns_spectrum_filter_torch(
+def filtered_dns_spectrum_filter_torch \
+(
     field, lx, ly, target_shell_power, min_wavenumber=1.0
 ):
     """Suppress Fourier shells whose power exceeds the training-DNS mean.
@@ -294,17 +321,20 @@ def filtered_dns_spectrum_filter_torch(
     spectrum therefore regularizes only the smaller scales.
     """
     if target_shell_power is None:
-        raise ValueError(
+        raise ValueError \
+        (
             "The filtered-DNS spectrum filter requires a spectrum stored in "
             "the checkpoint."
         )
     if not math.isfinite(min_wavenumber) or min_wavenumber < 0:
         raise ValueError("min_wavenumber must be finite and non-negative.")
-    target = torch.as_tensor(
+    target = torch.as_tensor \
+    (
         target_shell_power, dtype=field.dtype, device=field.device
     )
     if target.ndim != 2 or target.shape[0] != field.shape[1]:
-        raise ValueError(
+        raise ValueError \
+        (
             "Filtered-DNS target spectrum must have shape (channels, shells)."
         )
     fh = torch.fft.fft2(field, dim=(-2, -1))
@@ -314,23 +344,30 @@ def filtered_dns_spectrum_filter_torch(
     if int(flat_shells.max()) >= shell_count:
         raise ValueError("Stored filtered-DNS spectrum has too few shells.")
     power = fh.abs().square().mean(dim=0).flatten(1)
-    sums = torch.zeros((field.shape[1], shell_count), dtype=field.dtype,
-                       device=field.device)
+    sums = torch.zeros \
+    (
+        (field.shape[1], shell_count), dtype=field.dtype,
+        device=field.device
+    )
     sums.scatter_add_(1, flat_shells.expand(field.shape[1], -1), power)
     counts = torch.bincount(flat_shells, minlength=shell_count).to(field.dtype)
     current = sums / counts.clamp_min(1).unsqueeze(0)
-    scale = torch.sqrt(
+    scale = torch.sqrt \
+    (
         target / current.clamp_min(torch.finfo(field.dtype).tiny)
     )
     scale = scale.clamp(max=1.0)
     multiplier = scale[:, flat_shells].reshape(1, field.shape[1], *shells.shape)
     if min_wavenumber > 0:
-        wavenumber = torch.sqrt(
-            k2_torch(
+        wavenumber = torch.sqrt \
+        (
+            k2_torch \
+            (
                 field.shape[-1], lx, ly, field.device, field.dtype
             )
         )
-        multiplier = torch.where(
+        multiplier = torch.where \
+        (
             wavenumber[None, None] <= min_wavenumber,
             torch.ones_like(multiplier),
             multiplier,
@@ -338,7 +375,8 @@ def filtered_dns_spectrum_filter_torch(
     return torch.fft.ifft2(fh * multiplier, dim=(-2, -1)).real
 
 
-def inverse_input_filter_torch(
+def inverse_input_filter_torch \
+(
     field, lx, ly, filter_type="cutoff", cutoff_fraction=None,
     cutoff_order=8, target_shell_power=None, min_wavenumber=1.0,
 ):
@@ -346,10 +384,12 @@ def inverse_input_filter_torch(
     if filter_type not in INVERSE_FILTER_TYPES:
         raise ValueError(f"Unknown inverse filter {filter_type!r}.")
     if filter_type == "cutoff":
-        return spectral_cutoff_torch(
+        return spectral_cutoff_torch \
+        (
             field, lx, ly, cutoff_fraction, cutoff_order
         )
-    return filtered_dns_spectrum_filter_torch(
+    return filtered_dns_spectrum_filter_torch \
+    (
         field, lx, ly, target_shell_power, min_wavenumber=min_wavenumber
     )
 
@@ -357,7 +397,8 @@ def inverse_input_filter_torch(
 POST_FILTER_TYPES = ("none", "high_order", "gaussian")
 
 
-def post_filter_torch(
+def post_filter_torch \
+(
     field: torch.Tensor,
     lx: float,
     ly: float,
@@ -367,14 +408,16 @@ def post_filter_torch(
 ) -> torch.Tensor:
     """Apply a selected post-inversion spectral low-pass filter."""
     if filter_type not in POST_FILTER_TYPES:
-        raise ValueError(
+        raise ValueError \
+        (
             f"Unknown post filter {filter_type!r}; choose from "
             f"{POST_FILTER_TYPES}."
         )
     if filter_type == "none":
         return field
     if filter_type == "high_order":
-        return spectral_cutoff_torch(
+        return spectral_cutoff_torch \
+        (
             field, lx, ly, cutoff_fraction, cutoff_order
         )
     if cutoff_fraction is None:
@@ -394,61 +437,71 @@ def recursive_npz_files(directory: Path) -> list[Path]:
     return sorted(p for p in directory.rglob("*.npz") if p.is_file())
 
 
-def periodic_laplacian_2nd_numpy(
+def periodic_laplacian_2nd_numpy \
+(
     field: np.ndarray, lx: float, ly: float
 ) -> np.ndarray:
     """Second-order centered periodic Laplacian on the last two dimensions."""
     nx, ny = field.shape[-2:]
     dx = lx / nx
     dy = ly / ny
-    dxx = (
+    dxx = \
+    (
         np.roll(field, 1, axis=-2) - 2 * field
         + np.roll(field, -1, axis=-2)
     ) / dx**2
-    dyy = (
+    dyy = \
+    (
         np.roll(field, 1, axis=-1) - 2 * field
         + np.roll(field, -1, axis=-1)
     ) / dy**2
     return dxx + dyy
 
 
-def periodic_laplacian_2nd_torch(
+def periodic_laplacian_2nd_torch \
+(
     field: torch.Tensor, lx: float, ly: float
 ) -> torch.Tensor:
     """Differentiable second-order centered periodic Laplacian."""
     nx, ny = field.shape[-2:]
     dx = lx / nx
     dy = ly / ny
-    dxx = (
+    dxx = \
+    (
         torch.roll(field, 1, dims=-2) - 2 * field
         + torch.roll(field, -1, dims=-2)
     ) / dx**2
-    dyy = (
+    dyy = \
+    (
         torch.roll(field, 1, dims=-1) - 2 * field
         + torch.roll(field, -1, dims=-1)
     ) / dy**2
     return dxx + dyy
 
 
-def periodic_laplacian_4th_numpy(
+def periodic_laplacian_4th_numpy \
+(
     field: np.ndarray, lx: float, ly: float
 ) -> np.ndarray:
     """Fourth-order periodic Laplacian on the last two array dimensions."""
     nx, ny = field.shape[-2:]
     if nx < 5 or ny < 5:
-        raise ValueError(
+        raise ValueError \
+        (
             "The fourth-order Laplacian requires at least 5 points."
         )
     dx = lx / nx
     dy = ly / ny
-    dxx = (
+    dxx = \
+    (
         -np.roll(field, 2, axis=-2)
         + 16 * np.roll(field, 1, axis=-2)
         - 30 * field
         + 16 * np.roll(field, -1, axis=-2)
         - np.roll(field, -2, axis=-2)
     ) / (12 * dx**2)
-    dyy = (
+    dyy = \
+    (
         -np.roll(field, 2, axis=-1)
         + 16 * np.roll(field, 1, axis=-1)
         - 30 * field
@@ -458,25 +511,29 @@ def periodic_laplacian_4th_numpy(
     return dxx + dyy
 
 
-def periodic_laplacian_4th_torch(
+def periodic_laplacian_4th_torch \
+(
     field: torch.Tensor, lx: float, ly: float
 ) -> torch.Tensor:
     """Differentiable fourth-order periodic Laplacian."""
     nx, ny = field.shape[-2:]
     if nx < 5 or ny < 5:
-        raise ValueError(
+        raise ValueError \
+        (
             "The fourth-order Laplacian requires at least 5 points."
         )
     dx = lx / nx
     dy = ly / ny
-    dxx = (
+    dxx = \
+    (
         -torch.roll(field, 2, dims=-2)
         + 16 * torch.roll(field, 1, dims=-2)
         - 30 * field
         + 16 * torch.roll(field, -1, dims=-2)
         - torch.roll(field, -2, dims=-2)
     ) / (12 * dx**2)
-    dyy = (
+    dyy = \
+    (
         -torch.roll(field, 2, dims=-1)
         + 16 * torch.roll(field, 1, dims=-1)
         - 30 * field
@@ -486,7 +543,8 @@ def periodic_laplacian_4th_torch(
     return dxx + dyy
 
 
-def load_dns_snapshot(
+def load_dns_snapshot \
+(
     path: Path,
     field_names: Sequence[str],
     expected_n: int,
@@ -509,7 +567,8 @@ def load_dns_snapshot(
     return np.stack(arrays).astype(dtype, copy=False)
 
 
-def filter_snapshot(
+def filter_snapshot \
+(
     dns: np.ndarray,
     alpha: float,
     lx: float,
@@ -517,16 +576,19 @@ def filter_snapshot(
     coarse_n: int,
     dtype=np.float32,
 ) -> tuple[np.ndarray, np.ndarray]:
-    fine = np.stack(
+    fine = np.stack \
+    (
         [germano_filter(channel, alpha, lx, ly) for channel in dns]
     ).astype(dtype)
-    coarse = np.stack(
+    coarse = np.stack \
+    (
         [spectral_resize(channel, coarse_n) for channel in fine]
     ).astype(dtype)
     return coarse, fine
 
 
-def calculate_filtered_dns_shell_power(
+def calculate_filtered_dns_shell_power \
+(
     files, field_names, fine_n, coarse_n, alpha, lx, ly,
     output_channels, dtype=np.float32,
 ):
@@ -534,24 +596,29 @@ def calculate_filtered_dns_shell_power(
     kx = 2 * np.pi * np.fft.fftfreq(fine_n, d=lx / fine_n)
     ky = 2 * np.pi * np.fft.fftfreq(fine_n, d=ly / fine_n)
     dk = min(2 * np.pi / lx, 2 * np.pi / ly)
-    shells = np.rint(
+    shells = np.rint \
+    (
         np.sqrt(kx[:, None] ** 2 + ky[None, :] ** 2) / dk
     ).astype(np.int64)
     shell_count = int(shells.max()) + 1
     counts = np.bincount(shells.ravel(), minlength=shell_count)
     total = np.zeros((output_channels, shell_count), dtype=np.float64)
     for index, path in enumerate(files, 1):
-        dns = load_dns_snapshot(
+        dns = load_dns_snapshot \
+        (
             path, field_names, fine_n, lx, ly, dtype=dtype
         )
-        _, filtered = filter_snapshot(
+        _, filtered = filter_snapshot \
+        (
             dns, alpha, lx, ly, coarse_n, dtype=dtype
         )
-        power = np.abs(
+        power = np.abs \
+        (
             np.fft.fft2(filtered[:output_channels], axes=(-2, -1))
         ) ** 2
         for channel in range(output_channels):
-            total[channel] += np.bincount(
+            total[channel] += np.bincount \
+            (
                 shells.ravel(), weights=power[channel].ravel(),
                 minlength=shell_count,
             )
@@ -560,7 +627,8 @@ def calculate_filtered_dns_shell_power(
     return (total / (len(files) * counts[None, :])).astype(dtype)
 
 
-def calculate_training_statistics(
+def calculate_training_statistics \
+(
     files: Sequence[Path],
     field_names: Sequence[str],
     fine_n: int,
@@ -577,10 +645,12 @@ def calculate_training_statistics(
     dns_ss = np.zeros(c)
     npts = 0
     for i, p in enumerate(files, 1):
-        dns = load_dns_snapshot(
+        dns = load_dns_snapshot \
+        (
             p, field_names, fine_n, lx, ly, dtype=dtype
         )
-        _, fine = filter_snapshot(
+        _, fine = filter_snapshot \
+        (
             dns, alpha, lx, ly, coarse_n, dtype=dtype
         )
         s += fine.sum((1, 2), dtype=np.float64)
@@ -596,7 +666,8 @@ def calculate_training_statistics(
     dns_mean = dns_s / npts
     dns_var = np.maximum(dns_ss / npts - dns_mean**2, 0)
     dns_std = np.maximum(np.sqrt(dns_var), 1e-8)
-    return (
+    return \
+    (
         mean.astype(dtype).reshape(1, c, 1, 1),
         std.astype(dtype).reshape(1, c, 1, 1),
         dns_std.astype(dtype).reshape(1, c, 1, 1),
@@ -604,7 +675,8 @@ def calculate_training_statistics(
 
 
 class GermanoSnapshotDataset(Dataset):
-    def __init__(
+    def __init__ \
+    (
         self, files, field_names, fine_n, coarse_n, alpha, lx, ly, mean, std,
         random_periodic_shift=False,
         periodic_directions=(True, True),
@@ -622,7 +694,8 @@ class GermanoSnapshotDataset(Dataset):
         self.periodic_directions = tuple(bool(v) for v in periodic_directions)
         if len(self.periodic_directions) != 2:
             raise ValueError("periodic_directions must contain x and y flags.")
-        self.random_periodic_shift = (
+        self.random_periodic_shift = \
+        (
             random_periodic_shift and all(self.periodic_directions)
         )
         self.scale_factor = fine_n // coarse_n
@@ -631,7 +704,8 @@ class GermanoSnapshotDataset(Dataset):
         return len(self.files)
 
     def __getitem__(self, index):
-        dns = load_dns_snapshot(
+        dns = load_dns_snapshot \
+        (
             self.files[index],
             self.field_names,
             self.fine_n,
@@ -639,7 +713,8 @@ class GermanoSnapshotDataset(Dataset):
             self.ly,
             dtype=self.dtype,
         )
-        coarse, fine = filter_snapshot(
+        coarse, fine = filter_snapshot \
+        (
             dns,
             self.alpha,
             self.lx,
@@ -648,17 +723,20 @@ class GermanoSnapshotDataset(Dataset):
             dtype=self.dtype,
         )
         if self.random_periodic_shift:
-            coarse_shift = tuple(
+            coarse_shift = tuple \
+            (
                 int(value)
                 for value in np.random.randint(0, self.coarse_n, size=2)
             )
-            fine_shift = tuple(
+            fine_shift = tuple \
+            (
                 value * self.scale_factor for value in coarse_shift
             )
             coarse = np.roll(coarse, coarse_shift, axis=(-2, -1))
             fine = np.roll(fine, fine_shift, axis=(-2, -1))
             dns = np.roll(dns, fine_shift, axis=(-2, -1))
-        return (
+        return \
+        (
             torch.from_numpy((coarse - self.mean) / self.std),
             torch.from_numpy((fine - self.mean) / self.std),
             torch.from_numpy(dns),
@@ -671,7 +749,8 @@ class ConvBlock(nn.Module):
         g = min(8, oc)
         while oc % g:
             g -= 1
-        self.net = nn.Sequential(
+        self.net = nn.Sequential \
+        (
             nn.Conv2d(ic, oc, 3, padding=1, padding_mode="circular"),
             nn.GroupNorm(g, oc),
             nn.GELU(),
@@ -687,7 +766,8 @@ class ConvBlock(nn.Module):
 def periodic_interpolate(x, scale_factor, mode):
     """Upsample with an interpolation stencil that wraps periodically."""
     if mode not in ("bilinear", "bicubic"):
-        raise ValueError(
+        raise ValueError \
+        (
             "Periodic interpolation supports bilinear or bicubic mode."
         )
     if isinstance(scale_factor, int):
@@ -697,17 +777,20 @@ def periodic_interpolate(x, scale_factor, mode):
     if len(scales) != 2 or any(scale < 1 for scale in scales):
         raise ValueError("scale_factor must contain two positive integers.")
     if any(int(scale) != scale for scale in scales):
-        raise ValueError(
+        raise ValueError \
+        (
             "Periodic interpolation requires integer scale factors."
         )
     scale_x, scale_y = (int(scale) for scale in scales)
     radius = 1 if mode == "bilinear" else 2
-    padded = nn.functional.pad(
+    padded = nn.functional.pad \
+    (
         x,
         (radius, radius, radius, radius),
         mode="circular",
     )
-    upsampled = nn.functional.interpolate(
+    upsampled = nn.functional.interpolate \
+    (
         padded,
         scale_factor=(scale_x, scale_y),
         mode=mode,
@@ -727,7 +810,8 @@ class UpBlock(nn.Module):
         scale_x = skip.shape[-2] // x.shape[-2]
         scale_y = skip.shape[-1] // x.shape[-1]
         if x.shape[-2] * scale_x != skip.shape[-2]:
-            raise ValueError(
+            raise ValueError \
+            (
                 "Skip height must be an integer multiple of input."
             )
         if x.shape[-1] * scale_y != skip.shape[-1]:
@@ -737,7 +821,8 @@ class UpBlock(nn.Module):
 
 
 class ResidualUNetSR(nn.Module):
-    def __init__(
+    def __init__ \
+    (
         self, channels=3, base_channels=24, scale_factor=8, output_channels=2,
         variational=True
     ):
@@ -766,7 +851,8 @@ class ResidualUNetSR(nn.Module):
         Set sample=True for stochastic inference. KL is averaged over the
         batch, latent channels and spatial cells, against a unit Gaussian.
         """
-        base = periodic_interpolate(
+        base = periodic_interpolate \
+        (
             coarse,
             self.scale_factor,
             "bicubic",
@@ -788,7 +874,8 @@ class ResidualUNetSR(nn.Module):
         return (prediction, kl) if return_kl else prediction
 
 
-def calculate_losses(
+def calculate_losses \
+(
     model,
     coarse,
     filtered_target_normalised,
@@ -819,7 +906,8 @@ def calculate_losses(
     prediction, kl = model(coarse, return_kl=True)
     pf = prediction * output_std + output_mean
     pn = (pf - output_mean) / output_std
-    inverse_input = inverse_input_filter_torch(
+    inverse_input = inverse_input_filter_torch \
+    (
         pf,
         lx,
         ly,
@@ -829,7 +917,8 @@ def calculate_losses(
         filtered_dns_shell_power,
         min_wavenumber=inverse_min_wavenumber,
     )
-    pd = reconstruct_germano_torch(
+    pd = reconstruct_germano_torch \
+    (
         inverse_input,
         alpha,
         lx,
@@ -838,7 +927,8 @@ def calculate_losses(
         van_cittert_iterations,
         van_cittert_relaxation,
     )
-    pd = post_filter_torch(
+    pd = post_filter_torch \
+    (
         pd,
         lx,
         ly,
@@ -851,13 +941,15 @@ def calculate_losses(
         pd = torch.cat((pd, vorticity), dim=1)
     # pd = enforce_zero_spatial_mean(pd)
     # pd = restore_channel_spatial_mean(pd, dns_target, 2)
-    lf = nn.functional.l1_loss(
+    lf = nn.functional.l1_loss \
+    (
         pn, filtered_target_normalised[:, :output_channels]
     )
     dns_absolute_error = torch.abs((pd - dns_target) / dns_std)
     ld = dns_absolute_error.mean()
     total = lf + lambda_dns * ld
-    return (
+    return \
+    (
         total,
         {
             "total": total,
@@ -884,36 +976,43 @@ def hw_energy_spectrum_torch(fields, lx, ly):
     nx, ny = fields.shape[-2:]
     density_hat = torch.fft.fft2(fields[..., 0, :, :], dim=(-2, -1))
     potential_hat = torch.fft.fft2(fields[..., 1, :, :], dim=(-2, -1))
-    kx = 2 * math.pi * torch.fft.fftfreq(
+    kx = 2 * math.pi * torch.fft.fftfreq \
+    (
         nx, d=lx / nx, device=fields.device, dtype=fields.dtype
     )
-    ky = 2 * math.pi * torch.fft.fftfreq(
+    ky = 2 * math.pi * torch.fft.fftfreq \
+    (
         ny, d=ly / ny, device=fields.device, dtype=fields.dtype
     )
     dphi_dx_hat = 1j * kx[:, None] * potential_hat
     dphi_dy_hat = 1j * ky[None, :] * potential_hat
     normalization = float(nx * ny) ** 2
-    return 0.5 * (
+    return 0.5 * \
+    (
         density_hat.abs().square()
         + dphi_dx_hat.abs().square()
         + dphi_dy_hat.abs().square()
     ) / normalization
 
 
-def above_les_cutoff_mask(
+def above_les_cutoff_mask \
+(
     fine_shape, coarse_shape, lx, ly, device=None, dtype=None
 ):
     """Select Fourier modes whose radial wavenumber exceeds LES Nyquist."""
     fine_nx, fine_ny = fine_shape
     coarse_nx, coarse_ny = coarse_shape
     dtype = dtype or torch.get_default_dtype()
-    kx = 2 * math.pi * torch.fft.fftfreq(
+    kx = 2 * math.pi * torch.fft.fftfreq \
+    (
         fine_nx, d=lx / fine_nx, device=device, dtype=dtype
     )
-    ky = 2 * math.pi * torch.fft.fftfreq(
+    ky = 2 * math.pi * torch.fft.fftfreq \
+    (
         fine_ny, d=ly / fine_ny, device=device, dtype=dtype
     )
-    les_cutoff = min(
+    les_cutoff = min \
+    (
         math.pi * coarse_nx / lx,
         math.pi * coarse_ny / ly,
     )
@@ -968,7 +1067,8 @@ def isotropic_hw_energy_spectrum(fields, lx, ly, smooth=False):
                          + (d_y phi)_k (d_y phi)_k*)
     """
     if fields.ndim != 3 or fields.shape[0] < 2:
-        raise ValueError(
+        raise ValueError \
+        (
             "HW energy requires fields shaped (channels, nx, ny)."
         )
     nx, ny = fields.shape[-2:]
@@ -979,7 +1079,8 @@ def isotropic_hw_energy_spectrum(fields, lx, ly, smooth=False):
     kx_grid, ky_grid = np.meshgrid(kx, ky, indexing="ij")
     dphi_dx_hat = 1j * kx_grid * potential_hat
     dphi_dy_hat = 1j * ky_grid * potential_hat
-    energy = 0.5 * np.real(
+    energy = 0.5 * np.real \
+    (
         np.conj(density_hat) * density_hat
         + np.conj(dphi_dx_hat) * dphi_dx_hat
         + np.conj(dphi_dy_hat) * dphi_dy_hat
@@ -1002,7 +1103,8 @@ def save_image(field, title, path, cmap=None, symmetric=False):
         maximum = float(np.max(np.abs(field)))
         if maximum > 0:
             limits = {"vmin": -maximum, "vmax": maximum}
-    im = ax.imshow(
+    im = ax.imshow \
+    (
         field.T,
         origin="lower",
         extent=(0, nx, 0, ny),
@@ -1019,7 +1121,8 @@ def save_image(field, title, path, cmap=None, symmetric=False):
     plt.close(fig)
 
 
-def save_spectrum_plot(
+def save_spectrum_plot \
+(
     dns,
     filtered_fine,
     filtered_coarse,
@@ -1032,20 +1135,26 @@ def save_spectrum_plot(
     inverse_input_label="U-Net filtered",
     smooth_spectrum=False,
 ):
-    spectra = {
-        "DNS": isotropic_hw_energy_spectrum(
+    spectra = \
+    {
+        "DNS": isotropic_hw_energy_spectrum \
+        (
             dns, lx, ly, smooth=smooth_spectrum
         ),
-        f"Filtered {filtered_fine.shape[-1]}": isotropic_hw_energy_spectrum(
+        f"Filtered {filtered_fine.shape[-1]}": isotropic_hw_energy_spectrum \
+        (
             filtered_fine, lx, ly, smooth=smooth_spectrum
         ),
-        f"Filtered {coarse_n}": isotropic_hw_energy_spectrum(
+        f"Filtered {coarse_n}": isotropic_hw_energy_spectrum \
+        (
             filtered_coarse, lx, ly, smooth=smooth_spectrum
         ),
-        inverse_input_label: isotropic_hw_energy_spectrum(
+        inverse_input_label: isotropic_hw_energy_spectrum \
+        (
             predicted_filtered, lx, ly, smooth=smooth_spectrum
         ),
-        "Reconstructed DNS": isotropic_hw_energy_spectrum(
+        "Reconstructed DNS": isotropic_hw_energy_spectrum \
+        (
             predicted_dns, lx, ly, smooth=smooth_spectrum
         ),
     }
@@ -1053,7 +1162,8 @@ def save_spectrum_plot(
     for label, (k, p) in spectra.items():
         v = (k > 0) & (p > 0)
         if label == f"Filtered {coarse_n}":
-            ax.loglog(
+            ax.loglog \
+            (
                 k[v],
                 p[v],
                 linestyle="None",
@@ -1066,10 +1176,12 @@ def save_spectrum_plot(
         else:
             ax.loglog(k[v], p[v], linewidth=1.8, label=label)
     kn = min(np.pi / (lx / coarse_n), np.pi / (ly / coarse_n))
-    ax.axvline(
+    ax.axvline \
+    (
         kn, linestyle=":", linewidth=1.4, label=f"{coarse_n}-grid Nyquist"
     )
-    ax.set_title(
+    ax.set_title \
+    (
         r"HW energy spectrum: $E=\frac{1}{2}\int(n^2+|\nabla\phi|^2)$"
     )
     ax.set_xlabel(r"$k$")

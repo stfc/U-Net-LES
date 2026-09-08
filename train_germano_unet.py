@@ -10,7 +10,8 @@ import numpy as np, torch
 from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
 from germano_common import *
-from visualization_common import (
+from visualization_common import \
+(
     save_field_centerline_comparison,
     save_field_error_images,
     save_field_images,
@@ -18,7 +19,8 @@ from visualization_common import (
 )
 
 
-def calculate_training_losses(
+def calculate_training_losses \
+(
     model, coarse, filtered_target, dns_target, mean, std, dns_std,
     vorticity_std,
     alpha, lx, ly, lambda_dns, lambda_first_derivative,
@@ -33,23 +35,27 @@ def calculate_training_losses(
     """Compare the U-Net reconstruction with filtered targets before inversion."""
     output_channels = 2 if vorticity_from_potential else 3
     prediction, kl = model(coarse, return_kl=True)
-    predicted_filtered = (
+    predicted_filtered = \
+    (
         prediction * std[:, :output_channels] + mean[:, :output_channels]
     )
     value_error = torch.abs(prediction[:, :2] - filtered_target[:, :2])
     density_loss = value_error[:, 0].mean()
     potential_loss = value_error[:, 1].mean()
     value_loss = value_error.mean()
-    predicted_vorticity = (
+    predicted_vorticity = \
+    (
         periodic_laplacian_2nd_torch(predicted_filtered[:, 1:2], lx, ly)[:, 0]
         if vorticity_from_potential else predicted_filtered[:, 2]
     )
     target_vorticity = (filtered_target * std + mean)[:, 2]
-    vorticity_loss = torch.abs(
+    vorticity_loss = torch.abs \
+    (
         (predicted_vorticity - target_vorticity) / vorticity_std
     ).mean()
     total = value_loss + lambda_vorticity * vorticity_loss + lambda_kl * kl
-    values = {
+    values = \
+    {
         "total": total,
         "filtered": value_loss,
         "kl": kl,
@@ -59,28 +65,36 @@ def calculate_training_losses(
     }
     # Inversion is used only for DNS metrics and diagnostic images.
     with torch.no_grad():
-        inverse_input = inverse_input_filter_torch(
+        inverse_input = inverse_input_filter_torch \
+        (
             predicted_filtered.detach(), lx, ly, inverse_filter_type,
             inverse_cutoff_fraction, inverse_cutoff_order,
             filtered_dns_shell_power, min_wavenumber=inverse_min_wavenumber,
         )
-        predicted_dns = reconstruct_germano_torch(
+        predicted_dns = reconstruct_germano_torch \
+        (
             inverse_input, alpha, lx, ly, inverse_method,
             van_cittert_iterations, van_cittert_relaxation,
         )
-        predicted_dns = post_filter_torch(
+        predicted_dns = post_filter_torch \
+        (
             predicted_dns, lx, ly, post_filter_type,
             post_cutoff_fraction, post_cutoff_order,
         )
         if vorticity_from_potential:
-            predicted_dns = torch.cat((
-                predicted_dns,
-                periodic_laplacian_2nd_torch(predicted_dns[:, 1:2], lx, ly),
-            ), dim=1)
+            predicted_dns = torch.cat \
+            (
+                 \
+                (
+                    predicted_dns,
+                    periodic_laplacian_2nd_torch(predicted_dns[:, 1:2], lx, ly),
+                ), dim=1
+            )
     return total, values, predicted_filtered, predicted_dns
 
 
-def save_training_sample_diagnostics(
+def save_training_sample_diagnostics \
+(
     source_path,
     field_names,
     fine_n,
@@ -92,7 +106,8 @@ def save_training_sample_diagnostics(
     output_dir,
 ):
     """Save one deterministic DNS/filter/downsampling training example."""
-    dns = load_dns_snapshot(
+    dns = load_dns_snapshot \
+    (
         source_path,
         field_names,
         fine_n,
@@ -100,7 +115,8 @@ def save_training_sample_diagnostics(
         ly,
         dtype=dtype,
     )
-    coarse, filtered = filter_snapshot(
+    coarse, filtered = filter_snapshot \
+    (
         dns,
         alpha,
         lx,
@@ -109,13 +125,15 @@ def save_training_sample_diagnostics(
         dtype=dtype,
     )
     output_dir.mkdir(parents=True, exist_ok=True)
-    stages = (
+    stages = \
+    (
         ("DNS", dns),
         (f"Filtered {fine_n}", filtered),
         (f"Filtered and downsampled {coarse_n}", coarse),
     )
 
-    fig, axes = plt.subplots(
+    fig, axes = plt.subplots \
+    (
         len(stages),
         len(field_names),
         figsize=(5.2 * len(field_names), 4.5 * len(stages)),
@@ -124,12 +142,14 @@ def save_training_sample_diagnostics(
     for row, (stage, values) in enumerate(stages):
         for channel, name in enumerate(field_names):
             ax = axes[row, channel]
-            image = ax.imshow(
+            image = ax.imshow \
+            (
                 values[channel].T,
                 origin="lower",
                 extent=(0.0, lx, 0.0, ly),
                 aspect="equal",
-                cmap={"U": "Blues", "V": "RdBu_r", "P": "hot"}.get(
+                cmap={"U": "Blues", "V": "RdBu_r", "P": "hot"}.get \
+                (
                     name, "viridis"
                 ),
             )
@@ -143,7 +163,8 @@ def save_training_sample_diagnostics(
     fig.savefig(fields_path, dpi=180)
     plt.close(fig)
 
-    fig, axes = plt.subplots(
+    fig, axes = plt.subplots \
+    (
         1, len(field_names), figsize=(5.8 * len(field_names), 5.0),
         squeeze=False,
     )
@@ -151,7 +172,8 @@ def save_training_sample_diagnostics(
         for stage, values in stages:
             nx, ny = values[channel].shape
             x = np.arange(nx) * lx / nx
-            ax.plot(
+            ax.plot \
+            (
                 x,
                 values[channel, :, ny // 2],
                 linewidth=1.4,
@@ -169,17 +191,20 @@ def save_training_sample_diagnostics(
     fig.savefig(centerline_path, dpi=180)
     plt.close(fig)
 
-    fig, axes = plt.subplots(
+    fig, axes = plt.subplots \
+    (
         1, len(field_names), figsize=(5.8 * len(field_names), 5.0),
         squeeze=False,
     )
     for channel, (ax, name) in enumerate(zip(axes[0], field_names)):
         for stage, values in stages:
-            k, power = isotropic_spectrum(
+            k, power = isotropic_spectrum \
+            (
                 values[channel], lx, ly, smooth=True
             )
             positive = (k > 0) & (power > 0)
-            ax.loglog(
+            ax.loglog \
+            (
                 k[positive],
                 power[positive],
                 linewidth=1.5,
@@ -187,10 +212,12 @@ def save_training_sample_diagnostics(
                 markersize=3,
                 label=stage,
             )
-        coarse_nyquist = min(
+        coarse_nyquist = min \
+        (
             np.pi / (lx / coarse_n), np.pi / (ly / coarse_n)
         )
-        ax.axvline(
+        ax.axvline \
+        (
             coarse_nyquist,
             color="0.4",
             linestyle=":",
@@ -208,7 +235,8 @@ def save_training_sample_diagnostics(
     fig.savefig(spectra_path, dpi=180)
     plt.close(fig)
 
-    print(
+    print \
+    (
         "Saved first training-sample fields, centerlines, and spectra to "
         f"{output_dir} (source: {source_path})."
     )
@@ -216,7 +244,8 @@ def save_training_sample_diagnostics(
 
 
 @torch.inference_mode()
-def save_epoch_diagnostics(
+def save_epoch_diagnostics \
+(
     epoch,
     model,
     dataset,
@@ -253,7 +282,8 @@ def save_epoch_diagnostics(
     filtered_batch = filtered_target.unsqueeze(0).to(device)
     dns_batch = dns_target.unsqueeze(0).to(device)
     model.eval()
-    _, _, predicted_filtered, reconstructed_dns = calculate_training_losses(
+    _, _, predicted_filtered, reconstructed_dns = calculate_training_losses \
+    (
         model,
         coarse_batch,
         filtered_batch,
@@ -285,10 +315,12 @@ def save_epoch_diagnostics(
     coarse_physical = (coarse_batch * std + mean)[0].cpu().numpy()
     predicted_filtered = predicted_filtered[0].cpu().numpy()
     if vorticity_from_potential:
-        predicted_filtered = np.concatenate(
+        predicted_filtered = np.concatenate \
+        (
             (
                 predicted_filtered,
-                periodic_laplacian_2nd_numpy(
+                periodic_laplacian_2nd_numpy \
+                (
                     predicted_filtered[1:2], lx, ly
                 ),
             ),
@@ -299,37 +331,43 @@ def save_epoch_diagnostics(
 
     output_dir = output_root / f"epoch_{epoch:05d}"
     output_dir.mkdir(parents=True, exist_ok=True)
-    save_field_images(
+    save_field_images \
+    (
         coarse_physical,
         field_names,
         output_dir / "unet_input.png",
         "U-Net input",
     )
-    save_field_images(
+    save_field_images \
+    (
         predicted_filtered,
         field_names,
         output_dir / "unet_output.png",
         "U-Net output",
     )
-    save_field_images(
+    save_field_images \
+    (
         reconstructed_dns,
         field_names,
         output_dir / "reconstructed_dns.png",
         "Reconstructed DNS",
     )
-    save_field_error_images(
+    save_field_error_images \
+    (
         reconstructed_dns,
         dns_target,
         field_names,
         output_dir / "dns_error.png",
     )
-    save_field_centerline_comparison(
+    save_field_centerline_comparison \
+    (
         reconstructed_dns,
         dns_target,
         field_names,
         output_dir / "dns_centerlines.png",
     )
-    save_field_spectrum_comparison(
+    save_field_spectrum_comparison \
+    (
         reconstructed_dns,
         dns_target,
         field_names,
@@ -364,7 +402,8 @@ class Tee:
 def split_files(dataset, validation_fraction, test_fraction, split_mode, seed):
     td, vd, sd = dataset / "train", dataset / "validation", dataset / "test"
     if td.is_dir() and vd.is_dir() and sd.is_dir():
-        return (
+        return \
+        (
             recursive_npz_files(td),
             recursive_npz_files(vd),
             recursive_npz_files(sd),
@@ -382,7 +421,8 @@ def split_files(dataset, validation_fraction, test_fraction, split_mode, seed):
     return files[:ntr], files[ntr : ntr + nv], files[ntr + nv :]
 
 
-def run_epoch(
+def run_epoch \
+(
     model,
     loader,
     device,
@@ -414,7 +454,8 @@ def run_epoch(
 ):
     training = optimizer is not None
     model.train(training)
-    loss_names = [
+    loss_names = \
+    [
         "total",
         "filtered",
         "filtered_U",
@@ -422,7 +463,8 @@ def run_epoch(
         "filtered_P",
         "kl",
     ]
-    totals = {
+    totals = \
+    {
         name: 0.0
         for name in loss_names
         + ["filtered_relative_l2", "dns_relative_l2"]
@@ -431,14 +473,16 @@ def run_epoch(
     ctx = torch.enable_grad() if training else torch.no_grad()
     with ctx:
         for coarse, ft, dns in loader:
-            coarse, ft, dns = (
+            coarse, ft, dns = \
+            (
                 coarse.to(device, non_blocking=True),
                 ft.to(device, non_blocking=True),
                 dns.to(device, non_blocking=True),
             )
             if training:
                 optimizer.zero_grad(set_to_none=True)
-            loss, vals, pf, pd = calculate_training_losses(
+            loss, vals, pf, pd = calculate_training_losses \
+            (
                 model,
                 coarse,
                 ft,
@@ -476,12 +520,15 @@ def run_epoch(
             count += b
             for k in loss_names:
                 totals[k] += vals[k].detach().item() * b
-            totals["filtered_relative_l2"] += (
-                relative_l2(
+            totals["filtered_relative_l2"] += \
+            (
+                relative_l2 \
+                (
                     (ft * std + mean)[:, :pf.shape[1]], pf
                 ).detach().item() * b
             )
-            totals["dns_relative_l2"] += (
+            totals["dns_relative_l2"] += \
+            (
                 relative_l2(dns[:, :2], pd[:, :2]).detach().item() * b
             )
 
@@ -489,24 +536,31 @@ def run_epoch(
 
 
 def configure_tensorboard(writer, normalize):
-    writer.add_custom_scalars(
+    writer.add_custom_scalars \
+    (
         {
-            "Losses": {
-                name.title(): [
+            "Losses": \
+            {
+                name.title(): \
+                [
                     "Multiline",
                     [f"metrics/train/{name}", f"metrics/validation/{name}"],
                 ]
-                for name in (
+                for name in \
+                (
                     "total",
                     "filtered",
                 )
             },
-            "Relative L2": {
-                name.replace("_", " ").title(): [
+            "Relative L2": \
+            {
+                name.replace("_", " ").title(): \
+                [
                     "Multiline",
                     [f"metrics/train/{name}", f"metrics/validation/{name}"],
                 ]
-                for name in (
+                for name in \
+                (
                     "filtered_relative_l2",
                     "dns_relative_l2",
                 )
@@ -515,8 +569,10 @@ def configure_tensorboard(writer, normalize):
                 "Per-field filtered loss (vorticity normalized)"
                 if normalize
                 else "Per-field filtered loss (U/V absolute, vorticity normalized)"
-            ): {
-                name: [
+            ): \
+            {
+                name: \
+                [
                     "Multiline",
                     [
                         f"metrics/train/filtered_{name}",
@@ -551,36 +607,43 @@ def serialise_parameters(args, **derived):
 def parse_args():
     p = argparse.ArgumentParser()
     p.add_argument("--dataset", type=Path, required=True)
-    p.add_argument(
+    p.add_argument \
+    (
         "--output-dir", type=Path, default=Path("germano_training_output")
     )
     p.add_argument("--fields", nargs=3, default=list(HW_FIELD_NAMES))
-    p.add_argument(
+    p.add_argument \
+    (
         "--fine-n",
         type=int,
         default=256,
         help="DNS grid resolution per direction (default: 256)",
     )
-    p.add_argument(
+    p.add_argument \
+    (
         "--coarse-n",
         type=int,
         default=64,
-        help=(
+        help= \
+        (
             "LES grid resolution per direction; must divide --fine-n "
             "(default: 64)"
         ),
     )
     p.add_argument("--lx", type=float, default=2 * np.pi)
     p.add_argument("--ly", type=float, default=2 * np.pi)
-    p.add_argument(
+    p.add_argument \
+    (
         "--alpha",
         type=float,
-        help=(
+        help= \
+        (
             "Physical Germano filter width "
             "(default: one fine-grid spacing, Lx/fine-n)"
         ),
     )
-    p.add_argument(
+    p.add_argument \
+    (
         "--split-mode", choices=["sequential", "random"], default="random"
     )
     p.add_argument("--validation-fraction", type=float, default=0.1)
@@ -588,171 +651,209 @@ def parse_args():
     p.add_argument("--epochs", type=int, default=300)
     p.add_argument("--batch-size", type=int, default=4)
     p.add_argument("--learning-rate", type=float, default=1e-3)
-    p.add_argument(
+    p.add_argument \
+    (
         "--learning-rate-policy",
         choices=("constant", "step"),
         default="constant",
         help="Learning-rate policy (default: constant/no changes)",
     )
-    p.add_argument(
+    p.add_argument \
+    (
         "--learning-rate-step",
         type=int,
         default=25,
         help="Epochs between stepwise learning-rate reductions (default: 25)",
     )
-    p.add_argument(
+    p.add_argument \
+    (
         "--learning-rate-gamma",
         type=float,
         default=0.5,
         help="Learning-rate multiplier at each step (default: 0.5)",
     )
     p.add_argument("--base-channels", type=int, default=24)
-    p.add_argument("--variational", action=argparse.BooleanOptionalAction, default=True,
-                   help="Use a Gaussian variational bottleneck (default: enabled)")
-    p.add_argument("--lambda-kl", type=float, default=1e-4,
-                   help="Weight of mean latent KL divergence (default: 1e-4)")
-    p.add_argument(
+    p.add_argument \
+    (
+        "--variational", action=argparse.BooleanOptionalAction, default=True,
+        help="Use a Gaussian variational bottleneck (default: enabled)"
+    )
+    p.add_argument \
+    (
+        "--lambda-kl", type=float, default=1e-4,
+        help="Weight of mean latent KL divergence (default: 1e-4)"
+    )
+    p.add_argument \
+    (
         "--precision",
         choices=("float32", "float64"),
         default="float32",
         help="Floating-point precision for data, U-Net, losses, and physics",
     )
-    p.add_argument(
+    p.add_argument \
+    (
         "--normalize",
         action=argparse.BooleanOptionalAction,
         default=True,
-        help=(
+        help= \
+        (
             "Normalize LES inputs and filtered targets and scale reconstruction loss "
             "by its standard deviation (default: enabled; use "
             "--no-normalize for physical values throughout)"
         ),
     )
-    p.add_argument(
+    p.add_argument \
+    (
         "--lambda-dns", type=float, default=1.0,
         help="Deprecated and ignored; the filtered n/phi loss has unit weight",
     )
-    p.add_argument(
+    p.add_argument \
+    (
         "--lambda-first-derivative", type=float, default=1.0e-2,
         help="Deprecated and ignored; derivative losses are disabled",
     )
-    p.add_argument(
+    p.add_argument \
+    (
         "--lambda-second-derivative", type=float, default=1.0e-4,
         help="Deprecated and ignored; derivative losses are disabled",
     )
-    p.add_argument(
+    p.add_argument \
+    (
         "--lambda-vorticity", type=float, default=0.0,
-        help=(
+        help= \
+        (
             "Weight of the filtered vorticity L1 error normalized by the training "
             "vorticity standard deviation (default: 0, disabled)"
         ),
     )
-    p.add_argument(
+    p.add_argument \
+    (
         "--vorticity-from-potential",
         action=argparse.BooleanOptionalAction,
         default=True,
-        help=(
+        help= \
+        (
             "Derive DNS vorticity as the periodic second-order Laplacian "
             "of reconstructed potential and predict only U,V (default: "
             "enabled; use --no-vorticity-from-potential for a learned P)"
         ),
     )
-    p.add_argument(
+    p.add_argument \
+    (
         "--random-periodic-shift",
         action=argparse.BooleanOptionalAction,
         default=True,
-        help=(
+        help= \
+        (
             "Apply synchronized random periodic translations to training "
             "U, V, and P fields (default: enabled)"
         ),
     )
-    p.add_argument(
+    p.add_argument \
+    (
         "--periodic-x",
         action=argparse.BooleanOptionalAction,
         default=True,
         help="Declare the x direction periodic (default: enabled)",
     )
-    p.add_argument(
+    p.add_argument \
+    (
         "--periodic-y",
         action=argparse.BooleanOptionalAction,
         default=True,
         help="Declare the y direction periodic (default: enabled)",
     )
-    p.add_argument(
+    p.add_argument \
+    (
         "--inverse-cutoff-fraction",
         type=float,
         default=0.0,
-        help=(
+        help= \
+        (
             "Smooth inverse cutoff as a fraction of Nyquist "
             "(default: disabled; 0 disables it)"
         ),
     )
     p.add_argument("--inverse-cutoff-order", type=float, default=8.0)
-    p.add_argument(
+    p.add_argument \
+    (
         "--inverse-min-wavenumber", type=float, default=1.0,
         help="Physical k threshold for filtered_dns_spectrum: modes k <= this "
-             "pass unchanged (default: 1.0; 0 protects only the mean)",
+        "pass unchanged (default: 1.0; 0 protects only the mean)",
     )
-    p.add_argument(
+    p.add_argument \
+    (
         "--inverse-filter",
         choices=INVERSE_FILTER_TYPES,
         default="cutoff",
-        help=(
+        help= \
+        (
             "Regularization applied to the U-Net output before inversion: "
             "the existing analytic cutoff, or a suppressive shell filter "
             "matched to the mean filtered-DNS training spectrum"
         ),
     )
-    p.add_argument(
+    p.add_argument \
+    (
         "--inverse-method",
         choices=INVERSE_METHODS,
         default="exact",
         help="DNS reconstruction operator used in training (default: exact)",
     )
-    p.add_argument(
+    p.add_argument \
+    (
         "--van-cittert-iterations",
         type=int,
         default=1,
         help="Number of van Cittert correction steps (default: 1)",
     )
-    p.add_argument(
+    p.add_argument \
+    (
         "--van-cittert-relaxation",
         type=float,
         default=1.0,
         help="Van Cittert relaxation in (0, 1] (default: 1)",
     )
-    p.add_argument(
+    p.add_argument \
+    (
         "--post-filter",
         choices=POST_FILTER_TYPES,
         default="high_order",
-        help=(
+        help= \
+        (
             "Post-inversion filter: none, current high-order exponential, "
             "or Gaussian "
             "(default: high_order)"
         ),
     )
-    p.add_argument(
+    p.add_argument \
+    (
         "--post-cutoff-fraction",
         type=float,
         default=0.0,
-        help=(
+        help= \
+        (
             "Post-inversion smooth cutoff as a fraction of Nyquist; "
             "0 disables it (default: disabled)"
         ),
     )
-    p.add_argument(
+    p.add_argument \
+    (
         "--post-cutoff-order",
         type=float,
         default=8.0,
         help="Post-inversion smooth cutoff order (default: 8)",
     )
     p.add_argument("--num-workers", type=int, default=0)
-    p.add_argument(
+    p.add_argument \
+    (
         "--save-every",
         type=int,
         default=25,
         help="Save an epoch-numbered checkpoint every N epochs; 0 disables it",
     )
-    p.add_argument(
+    p.add_argument \
+    (
         "--diagnostic-every",
         type=int,
         default=5,
@@ -760,12 +861,14 @@ def parse_args():
     )
     p.add_argument("--seed", type=int, default=7)
     p.add_argument("--resume", type=Path)
-    p.add_argument(
+    p.add_argument \
+    (
         "--tensorboard-dir",
         type=Path,
         help="TensorBoard log directory (default: OUTPUT_DIR/tensorboard)",
     )
-    p.add_argument(
+    p.add_argument \
+    (
         "--log-file",
         type=Path,
         help="Console log file (default: OUTPUT_DIR/training.log)",
@@ -807,19 +910,23 @@ def run_training(a):
     if not np.isfinite(a.lambda_vorticity) or a.lambda_vorticity < 0:
         raise ValueError("lambda-vorticity must be finite and non-negative.")
     all_directions_periodic = a.periodic_x and a.periodic_y
-    use_random_periodic_shift = (
+    use_random_periodic_shift = \
+    (
         a.random_periodic_shift and all_directions_periodic
     )
     if a.random_periodic_shift and not all_directions_periodic:
-        nonperiodic = [
+        nonperiodic = \
+        [
             direction
-            for direction, periodic in (
+            for direction, periodic in \
+            (
                 ("x", a.periodic_x),
                 ("y", a.periodic_y),
             )
             if not periodic
         ]
-        print(
+        print \
+        (
             "Random periodic shift disabled because not all directions are "
             f"periodic (nonperiodic: {', '.join(nonperiodic)})."
         )
@@ -836,10 +943,12 @@ def run_training(a):
     ckdir = a.output_dir / "checkpoints"
     ckdir.mkdir(exist_ok=True)
     parameters_path = a.output_dir / "training_parameters.json"
-    parameters_path.write_text(
+    parameters_path.write_text \
+    (
         json.dumps(serialise_parameters(a), indent=2, sort_keys=True)
     )
-    tr, va, te = split_files(
+    tr, va, te = split_files \
+    (
         a.dataset, a.validation_fraction, a.test_fraction, a.split_mode, a.seed
     )
     delta = a.lx / a.fine_n
@@ -848,12 +957,14 @@ def run_training(a):
     filtered_dns_shell_power_np = None
     if a.inverse_filter == "filtered_dns_spectrum":
         print("Calculating mean filtered-DNS spectrum from training snapshots.")
-        filtered_dns_shell_power_np = calculate_filtered_dns_shell_power(
+        filtered_dns_shell_power_np = calculate_filtered_dns_shell_power \
+        (
             tr, a.fields, a.fine_n, a.coarse_n, alpha, a.lx, a.ly,
             model_output_channels, dtype=numpy_dtype,
         )
     if a.normalize:
-        mean_np, std_np, dns_std_np = calculate_training_statistics(
+        mean_np, std_np, dns_std_np = calculate_training_statistics \
+        (
             tr,
             a.fields,
             a.fine_n,
@@ -868,7 +979,8 @@ def run_training(a):
         mean_np = np.zeros(statistics_shape, dtype=numpy_dtype)
         std_np = np.ones(statistics_shape, dtype=numpy_dtype)
         dns_std_np = np.ones(statistics_shape, dtype=numpy_dtype)
-        print(
+        print \
+        (
             "Normalization disabled: LES inputs, filtered targets, model "
             "outputs, and reconstruction value losses use physical values."
         )
@@ -876,7 +988,8 @@ def run_training(a):
         vorticity_std_np = std_np[:, 2:3]
     elif a.lambda_vorticity > 0:
         print("Calculating vorticity normalization for vorticity loss.")
-        _, physical_filtered_std_np, _ = calculate_training_statistics(
+        _, physical_filtered_std_np, _ = calculate_training_statistics \
+        (
             tr, a.fields, a.fine_n, a.coarse_n, alpha, a.lx, a.ly,
             dtype=numpy_dtype,
         )
@@ -885,7 +998,8 @@ def run_training(a):
         vorticity_std_np = np.ones((1, 1, 1, 1), dtype=numpy_dtype)
 
     def ds(files, random_periodic_shift=False):
-        return GermanoSnapshotDataset(
+        return GermanoSnapshotDataset \
+        (
             files,
             a.fields,
             a.fine_n,
@@ -901,7 +1015,8 @@ def run_training(a):
 
     train_ds = ds(tr, use_random_periodic_shift)
     val_ds, test_ds = ds(va), ds(te)
-    kw = dict(
+    kw = dict \
+    (
         batch_size=a.batch_size,
         num_workers=a.num_workers,
         pin_memory=torch.cuda.is_available(),
@@ -913,7 +1028,8 @@ def run_training(a):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print("Device:", device)
     print("Precision:", a.precision)
-    print(
+    print \
+    (
         "Training objective: mean absolute filtered-space error in electron "
         "density and electrostatic potential plus "
         f"{a.lambda_vorticity:g} times normalized vorticity error "
@@ -922,18 +1038,21 @@ def run_training(a):
     if device.type == "cuda":
         print("GPU:", torch.cuda.get_device_name(0))
         torch.backends.cudnn.benchmark = True
-    model = ResidualUNetSR(
+    model = ResidualUNetSR \
+    (
         len(a.fields),
         a.base_channels,
         scale_factor,
         model_output_channels,
         variational=a.variational,
     ).to(device=device, dtype=torch_dtype)
-    opt = torch.optim.AdamW(
+    opt = torch.optim.AdamW \
+    (
         model.parameters(), lr=a.learning_rate, weight_decay=1e-6
     )
     if a.learning_rate_policy == "step":
-        scheduler = torch.optim.lr_scheduler.StepLR(
+        scheduler = torch.optim.lr_scheduler.StepLR \
+        (
             opt,
             step_size=a.learning_rate_step,
             gamma=a.learning_rate_gamma,
@@ -943,10 +1062,12 @@ def run_training(a):
     mean = torch.from_numpy(mean_np).to(device)
     std = torch.from_numpy(std_np).to(device)
     dns_std = torch.from_numpy(dns_std_np).to(device)
-    vorticity_std = torch.as_tensor(
+    vorticity_std = torch.as_tensor \
+    (
         vorticity_std_np.item(), device=device, dtype=torch_dtype
     )
-    filtered_dns_shell_power = (
+    filtered_dns_shell_power = \
+    (
         None if filtered_dns_shell_power_np is None
         else torch.from_numpy(filtered_dns_shell_power_np).to(device)
     )
@@ -957,26 +1078,31 @@ def run_training(a):
         validate_hw_checkpoint(c)
         if c.get("variational", False) != a.variational:
             raise ValueError("Resume architecture mismatch: use --no-variational for legacy checkpoints.")
-        checkpoint_derives_vorticity = (
+        checkpoint_derives_vorticity = \
+        (
             c["vorticity_mode"] == "laplacian_of_potential"
         )
         if checkpoint_derives_vorticity != a.vorticity_from_potential:
-            raise ValueError(
+            raise ValueError \
+            (
                 "--vorticity-from-potential setting does not match the "
                 "resumed checkpoint."
             )
         checkpoint_precision = c.get("precision", "float32")
         if checkpoint_precision != a.precision:
-            raise ValueError(
+            raise ValueError \
+            (
                 f"--precision {a.precision} does not match resumed "
                 f"checkpoint precision {checkpoint_precision}."
             )
-        checkpoint_normalizes = c.get(
+        checkpoint_normalizes = c.get \
+        (
             "normalize",
             c.get("training_parameters", {}).get("normalize", True),
         )
         if checkpoint_normalizes != a.normalize:
-            raise ValueError(
+            raise ValueError \
+            (
                 f"--{'normalize' if a.normalize else 'no-normalize'} does "
                 "not match the resumed checkpoint."
             )
@@ -984,13 +1110,15 @@ def run_training(a):
         opt.load_state_dict(c["optimizer"])
         if "scheduler" in c:
             scheduler_state = c["scheduler"]
-            checkpoint_uses_step = (
+            checkpoint_uses_step = \
+            (
                 "step_size" in scheduler_state and "gamma" in scheduler_state
             )
             requested_uses_step = a.learning_rate_policy == "step"
             if checkpoint_uses_step != requested_uses_step:
                 checkpoint_policy = "step" if checkpoint_uses_step else "constant"
-                raise ValueError(
+                raise ValueError \
+                (
                     "--learning-rate-policy does not match the resumed "
                     f"checkpoint: checkpoint uses {checkpoint_policy!r}, but "
                     f"the command requested {a.learning_rate_policy!r}."
@@ -1000,7 +1128,8 @@ def run_training(a):
             completed_epoch = int(c["epoch"])
             resumed_lr = a.learning_rate
             if a.learning_rate_policy == "step":
-                resumed_lr *= a.learning_rate_gamma ** (
+                resumed_lr *= a.learning_rate_gamma ** \
+                (
                     completed_epoch // a.learning_rate_step
                 )
             for group in opt.param_groups:
@@ -1009,7 +1138,8 @@ def run_training(a):
             scheduler._last_lr = [resumed_lr for _ in opt.param_groups]
         start = int(c["epoch"]) + 1
         best = float(c["validation_loss"])
-        if c.get("training_objective") != (
+        if c.get("training_objective") != \
+        (
             "filtered_l1_density_potential_plus_normalized_vorticity_plus_kl"
         ):
             print("Training objective changed; resetting best validation score.")
@@ -1018,14 +1148,17 @@ def run_training(a):
             best = float("inf")
         if c.get("lambda_kl", 0.0) != a.lambda_kl:
             best = float("inf")
-        checkpoint_lambda_vorticity = float(
-            c.get(
+        checkpoint_lambda_vorticity = float \
+        (
+            c.get \
+            (
                 "lambda_vorticity",
                 c.get("training_parameters", {}).get("lambda_vorticity", 0.0),
             )
         )
         if checkpoint_lambda_vorticity != a.lambda_vorticity:
-            print(
+            print \
+            (
                 "Vorticity loss weight changed from "
                 f"{checkpoint_lambda_vorticity:g} to {a.lambda_vorticity:g}; "
                 "resetting best validation score for the new objective."
@@ -1036,7 +1169,8 @@ def run_training(a):
     writer = SummaryWriter(log_dir=tensorboard_dir, purge_step=start)
     configure_tensorboard(writer, a.normalize)
     print("TensorBoard logs:", tensorboard_dir)
-    parameters = serialise_parameters(
+    parameters = serialise_parameters \
+    (
         a,
         alpha=alpha,
         grid_spacing=delta,
@@ -1056,23 +1190,27 @@ def run_training(a):
         lambda_kl=a.lambda_kl,
         model_input_channels=len(a.fields),
         model_output_channels=model_output_channels,
-        trainable_model_parameters=sum(
+        trainable_model_parameters=sum \
+        (
             parameter.numel() for parameter in model.parameters()
             if parameter.requires_grad
         ),
         differential_filter="1 / (1 + alpha^2 k^2)",
         downsampling="centered Fourier-mode truncation",
-        vorticity_operator=(
+        vorticity_operator= \
+        (
             "second_order_periodic_laplacian"
             if a.vorticity_from_potential
             else "learned_independent_channel"
         ),
-        vorticity_mode=(
+        vorticity_mode= \
+        (
             "laplacian_of_potential"
             if a.vorticity_from_potential
             else "learned_channel"
         ),
-        dns_vorticity_mode=(
+        dns_vorticity_mode= \
+        (
             "derived_from_potential"
             if a.vorticity_from_potential
             else "independent_channel"
@@ -1083,7 +1221,8 @@ def run_training(a):
         all_directions_periodic=all_directions_periodic,
         random_periodic_shift_requested=a.random_periodic_shift,
         random_periodic_shift_enabled=use_random_periodic_shift,
-        training_augmentation=(
+        training_augmentation= \
+        (
             "synchronized_random_periodic_shift"
             if use_random_periodic_shift
             else "none"
@@ -1093,11 +1232,13 @@ def run_training(a):
         lambda_first_derivative=0.0,
         lambda_second_derivative=0.0,
         lambda_vorticity=a.lambda_vorticity,
-        training_objective=(
+        training_objective= \
+        (
             "filtered_l1_density_potential_plus_normalized_vorticity_plus_kl"
         ),
         loss_channels=list(a.fields),
-        effective_loss_weights={
+        effective_loss_weights= \
+        {
             "filtered_density_potential": 1.0,
             "kl": a.lambda_kl if a.variational else 0.0,
             "dns": 0.0,
@@ -1107,7 +1248,8 @@ def run_training(a):
         },
         van_cittert_iterations=a.van_cittert_iterations,
         van_cittert_relaxation=a.van_cittert_relaxation,
-        inverse_regularization=(
+        inverse_regularization= \
+        (
             "filtered_dns_spectrum"
             if a.inverse_filter == "filtered_dns_spectrum"
             else "truncated_relaxed_van_cittert"
@@ -1115,11 +1257,13 @@ def run_training(a):
             else "smooth_exponential_cutoff"
         ),
         inverse_filter=a.inverse_filter,
-        filtered_dns_spectrum_shells=(
+        filtered_dns_spectrum_shells= \
+        (
             None if filtered_dns_shell_power_np is None
             else filtered_dns_shell_power_np.shape[1]
         ),
-        inverse_cutoff_wavenumber=(
+        inverse_cutoff_wavenumber= \
+        (
             inverse_cutoff_fraction * np.pi / delta
             if inverse_cutoff_fraction is not None
             else None
@@ -1140,11 +1284,13 @@ def run_training(a):
         gpu=torch.cuda.get_device_name(0) if device.type == "cuda" else None,
         tensorboard_dir=str(tensorboard_dir),
     )
-    parameters_path.write_text(
+    parameters_path.write_text \
+    (
         json.dumps(parameters, indent=2, sort_keys=True)
     )
     def make_checkpoint(epoch, validation_loss):
-        return {
+        return \
+        {
             "epoch": epoch,
             "model": model.state_dict(),
             "variational": a.variational,
@@ -1202,7 +1348,8 @@ def run_training(a):
 
     if start == 1:
         torch.save(make_checkpoint(0, float("inf")), ckdir / "epoch_00000.pt")
-        save_epoch_diagnostics(
+        save_epoch_diagnostics \
+        (
             0,
             model,
             val_ds,
@@ -1235,7 +1382,8 @@ def run_training(a):
         )
     history = []
     for epoch in range(start, a.epochs + 1):
-        tm = run_epoch(
+        tm = run_epoch \
+        (
             model,
             train_loader,
             device,
@@ -1265,7 +1413,8 @@ def run_training(a):
             lambda_kl=a.lambda_kl,
             inverse_min_wavenumber=a.inverse_min_wavenumber,
         )
-        vm = run_epoch(
+        vm = run_epoch \
+        (
             model,
             val_loader,
             device,
@@ -1294,13 +1443,15 @@ def run_training(a):
             lambda_kl=a.lambda_kl,
             inverse_min_wavenumber=a.inverse_min_wavenumber,
         )
-        row = {
+        row = \
+        {
             "epoch": epoch,
             **{f"train_{k}": v for k, v in tm.items()},
             **{f"validation_{k}": v for k, v in vm.items()},
         }
         history.append(row)
-        log_epoch_metrics(
+        log_epoch_metrics \
+        (
             writer,
             epoch,
             tm,
@@ -1316,7 +1467,8 @@ def run_training(a):
         if a.save_every > 0 and epoch % a.save_every == 0:
             torch.save(c, ckdir / f"epoch_{epoch:05d}.pt")
         if a.diagnostic_every > 0 and epoch % a.diagnostic_every == 0:
-            save_epoch_diagnostics(
+            save_epoch_diagnostics \
+            (
                 epoch,
                 model,
                 val_ds,
@@ -1351,14 +1503,16 @@ def run_training(a):
             w = csv.DictWriter(f, fieldnames=list(history[0]))
             w.writeheader()
             w.writerows(history)
-        print(
+        print \
+        (
             f"Epoch {epoch:05d} | train={tm['total']:.6e} | "
             f"validation={vm['total']:.6e} | "
             f"DNS relL2={vm['dns_relative_l2']:.6e}"
         )
     c = load_checkpoint(ckdir / "best.pt", device)
     model.load_state_dict(c["model"])
-    test = run_epoch(
+    test = run_epoch \
+    (
         model,
         test_loader,
         device,
@@ -1391,8 +1545,10 @@ def run_training(a):
         writer.add_scalar(f"metrics/test/{name}", value, int(c["epoch"]))
     writer.flush()
     writer.close()
-    (a.output_dir / "metadata.json").write_text(
-        json.dumps(
+    (a.output_dir / "metadata.json").write_text \
+    (
+        json.dumps \
+        (
             {
                 "dataset": str(a.dataset),
                 "train_snapshots": len(tr),
