@@ -383,7 +383,7 @@ def main():
         "dns_vorticity_mode": dns_vorticity_mode,
         "vorticity_operator": c.get("vorticity_operator"),
     }
-    model = ResidualUNetSR \
+    model = checkpoint_model_class(c) \
     (
         len(fields),
         base_channels,

@@ -11,6 +11,7 @@ not need an argument parser::
 
   PBOUT_UNET_CHECKPOINT=/path/to/best.pt
   PBOUT_UNET_DNS_PATH=/path/to/dns_snapshot.npz
+  PBOUT_UNET_RESCALING=0                # 0=off (default), 1=formula 11, 2=formula 13
   PBOUT_UNET_ALPHA=0.25                  # physical Germano filter width
   PBOUT_UNET_DNS_INIT=0                  # 0=filtered LES, 1=filtered DNS, 2=DNS, 3=DNS replay
   PBOUT_UNET_RECONSTRUCT_CHANNELS=none    # mode-1 U-Net channels
@@ -18,7 +19,7 @@ not need an argument parser::
   PBOUT_UNET_IMPLICIT=1                  # 0=DNS brackets, 1=-(DNS-LES)
   PBOUT_UNET_DNS_FIELD_DIR=results_U-Net_DNS/fields  # mode-3 snapshots
   PBOUT_UNET_WRITE_DIAGNOSTICS=2         # 0=off, 1=all, 2=fields only (default)
-  PBOUT_UNET_OMEGA_FROM_POTENTIAL=1      # omega = Laplacian(phi) at DNS scale
+  PBOUT_UNET_OMEGA_FROM_POTENTIAL=1      # explicit override; default follows checkpoint
   PBOUT_UNET_LAPLACIAN_ORDER=2            # periodic Laplacian order (2 or 4)
   PBOUT_UNET_INVERSE_CUTOFF_FRACTION=none
   PBOUT_UNET_INVERSE_CUTOFF_ORDER=8
@@ -90,12 +91,14 @@ from dns_time_series import DNSTimeSeries
 
 from germano_common import \
 (
-    ResidualUNetSR,
+    checkpoint_model_class,
     INVERSE_FILTER_TYPES,
     INVERSE_METHODS,
     POST_FILTER_TYPES,
     enforce_zero_spatial_mean,
     restore_channel_spatial_mean,
+    rescaling_amplitude_correction,
+    rescaling_amplitude_correction13,
     germano_filter,
     inverse_input_filter_torch,
     reconstruct_germano_torch,
@@ -136,6 +139,12 @@ _DEFAULT_CHECKPOINT = \
 CHECKPOINT = Path(os.environ.get("PBOUT_UNET_CHECKPOINT", _DEFAULT_CHECKPOINT))
 _dns_path = os.environ.get("PBOUT_UNET_DNS_PATH")
 DNS_PATH = Path(_dns_path).expanduser() if _dns_path else None
+
+_rescaling_value = os.environ.get("PBOUT_UNET_RESCALING", "0").strip()
+if _rescaling_value not in {"0", "1", "2"}:
+    raise ValueError("PBOUT_UNET_RESCALING must be 0 (off), 1 (formula 11), or 2 (formula 13)")
+RESCALING = int(_rescaling_value)
+_RESCALING_REFERENCE_MAXIMA = None
 
 _dns_init_value = os.environ.get("PBOUT_UNET_DNS_INIT", "0")
 _dns_init_error = \
@@ -197,10 +206,6 @@ except ValueError as error:
     ) from error
 if WRITE_DIAGNOSTICS not in (0, 1, 2):
     raise ValueError("PBOUT_UNET_WRITE_DIAGNOSTICS must be 0, 1, or 2")
-OMEGA_FROM_POTENTIAL = os.environ.get \
-(
-    "PBOUT_UNET_OMEGA_FROM_POTENTIAL", "1"
-).lower() not in {"0", "false", "no", "off"}
 _BOUT_OUTPUT_TIMESTEP = None
 _BOUT_NOUT = None
 _LAST_FIELD_OUTPUT_INDEX = -1
@@ -435,7 +440,7 @@ def _print_init_metadata(initial_state: str) -> None:
             "checkpoint directory."
         )
     else:
-        print(f"Checkpoint metadata ({metadata_path}):")
+        print(f"Run results ({metadata_path}; informational only):")
 
     def print_values(value, prefix=""):
         if isinstance(value, dict):
@@ -453,10 +458,21 @@ def _print_init_metadata(initial_state: str) -> None:
         else:
             print(f"{prefix}: {json.dumps(value, default=str)}")
 
-    print_values(metadata)
+    # Older run summaries also contain configuration; never use or print it.
+    print_values \
+    (
+        {
+            name: metadata[name]
+            for name in ("best_epoch", "test_metrics", "status")
+            if name in metadata
+        },
+        "run_results",
+    )
+    print(f"Configuration source: {CHECKPOINT}")
     effective_inference = \
     {
         "checkpoint": str(CHECKPOINT),
+        "architecture": type(MODEL).__name__,
         "checkpoint_epoch": _checkpoint.get("epoch"),
         "checkpoint_metadata_file": \
         (
@@ -465,6 +481,7 @@ def _print_init_metadata(initial_state: str) -> None:
         "device": str(DEVICE),
         "precision": PRECISION,
         "no_normalize": NO_NORMALIZE,
+        "rescaling": RESCALING,
         "site_packages": _SITE_PACKAGES,
         "dns_path": str(DNS_PATH) if DNS_PATH is not None else None,
         "dns_init": DNS_INIT,
@@ -508,6 +525,44 @@ def _print_init_metadata(initial_state: str) -> None:
         "post_filter": POST_FILTER_TYPE,
     }
     print_values(effective_inference, "effective_inference")
+    override_defaults = \
+    {
+        "omega_from_potential": _checkpoint_omega_from_potential,
+        "alpha": ALPHA,
+        "inverse_method": "exact",
+        "van_cittert_iterations": 1,
+        "van_cittert_relaxation": 1.0,
+        "inverse_cutoff_fraction": None,
+        "inverse_min_wavenumber": 1.0,
+        "inverse_cutoff_order": 8.0,
+        "inverse_filter": "cutoff",
+        "post_cutoff_fraction": None,
+        "post_cutoff_order": 8.0,
+        "post_filter": "none",
+        "laplacian_order": 2,
+        "device": _training_parameters.get("device"),
+    }
+    for name, default in override_defaults.items():
+        environment_name = "PBOUT_UNET_" + name.upper()
+        if environment_name not in os.environ:
+            continue
+        checkpoint_value = _checkpoint.get \
+        (
+            name, _training_parameters.get(name, default)
+        )
+        if name == "omega_from_potential":
+            checkpoint_value = _checkpoint_omega_from_potential
+        if name.endswith("cutoff_fraction") and checkpoint_value == 0:
+            checkpoint_value = None
+        effective_value = effective_inference[name]
+        print \
+        (
+            f"Environment override {environment_name}: "
+            f"checkpoint={json.dumps(checkpoint_value)}, "
+            f"requested={os.environ[environment_name]!r}, "
+            f"effective={json.dumps(effective_value)}, "
+            f"changed={effective_value != checkpoint_value}"
+        )
 
 
 _device_name = os.environ.get \
@@ -578,6 +633,23 @@ if PRECISION not in ("float32", "float64"):
 TORCH_DTYPE = getattr(torch, PRECISION)
 NUMPY_DTYPE = getattr(np, PRECISION)
 VORTICITY_MODE = _checkpoint["vorticity_mode"]
+_checkpoint_omega_from_potential = \
+(
+    _checkpoint.get \
+    (
+        "dns_vorticity_mode",
+        _checkpoint.get("training_parameters", {}).get \
+        (
+            "dns_vorticity_mode", VORTICITY_MODE
+        ),
+    )
+    in {"derived_from_potential", "laplacian_of_potential"}
+)
+OMEGA_FROM_POTENTIAL = os.environ.get \
+(
+    "PBOUT_UNET_OMEGA_FROM_POTENTIAL",
+    "1" if _checkpoint_omega_from_potential else "0",
+).lower() not in {"0", "false", "no", "off"}
 if VORTICITY_MODE == "laplacian_of_potential":
     OMEGA_FROM_POTENTIAL = True
 DNS_VORTICITY_MODE = \
@@ -646,7 +718,7 @@ if LAPLACIAN_ORDER not in (2, 4):
 OUTPUT_CHANNELS = int(_checkpoint["model_output_channels"])
 SCALE_FACTOR = validate_grid_pair(FINE_N, COARSE_N)
 
-MODEL = ResidualUNetSR \
+MODEL = checkpoint_model_class(_checkpoint) \
 (
     len(FIELD_NAMES), BASE_CHANNELS, SCALE_FACTOR, OUTPUT_CHANNELS,
     variational=_checkpoint.get("variational", False),
@@ -967,6 +1039,25 @@ def _append_vorticity_for_diagnostics(fields: torch.Tensor) -> torch.Tensor:
 
 
 @torch.inference_mode()
+def _apply_rescaling(dns: torch.Tensor, les: torch.Tensor) -> torch.Tensor:
+    """Apply the selected density/potential amplitude correction."""
+    if RESCALING == 0:
+        return dns
+    if RESCALING == 1:
+        filtered = _germano_filter_torch(dns[:, :2])
+        filtered = _spectral_resize_torch(filtered, les.shape[-1])
+        correction = rescaling_amplitude_correction(les[:, :2], filtered)
+    else:
+        if _RESCALING_REFERENCE_MAXIMA is None:
+            raise RuntimeError("initFlow must initialize formula-13 rescaling maxima")
+        correction = rescaling_amplitude_correction13 \
+        (
+            dns[:, :2], les[:, :2], *_RESCALING_REFERENCE_MAXIMA,
+        )
+    return torch.cat((dns[:, :2] * correction, dns[:, 2:]), dim=1)
+
+
+@torch.inference_mode()
 def _reconstruct_dns \
 (
     coarse: torch.Tensor,
@@ -1041,8 +1132,9 @@ def _reconstruct_dns \
     )
     # Derive omega last from the reconstructed potential. This avoids
     # independently inverse-reconstructing omega.
-    dns = _set_omega_from_potential(dns)
     dns = enforce_zero_spatial_mean(dns)
+    dns = _apply_rescaling(dns, coarse)
+    dns = _set_omega_from_potential(dns)
     dns = _restore_vorticity_mean(dns, coarse)
     reconstructed_vorticity = dns[:, FIELD_NAMES.index("P"):][:, :1]
     return \
@@ -1092,8 +1184,9 @@ def _inverse_germano_only \
         POST_CUTOFF_ORDER,
     )
     reconstructed_vorticity = dns[:, FIELD_NAMES.index("P"):][:, :1]
-    dns = _set_omega_from_potential(dns)
     dns = enforce_zero_spatial_mean(dns)
+    dns = _apply_rescaling(dns, filtered_fields)
+    dns = _set_omega_from_potential(dns)
     dns = _restore_vorticity_mean(dns, filtered_fields)
     reconstructed_vorticity = dns[:, FIELD_NAMES.index("P"):][:, :1]
     return \
@@ -1214,6 +1307,9 @@ def _load_dns_uvp(path: Path) -> np.ndarray:
 def initFlow(npv):
     """Return initial fields according to DNS_INIT.
 
+    Center reference DNS density and potential, then derive vorticity from
+    the configured periodic Laplacian of potential before initialization.
+
     DNS_INIT=0:
         initialize from the reference DNS field, apply the Germano filter,
         and downsample to the coarse LES grid.
@@ -1230,9 +1326,11 @@ def initFlow(npv):
         or downsampling, and use the DNS fields directly.
     """
     global _INITIAL_DNS_REFERENCE, _INITIAL_DNS_PLOT_LIMITS
+    global _RESCALING_REFERENCE_MAXIMA
     global _ENERGY_TIMES, _ENERGY_VALUES
     global _LAST_FIELD_OUTPUT_INDEX
 
+    _RESCALING_REFERENCE_MAXIMA = None
     _INITIAL_DNS_REFERENCE = None
     _ENERGY_TIMES = []
     _ENERGY_VALUES = []
@@ -1255,6 +1353,15 @@ def initFlow(npv):
         )
 
     simulation_fields = _load_dns_uvp(DNS_PATH)
+
+    # make sure density and potential are mean-free and vorticity is equal to Laplacian of potential
+    simulation_fields[:2] -= simulation_fields[:2].mean(axis=(-2, -1), keepdims=True)
+    dns_torch = torch.from_numpy(simulation_fields[None]).to \
+    (
+        device=DEVICE, dtype=TORCH_DTYPE
+    )
+    simulation_fields[2] = _vorticity_from_potential(dns_torch)[0, 0].cpu().numpy()
+
     _INITIAL_DNS_REFERENCE = simulation_fields.copy()
 
     if DNS_INIT in (0, 1, 3):
@@ -1297,6 +1404,18 @@ def initFlow(npv):
     else:
         fields = source_fields
         initial_state = "original unfiltered DNS snapshot"
+
+    if RESCALING == 2:
+        # Equation 13 preserves this ratio, including repeated solver calls.
+        initial_les = torch.from_numpy(fields[None, :2]).to \
+        (
+            device=DEVICE, dtype=TORCH_DTYPE,
+        )
+        _RESCALING_REFERENCE_MAXIMA = \
+        (
+            dns_torch[:, :2].abs().amax(dim=(-2, -1), keepdim=True).clone(),
+            initial_les.abs().amax(dim=(-2, -1), keepdim=True).clone(),
+        )
 
     with torch.inference_mode():
         if DNS_REPLAY:

@@ -22,26 +22,20 @@ LES_N="${LES_N:-64}"
 LX="${LX:-50.176}"
 
 ALPHA="${ALPHA:-$(awk -v lx="${LX}" -v n="${LES_N}" 'BEGIN {print lx / n}')}"
-INVERSE_CUTOFF_FRACTION=0.707107
-INVERSE_MIN_WAVENUMBER="${INVERSE_MIN_WAVENUMBER:-1.0}"
-INVERSE_CUTOFF_ORDER="${INVERSE_CUTOFF_ORDER:-8}"
 
 CHECKPOINT_EVERY="${CHECKPOINT_EVERY:-25}"
 DIAGNOSTIC_EVERY="${DIAGNOSTIC_EVERY:-5}"
 DATASET="${DATASET:-../../data/BOUT_runs/HW_2D/Papers/PoP23/HW_N${DNS_N}/fields/}"
-OUTPUT_DIR="${OUTPUT_DIR:-germano_training_output_dns${DNS_N}_les${LES_N}}b"
+OUTPUT_DIR="${OUTPUT_DIR:-training_dns${DNS_N}_les${LES_N}}"
 
 python train_germano_unet.py \
   --dataset "${DATASET}" \
   --output-dir "${OUTPUT_DIR}" \
-  --epochs 50 \
+  --epochs 100 \
   --batch-size 4 \
   --fine-n "${DNS_N}" \
   --coarse-n "${LES_N}" \
   --alpha "${ALPHA}" \
-  --inverse-cutoff-fraction "${INVERSE_CUTOFF_FRACTION}" \
-  --inverse-cutoff-order "${INVERSE_CUTOFF_ORDER}" \
-  --inverse-min-wavenumber "${INVERSE_MIN_WAVENUMBER}" \
   --precision float64 \
   --lx "${LX}" \
   --ly 50.176 \
@@ -50,8 +44,7 @@ python train_germano_unet.py \
   --diagnostic-every "${DIAGNOSTIC_EVERY}" \
   --post-filter none \
   --no-normalize \
-  --inverse-filter filtered_dns_spectrum \
-  --inverse-min-wavenumber 2.0 
-
+  --no-vorticity-from-potential \
+  --inverse-filter filtered_dns_spectrum
 
 #python infer_germano_unet.py --checkpoint germano_training_output_32_v3/checkpoints/best.pt --input fields_HW_run0_time501.npz --output-dir inference_output

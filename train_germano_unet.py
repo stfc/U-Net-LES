@@ -943,10 +943,6 @@ def run_training(a):
     ckdir = a.output_dir / "checkpoints"
     ckdir.mkdir(exist_ok=True)
     parameters_path = a.output_dir / "training_parameters.json"
-    parameters_path.write_text \
-    (
-        json.dumps(serialise_parameters(a), indent=2, sort_keys=True)
-    )
     tr, va, te = split_files \
     (
         a.dataset, a.validation_fraction, a.test_fraction, a.split_mode, a.seed
@@ -1038,7 +1034,7 @@ def run_training(a):
     if device.type == "cuda":
         print("GPU:", torch.cuda.get_device_name(0))
         torch.backends.cudnn.benchmark = True
-    model = ResidualUNetSR \
+    model = PeriodicSubpixelCNN \
     (
         len(a.fields),
         a.base_channels,
@@ -1076,6 +1072,12 @@ def run_training(a):
     if a.resume:
         c = load_checkpoint(a.resume, device)
         validate_hw_checkpoint(c)
+        if checkpoint_model_class(c) is not PeriodicSubpixelCNN:
+            raise ValueError \
+            (
+                "Cannot resume a different architecture as a PeriodicSubpixelCNN. "
+                "Start fresh training without --resume."
+            )
         if c.get("variational", False) != a.variational:
             raise ValueError("Resume architecture mismatch: use --no-variational for legacy checkpoints.")
         checkpoint_derives_vorticity = \
@@ -1185,7 +1187,7 @@ def run_training(a):
         optimizer_epsilon=opt.param_groups[0]["eps"],
         optimizer_amsgrad=opt.param_groups[0]["amsgrad"],
         gradient_clip_norm=1.0,
-        model="ResidualUNetSR",
+        model="PeriodicSubpixelCNN",
         variational=a.variational,
         lambda_kl=a.lambda_kl,
         model_input_channels=len(a.fields),
@@ -1256,6 +1258,7 @@ def run_training(a):
             if a.inverse_method == "van_cittert"
             else "smooth_exponential_cutoff"
         ),
+        inverse_cutoff_fraction=inverse_cutoff_fraction,
         inverse_filter=a.inverse_filter,
         filtered_dns_spectrum_shells= \
         (
@@ -1293,6 +1296,7 @@ def run_training(a):
         {
             "epoch": epoch,
             "model": model.state_dict(),
+            "architecture": "PeriodicSubpixelCNN",
             "variational": a.variational,
             "lambda_kl": a.lambda_kl,
             "optimizer": opt.state_dict(),
@@ -1550,15 +1554,11 @@ def run_training(a):
         json.dumps \
         (
             {
-                "dataset": str(a.dataset),
-                "train_snapshots": len(tr),
-                "validation_snapshots": len(va),
-                "test_snapshots": len(te),
+                "status": "completed",
                 "best_epoch": int(c["epoch"]),
                 "test_metrics": test,
                 "tensorboard_dir": str(tensorboard_dir),
                 "training_parameters_file": str(parameters_path),
-                "training_parameters": parameters,
             },
             indent=2,
         )

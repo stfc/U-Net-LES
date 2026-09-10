@@ -25,6 +25,84 @@ HW_FIELD_LABELS = \
 }
 
 
+def rescaling_amplitude_correction \
+(
+    les: torch.Tensor, filtered_dns: torch.Tensor,
+) -> torch.Tensor:
+    """Return the median equation-11 correction per batch/channel.
+
+    For DNS amplitude A and LES amplitude L, equation 11 gives
+    A_new = median((LES / L) / (G(DNS) / A)) * L.
+    Hence A_new / A = median(LES / G(DNS)); normalization cancels.
+    Inputs must share a grid. Exclude nonfinite ratios and denominators
+    within machine precision of zero. Retain the amplitude if no valid
+    ratio exists; an identically zero LES requests zero amplitude.
+    """
+    if les.shape != filtered_dns.shape or les.ndim != 4:
+        raise ValueError("Rescaling requires matching (batch, channel, x, y) fields")
+    finite_magnitude = torch.where \
+    (
+        torch.isfinite(filtered_dns), filtered_dns.abs(), torch.zeros_like(filtered_dns),
+    )
+    magnitude = finite_magnitude.amax(dim=(-2, -1), keepdim=True)
+    tolerance = torch.finfo(filtered_dns.dtype).eps * magnitude
+    valid = torch.isfinite(les) & torch.isfinite(filtered_dns)
+    valid = valid & (filtered_dns.abs() > tolerance)
+    denominator = torch.where(valid, filtered_dns, torch.ones_like(filtered_dns))
+    ratios = les / denominator
+    valid = valid & torch.isfinite(ratios)
+    ratios = torch.where(valid, ratios, torch.full_like(ratios, float("nan")))
+    # Average the two middle values for an even-sized distribution.
+    correction = torch.nanquantile \
+    (
+        ratios.flatten(-2), 0.5, dim=-1, keepdim=True,
+    ).unsqueeze(-1)
+    correction = torch.where \
+    (
+        torch.isfinite(correction), correction, torch.ones_like(correction),
+    )
+    return torch.where \
+    (
+        (les == 0).all(dim=-1, keepdim=True).all(dim=-2, keepdim=True),
+        torch.zeros_like(correction), correction,
+    )
+
+
+def rescaling_amplitude_correction13 \
+(
+    dns: torch.Tensor, les: torch.Tensor,
+    previous_dns_max: torch.Tensor, previous_les_max: torch.Tensor,
+) -> torch.Tensor:
+    """Equation 13: DNS_max_new = LES_max_new * DNS_max_old / LES_max_old.
+
+    Use absolute maxima for signed fields. Initial maxima are equivalent
+    to previous-step maxima because this recurrence preserves their ratio.
+    Retain the amplitude for a zero reference LES or zero reconstruction;
+    an identically zero current LES requests zero amplitude.
+    """
+    if dns.ndim != 4 or les.ndim != 4 or dns.shape[:2] != les.shape[:2]:
+        raise ValueError("Rescaling requires matching batch/channel dimensions")
+    for maximum in (previous_dns_max, previous_les_max):
+        if maximum.shape not in ((1, dns.shape[1], 1, 1), dns.shape[:2] + (1, 1)):
+            raise ValueError("Rescaling maxima must have shape (batch, channel, 1, 1)")
+        if not torch.isfinite(maximum).all() or (maximum < 0).any():
+            raise ValueError("Rescaling maxima must be finite and nonnegative")
+    dns_max = dns.abs().amax(dim=(-2, -1), keepdim=True)
+    les_max = les.abs().amax(dim=(-2, -1), keepdim=True)
+    reference_denominator = torch.where \
+    (
+        previous_les_max > 0, previous_les_max, torch.ones_like(previous_les_max),
+    )
+    dns_denominator = torch.where(dns_max > 0, dns_max, torch.ones_like(dns_max))
+    target_max = les_max * (previous_dns_max / reference_denominator)
+    correction = torch.where \
+    (
+        (previous_les_max > 0) & (dns_max > 0),
+        target_max / dns_denominator, torch.ones_like(dns_max),
+    )
+    return torch.where(les_max == 0, torch.zeros_like(correction), correction)
+
+
 def load_checkpoint(path: Path, device: torch.device):
     """Load a full checkpoint produced by this project.
 
@@ -801,22 +879,44 @@ def periodic_interpolate(x, scale_factor, mode):
     return upsampled[..., crop_x:-crop_x, crop_y:-crop_y]
 
 
+class PeriodicLowPass2d(nn.Module):
+    """Fixed separable [1, 3, 3, 1] FIR filter with unit DC gain."""
+
+    def __init__(self):
+        super().__init__()
+        taps = torch.tensor([1., 3., 3., 1.])
+        kernel = (taps[:, None] * taps[None, :]) / taps.sum().square()
+        self.register_buffer("kernel", kernel[None, None], persistent=False)
+
+    def forward(self, x):
+        # The even-length stencil needs asymmetric padding to retain size.
+        x = nn.functional.pad(x, (1, 2, 1, 2), mode="circular")
+        return nn.functional.conv2d \
+        (
+            x,
+            self.kernel.to(dtype=x.dtype).expand(x.shape[1], 1, 4, 4),
+            groups=x.shape[1],
+        )
+
+
 class UpBlock(nn.Module):
     def __init__(self, ic, sc, oc):
         super().__init__()
+        self.up = nn.ConvTranspose2d(ic, ic, 4, stride=2, padding=1)
+        self.blur = PeriodicLowPass2d()
         self.net = ConvBlock(ic + sc, oc)
 
     def forward(self, x, skip):
-        scale_x = skip.shape[-2] // x.shape[-2]
-        scale_y = skip.shape[-1] // x.shape[-1]
-        if x.shape[-2] * scale_x != skip.shape[-2]:
+        if any(s != 2 * n for n, s in zip(x.shape[-2:], skip.shape[-2:])):
             raise ValueError \
             (
-                "Skip height must be an integer multiple of input."
+                "Skip dimensions must be twice the input dimensions."
             )
-        if x.shape[-1] * scale_y != skip.shape[-1]:
-            raise ValueError("Skip width must be an integer multiple of input.")
-        x = periodic_interpolate(x, (scale_x, scale_y), "bilinear")
+        # Supply periodic neighbors before convolution, then remove their
+        # doubled halo so the retained output has no zero-padded boundary.
+        x = nn.functional.pad(x, (1, 1, 1, 1), mode="circular")
+        x = self.up(x)[..., 2:-2, 2:-2]
+        x = self.blur(x)
         return self.net(torch.cat((x, skip), 1))
 
 
@@ -872,6 +972,136 @@ class ResidualUNetSR(nn.Module):
         correction = self.out(self.d1(self.d2(self.d3(bn, e3), e2), e1))
         prediction = base[:, : self.output_channels] + correction
         return (prediction, kl) if return_kl else prediction
+
+
+
+class PeriodicResidualBlock(nn.Module):
+    """Residual convolutions on a fixed periodic grid."""
+
+    def __init__(self, channels, dilation):
+        super().__init__()
+        groups = min(8, channels)
+        while channels % groups:
+            groups -= 1
+        self.net = nn.Sequential \
+        (
+            nn.Conv2d \
+            (
+                channels, channels, 3, padding=dilation,
+                dilation=dilation, padding_mode="circular",
+            ),
+            nn.GroupNorm(groups, channels),
+            nn.GELU(),
+            nn.Conv2d \
+            (
+                channels, channels, 3, padding=dilation,
+                dilation=dilation, padding_mode="circular",
+            ),
+            nn.GroupNorm(groups, channels),
+        )
+        self.activation = nn.GELU()
+
+    def forward(self, x):
+        return self.activation(x + self.net(x))
+
+
+class PeriodicResidualCNN(nn.Module):
+    """Super-resolution with a constant-resolution periodic residual trunk.
+
+    Only the initial interpolation changes spatial resolution. Evaluation
+    uses the latent mean, preserving integer coarse-grid shift equivariance.
+    """
+
+    def __init__ \
+    (
+        self, channels=3, base_channels=24, scale_factor=8, output_channels=2,
+        variational=True,
+    ):
+        super().__init__()
+        self.scale_factor = scale_factor
+        self.output_channels = output_channels
+        self.variational = variational
+        self.stem = ConvBlock(channels, base_channels)
+        self.blocks = nn.Sequential \
+        (
+            *[PeriodicResidualBlock(base_channels, d) for d in (1, 2, 4, 1, 2, 4)]
+        )
+        if variational:
+            self.latent_mu = nn.Conv2d(base_channels, base_channels, 1)
+            self.latent_logvar = nn.Conv2d(base_channels, base_channels, 1)
+        self.out = nn.Conv2d(base_channels, output_channels, 1)
+
+    def forward(self, coarse, *, sample=None, return_kl=False):
+        base = periodic_interpolate(coarse, self.scale_factor, "bicubic")
+        features = self.blocks(self.stem(base))
+        kl = features.new_zeros(())
+        if self.variational:
+            mu = self.latent_mu(features)
+            logvar = self.latent_logvar(features).clamp(-20.0, 10.0)
+            kl = 0.5 * (mu.square() + logvar.exp() - 1.0 - logvar).mean()
+            sample = self.training if sample is None else sample
+            features = \
+            (
+                mu + torch.randn_like(mu) * (0.5 * logvar).exp()
+                if sample else mu
+            )
+        prediction = base[:, :self.output_channels] + self.out(features)
+        return (prediction, kl) if return_kl else prediction
+
+
+
+class PeriodicSubpixelCNN(PeriodicResidualCNN):
+    """Periodic coarse-grid residual trunk with learned subpixel upsampling.
+
+    Predict complete fine fields, without interpolation or a global input skip.
+    The parent architecture remains available for older checkpoints.
+    """
+
+    def __init__ \
+    (
+        self, channels=3, base_channels=24, scale_factor=8, output_channels=2,
+        variational=True,
+    ):
+        if not isinstance(scale_factor, int) or scale_factor < 1:
+            raise ValueError("scale_factor must be a positive integer.")
+        super().__init__ \
+        (
+            channels, base_channels, scale_factor, output_channels, variational
+        )
+        self.out = nn.Conv2d \
+        (
+            base_channels, output_channels * scale_factor**2, 3,
+            padding=1, padding_mode="circular",
+        )
+        self.shuffle = nn.PixelShuffle(scale_factor)
+
+    def forward(self, coarse, *, sample=None, return_kl=False):
+        features = self.blocks(self.stem(coarse))
+        kl = features.new_zeros(())
+        if self.variational:
+            mu = self.latent_mu(features)
+            logvar = self.latent_logvar(features).clamp(-20.0, 10.0)
+            kl = 0.5 * (mu.square() + logvar.exp() - 1.0 - logvar).mean()
+            sample = self.training if sample is None else sample
+            features = \
+            (
+                mu + torch.randn_like(mu) * (0.5 * logvar).exp()
+                if sample else mu
+            )
+        prediction = self.shuffle(self.out(features))
+        return (prediction, kl) if return_kl else prediction
+
+
+def checkpoint_model_class(checkpoint):
+    """Dispatch explicitly; checkpoints without metadata use the legacy U-Net."""
+    architecture = checkpoint.get("architecture", "ResidualUNetSR")
+    if architecture == "PeriodicSubpixelCNN":
+        return PeriodicSubpixelCNN
+    if architecture == "PeriodicResidualCNN":
+        return PeriodicResidualCNN
+    if architecture == "ResidualUNetSR":
+        return ResidualUNetSR
+    raise ValueError(f"Unknown checkpoint architecture: {architecture!r}")
 
 
 def calculate_losses \

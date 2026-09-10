@@ -14,7 +14,7 @@ import torch
 
 from germano_common import \
 (
-    ResidualUNetSR,
+    checkpoint_model_class,
     calculate_losses,
     filter_snapshot,
     load_checkpoint,
@@ -180,7 +180,7 @@ def score_random_reconstructions(args: argparse.Namespace, run_dir: Path) -> Non
     if shell_power is not None:
         shell_power = torch.as_tensor(shell_power, dtype=torch_dtype, device=device)
 
-    model = ResidualUNetSR \
+    model = checkpoint_model_class(checkpoint) \
     (
         len(fields), int(checkpoint["base_channels"]), fine_n // coarse_n,
         output_channels,

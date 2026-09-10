@@ -14,26 +14,32 @@ source /gpfs/mcc/HT04543/jxc06/jxc74-jxc06/programs/miniconda3/etc/profile.d/con
 conda activate py311
 ```
 
-## Variational U-Net
+## Coarse-grid residual CNN with learned upsampling
 
-New training runs use a Gaussian variational bottleneck by default. Two
-1x1 convolution heads predict latent means and log variances at the deepest
-encoder resolution. Training samples with the reparameterization trick and
-adds `--lambda-kl` (default `1e-4`) times KL divergence to a unit Gaussian,
-averaged over batch, latent channels, and spatial cells, to the existing DNS
-and vorticity objective. Log variance is clamped to [-20, 10] for stability.
-KL is logged as `train_kl` / `validation_kl` in CSV and in TensorBoard.
+New training runs use `PeriodicSubpixelCNN`. A circular-convolution stem and
+six residual blocks operate on the coarse grid, with dilation factors
+1, 2, 4, 1, 2, 4. A final circular 3x3 convolution produces
+`output_channels * scale_factor**2` channels; PixelShuffle rearranges these
+into the fine-grid output. There is no interpolation, pooling, transposed
+convolution, or global input-to-output skip. Internal residual connections
+remain. The network predicts complete filtered fine fields.
 
-Evaluation and BOUT++ use the posterior mean for reproducibility. Python
-callers can request stochastic predictions with `model(x, sample=True)`;
-`model(x, return_kl=True)` returns `(prediction, kl)`. Skip connections and
-the interpolated residual remain, so this is a conditional reconstruction
-model, not an unconditional generator. The KL weight may need tuning for
-your data, especially with normalization disabled.
+Gaussian variational heads remain enabled by default, now on the coarse grid.
+Training samples latent features and adds `--lambda-kl` (default `1e-4`)
+times mean KL divergence to the objective. Use `--no-variational` to disable
+these heads. Evaluation uses their mean. Deterministic evaluation is
+equivariant to integer coarse-grid shifts, scaled onto the fine grid, up to
+floating-point roundoff. Independent stochastic draws do not preserve this
+sample-by-sample equivalence. Learned subpixel outputs can still develop
+subpixel artifacts; shift equivariance alone does not guarantee stability.
 
-Existing deterministic checkpoints still load in inference and diagnostics.
-To resume their training, pass `--no-variational`. Train a new run to obtain
-a variational model; existing weights are not automatically converted.
+Checkpoints record `architecture: PeriodicSubpixelCNN`. Inference still
+supports earlier `PeriodicResidualCNN` checkpoints (bicubic interpolation
+and a global residual) and legacy `ResidualUNetSR` checkpoints. A checkpoint
+without architecture metadata uses the legacy U-Net. Start fresh training
+in a new output directory for the subpixel model; incompatible weights cannot
+be resumed. Point `PBOUT_UNET_CHECKPOINT` to the new checkpoint for BOUT++.
+Existing script names and command-line options remain compatible.
 
 ## Training
 
@@ -94,8 +100,10 @@ Important output files are:
 - `checkpoints/best.pt`: checkpoint with the best validation loss.
 - `checkpoints/latest.pt`: most recent checkpoint.
 - `checkpoints/epoch_XXXXX.pt`: periodic checkpoints.
-- `training_parameters.json` and `metadata.json`: run configuration and
-  metadata.
+- `training_parameters.json`: readable export of the configuration embedded in
+  checkpoints from the current training invocation.
+- `metadata.json`: run status, best epoch, test results, and report locations.
+  It contains no model or training configuration in newly completed runs.
 - `training_history.csv`: losses and metrics by epoch.
 - `training.log`: captured console output.
 - `tensorboard/`: TensorBoard event files.
@@ -148,6 +156,29 @@ reconstruction; the post filter/cutoff is applied afterward. The
 `filtered_dns_spectrum` setting requires a checkpoint trained with that option.
 
 ## BOUT++ coupling
+
+Set `PBOUT_UNET_RESCALING` to select density/potential rescaling:
+
+- `0` (default): no rescaling.
+- `1`: formula 11, the median pointwise correction described below.
+- `2`: formula 13, `DNS_max_new = LES_max_new * DNS_max_previous / LES_max_previous`.
+  This uses absolute maxima and the invariant ratio from the initialized DNS
+  and actual LES grid, avoiding state changes during repeated solver calls.
+  A zero reference LES maximum or zero reconstruction retains the amplitude;
+  a zero current LES requests zero amplitude.
+
+With option `1`, DNS reconstruction uses equation (11) with
+one median pointwise correction per batch and field:
+`DNS_corrected = DNS_reconstructed * median(incoming_LES / G(DNS_reconstructed))`.
+The forward Germano-filtered reconstruction is spectrally resized to the
+incoming LES grid before taking the ratio. This is equivalent to the normalized
+maximum estimate in equation (11), since the normalization factors cancel.
+Nonfinite ratios and near-zero denominators are excluded. If no valid ratio
+remains, the amplitude is retained; an identically zero LES requests zero
+amplitude. Checkpoint mean/std normalization is unchanged.
+Vorticity is then recomputed from the corrected potential when configured.
+Rescaling applies to U-Net and inverse-only reconstruction; unfiltered DNS and
+DNS replay retain their original amplitudes.
 
 The interface selects packages matching the embedded Python: Python 3.13 uses
 `~/.pyenvs/BOUT-Hermes3/lib/python3.13/site-packages`, and Python 3.11 uses the
@@ -244,7 +275,8 @@ Other useful controls are:
 
 ```bash
 export PBOUT_UNET_IMPLICIT=1
-export PBOUT_UNET_OMEGA_FROM_POTENTIAL=1
+export PBOUT_UNET_RESCALING=0            # 0=off, 1=formula 11, 2=formula 13
+export PBOUT_UNET_OMEGA_FROM_POTENTIAL=1  # optional override of checkpoint default
 export PBOUT_UNET_LAPLACIAN_ORDER=2       # 2 or 4
 export PBOUT_UNET_POST_FILTER=none        # none, high_order, gaussian
 export PBOUT_UNET_POST_CUTOFF_FRACTION=none
@@ -293,3 +325,16 @@ all positive wavenumber shells of the DNS grid (`fine_n`); the plotted curves
 still represent filtered/downsampled LES terms. At the final BOUT++
 output these are assembled into `results_U-Net/images/arakawa_les_spectra_animation.gif`
 (with separate batch suffixes when applicable). This requires diagnostic mode `1`.
+
+Inference configuration comes from the selected `.pt` checkpoint, including its
+embedded training parameters. Neither JSON report supplies inference settings;
+resuming training may replace the readable export while older checkpoints retain
+their own configuration. Existing checkpoints and older metadata files remain
+supported. Legacy configuration entries in metadata are ignored at startup.
+
+By default, pBOUT preserves the checkpoint's DNS vorticity convention. Explicit
+`PBOUT_UNET_*` overrides of checkpoint settings are printed with their checkpoint,
+requested, and effective values and whether they changed the setting. A model
+that outputs only density and potential still requires derived vorticity even if
+an environment override requests otherwise. Runtime controls such as input paths
+and diagnostic modes are shown in `effective_inference`.
