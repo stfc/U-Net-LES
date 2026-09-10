@@ -14,32 +14,25 @@ source /gpfs/mcc/HT04543/jxc06/jxc74-jxc06/programs/miniconda3/etc/profile.d/con
 conda activate py311
 ```
 
-## Coarse-grid residual CNN with learned upsampling
+## U-Net with bicubic input interpolation
 
-New training runs use `PeriodicSubpixelCNN`. A circular-convolution stem and
-six residual blocks operate on the coarse grid, with dilation factors
-1, 2, 4, 1, 2, 4. A final circular 3x3 convolution produces
-`output_channels * scale_factor**2` channels; PixelShuffle rearranges these
-into the fine-grid output. There is no interpolation, pooling, transposed
-convolution, or global input-to-output skip. Internal residual connections
-remain. The network predicts complete filtered fine fields.
+Training uses `BicubicUNetSR`. Periodic bicubic interpolation upsamples LES
+fields to the DNS grid before the U-Net encoder. Encoder–decoder skip
+connections remain; there is no direct interpolated-input addition to the
+output.
 
-Gaussian variational heads remain enabled by default, now on the coarse grid.
-Training samples latent features and adds `--lambda-kl` (default `1e-4`)
-times mean KL divergence to the objective. Use `--no-variational` to disable
-these heads. Evaluation uses their mean. Deterministic evaluation is
-equivariant to integer coarse-grid shifts, scaled onto the fine grid, up to
-floating-point roundoff. Independent stochastic draws do not preserve this
-sample-by-sample equivalence. Learned subpixel outputs can still develop
-subpixel artifacts; shift equivariance alone does not guarantee stability.
+The pipeline is **LES → NN at DNS resolution → configured inverse-input
+filter → Germano inversion**. Training compares the NN output with filtered
+fine-grid targets, not full DNS fields. Inversion stays outside the training
+gradient. Existing post-processing and vorticity derivation remain in place.
 
-Checkpoints record `architecture: PeriodicSubpixelCNN`. Inference still
-supports earlier `PeriodicResidualCNN` checkpoints (bicubic interpolation
-and a global residual) and legacy `ResidualUNetSR` checkpoints. A checkpoint
-without architecture metadata uses the legacy U-Net. Start fresh training
-in a new output directory for the subpixel model; incompatible weights cannot
-be resumed. Point `PBOUT_UNET_CHECKPOINT` to the new checkpoint for BOUT++.
-Existing script names and command-line options remain compatible.
+Variational heads are enabled by default; use `--no-variational` to disable
+them. `--lambda-kl` controls the KL penalty. Evaluation uses the latent mean.
+
+Checkpoints record `architecture: BicubicUNetSR`. Earlier `ResidualUNetSR`,
+`PeriodicResidualCNN`, and `PeriodicSubpixelCNN` checkpoints remain supported.
+The small bicubic CNN implementation has been removed; its saved training
+results remain available, but its checkpoints cannot be loaded by this code.
 
 ## Training
 

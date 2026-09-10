@@ -921,6 +921,8 @@ class UpBlock(nn.Module):
 
 
 class ResidualUNetSR(nn.Module):
+    global_input_skip = True
+
     def __init__ \
     (
         self, channels=3, base_channels=24, scale_factor=8, output_channels=2,
@@ -970,9 +972,16 @@ class ResidualUNetSR(nn.Module):
             sample = self.training if sample is None else sample
             bn = mu + torch.randn_like(mu) * (0.5 * logvar).exp() if sample else mu
         correction = self.out(self.d1(self.d2(self.d3(bn, e3), e2), e1))
-        prediction = base[:, : self.output_channels] + correction
+        prediction = correction
+        if self.global_input_skip:
+            prediction = base[:, : self.output_channels] + prediction
         return (prediction, kl) if return_kl else prediction
 
+
+class BicubicUNetSR(ResidualUNetSR):
+    """Bicubic-input U-Net predicting full fields without a global input skip."""
+
+    global_input_skip = False
 
 
 class PeriodicResidualBlock(nn.Module):
@@ -1095,6 +1104,8 @@ class PeriodicSubpixelCNN(PeriodicResidualCNN):
 def checkpoint_model_class(checkpoint):
     """Dispatch explicitly; checkpoints without metadata use the legacy U-Net."""
     architecture = checkpoint.get("architecture", "ResidualUNetSR")
+    if architecture == "BicubicUNetSR":
+        return BicubicUNetSR
     if architecture == "PeriodicSubpixelCNN":
         return PeriodicSubpixelCNN
     if architecture == "PeriodicResidualCNN":

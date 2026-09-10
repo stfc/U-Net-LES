@@ -650,7 +650,7 @@ def parse_args():
     p.add_argument("--test-fraction", type=float, default=0.1)
     p.add_argument("--epochs", type=int, default=300)
     p.add_argument("--batch-size", type=int, default=4)
-    p.add_argument("--learning-rate", type=float, default=1e-3)
+    p.add_argument("--learning-rate", type=float, default=1e-4)
     p.add_argument \
     (
         "--learning-rate-policy",
@@ -1034,7 +1034,7 @@ def run_training(a):
     if device.type == "cuda":
         print("GPU:", torch.cuda.get_device_name(0))
         torch.backends.cudnn.benchmark = True
-    model = PeriodicSubpixelCNN \
+    model = BicubicUNetSR \
     (
         len(a.fields),
         a.base_channels,
@@ -1072,10 +1072,10 @@ def run_training(a):
     if a.resume:
         c = load_checkpoint(a.resume, device)
         validate_hw_checkpoint(c)
-        if checkpoint_model_class(c) is not PeriodicSubpixelCNN:
+        if checkpoint_model_class(c) is not BicubicUNetSR:
             raise ValueError \
             (
-                "Cannot resume a different architecture as a PeriodicSubpixelCNN. "
+                "Cannot resume a different architecture as a BicubicUNetSR. "
                 "Start fresh training without --resume."
             )
         if c.get("variational", False) != a.variational:
@@ -1187,7 +1187,7 @@ def run_training(a):
         optimizer_epsilon=opt.param_groups[0]["eps"],
         optimizer_amsgrad=opt.param_groups[0]["amsgrad"],
         gradient_clip_norm=1.0,
-        model="PeriodicSubpixelCNN",
+        model="BicubicUNetSR",
         variational=a.variational,
         lambda_kl=a.lambda_kl,
         model_input_channels=len(a.fields),
@@ -1296,7 +1296,7 @@ def run_training(a):
         {
             "epoch": epoch,
             "model": model.state_dict(),
-            "architecture": "PeriodicSubpixelCNN",
+            "architecture": "BicubicUNetSR",
             "variational": a.variational,
             "lambda_kl": a.lambda_kl,
             "optimizer": opt.state_dict(),

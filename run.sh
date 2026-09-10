@@ -44,7 +44,8 @@ python train_germano_unet.py \
   --diagnostic-every "${DIAGNOSTIC_EVERY}" \
   --post-filter none \
   --no-normalize \
-  --no-vorticity-from-potential \
-  --inverse-filter filtered_dns_spectrum
+  --inverse-filter filtered_dns_spectrum \
+  --inverse-min-wavenumber 1.0 \
+  --variational --lambda-kl 1e-4
 
 #python infer_germano_unet.py --checkpoint germano_training_output_32_v3/checkpoints/best.pt --input fields_HW_run0_time501.npz --output-dir inference_output
