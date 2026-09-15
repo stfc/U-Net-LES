@@ -16,15 +16,16 @@ from tensorboard.backend.event_processing.event_accumulator import \
 
 PLOT_GROUPS = \
 {
-    "losses": ("total", "filtered", "filtered_P", "kl"),
+    "losses": ("total", "dns", "dns_P", "dns_mse", "dns_P_mse", "kl"),
     "relative_l2": ("filtered_relative_l2", "dns_relative_l2"),
-    "filtered_field_losses": ("filtered_U", "filtered_V"),
+    "dns_field_losses": ("dns_U", "dns_V"),
 }
 
 PANEL_LAYOUT = \
 [
     ["definitions", "definitions", "total", "learning_rate"],
-    ["filtered", "filtered_U", "filtered_V", "filtered_P"],
+    ["dns", "dns_U", "dns_V", "dns_P"],
+    ["dns_mse", "dns_mse", "dns_P_mse", "dns_P_mse"],
     [
         "kl", "kl",
         "filtered_relative_l2", "dns_relative_l2"
@@ -34,10 +35,12 @@ PANEL_LAYOUT = \
 METRIC_TITLES = \
 {
     "total": "Total Training Objective",
-    "filtered": "U-Net Density/Potential L1",
-    "filtered_U": "U-Net Density L1",
-    "filtered_V": "U-Net Potential L1",
-    "filtered_P": "Filtered Vorticity L1 (Normalized)",
+    "dns": "DNS Density/Potential L1",
+    "dns_U": "DNS Density L1",
+    "dns_V": "DNS Potential L1",
+    "dns_P": "DNS Vorticity L1 (Normalized)",
+    "dns_mse": "DNS Density/Potential MSE",
+    "dns_P_mse": "DNS Vorticity MSE (Normalized)",
     "kl": "Mean Latent KL Divergence",
     "filtered_relative_l2": "Filtered Relative L2 (Diagnostic Only)",
     "dns_relative_l2": "DNS Density/Potential Relative L2 (Diagnostic Only)",
@@ -108,20 +111,21 @@ def plot_all_metrics \
     (
         PANEL_LAYOUT,
         figsize=(20.8, 13.4),
-        gridspec_kw={"height_ratios": (1, 1, 1)},
     )
     plotted = False
     for metric in \
     (
         "total",
         "learning_rate",
-        "filtered",
+        "dns",
         "kl",
         "filtered_relative_l2",
         "dns_relative_l2",
-        "filtered_U",
-        "filtered_V",
-        "filtered_P",
+        "dns_U",
+        "dns_V",
+        "dns_P",
+        "dns_mse",
+        "dns_P_mse",
     ):
         ax = axes[metric]
         if metric == "learning_rate":
@@ -186,7 +190,7 @@ def plot_all_metrics \
         kl_weight = 0.0
     normalization = \
     (
-        "Errors in n and phi are scaled by their filtered training standard deviations."
+        "Errors in n and phi are scaled by their DNS training standard deviations."
         if training_parameters.get("normalize", True)
         else "Errors in n and phi use physical values (no normalization)."
     )
@@ -195,6 +199,7 @@ def plot_all_metrics \
         "Active training objective\n"
         r"$\mathcal{L}_{total}=\mathcal{L}_{n,\phi}"
         r"+\lambda_{\omega}\mathcal{L}_{\omega}"
+        r"+\lambda_{MSE}(\mathcal{M}_{n,\phi}+\lambda_\omega\mathcal{M}_\omega)"
         r"+\lambda_{KL}\mathcal{L}_{KL}$"
         "\n"
         r"$\mathcal{L}_{n,\phi}=\dfrac{1}{2}\left("
@@ -205,11 +210,13 @@ def plot_all_metrics \
         r"\operatorname{mean}|\Delta\omega/\sigma_\omega|,\quad"
         rf"\lambda_{{\omega}}={format_weight(vorticity_weight)}$"
         "\n"
+        + f"\nMSE weight: {training_parameters.get('lambda_mse', 0.0):g}; "
+        "M uses squared normalized residuals.\n"
         + normalization
-        + "\nErrors compare U-Net reconstruction with filtered targets before inversion."
-        + "\nVorticity uses its filtered training standard deviation."
+        + "\nErrors compare U-Net reconstruction with DNS targets after inversion."
+        + "\nVorticity uses its DNS training standard deviation."
         + f"\nMean latent KL weight: {format_weight(kl_weight)}. "
-        "Germano inversion is diagnostic only.\n"
+        "Gradients pass through Germano inversion.\n"
         r"$L_{2,\mathrm{relative}}="
         r"\dfrac{\|\hat{q}-q\|_2}{\|q\|_2}$ (diagnostic only)."
     )

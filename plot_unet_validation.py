@@ -2,7 +2,7 @@
 """Compare up to four field-snapshot histories.
 
 Read ``fields_*.npz`` snapshots from specified directories, then plot
-domain-center values and total/component HW-energy histories. The dataset whose
+domain-center values, total/component HW-energy, and enstrophy histories. The dataset whose
 directory name contains ``DNS`` is used as the reference; if none does, the
 first dataset is the reference. Animations and the initial-derivative plot
 compare the first non-reference dataset with it.
@@ -255,6 +255,13 @@ def hw_energy(fields: np.ndarray, lx: float, ly: float) -> np.ndarray:
     return np.sum(hw_energy_components(fields, lx, ly), axis=0)
 
 
+def hw_enstrophy(fields: np.ndarray, lx: float, ly: float) -> np.ndarray:
+    """Compute StylES enstrophy: 0.5 * sum((n - vort)**2) * dx * dy."""
+    density, vorticity = fields[:, 0], fields[:, 2]
+    dx, dy = lx / density.shape[-2], ly / density.shape[-1]
+    return 0.5 * np.sum((density - vorticity)**2, axis=(-2, -1)) * dx * dy
+
+
 def order_datasets_with_reference_first(datasets, reference_hints=None):
     """Put the DNS dataset first, falling back to the original first dataset."""
     if reference_hints is None:
@@ -364,6 +371,83 @@ def save_field_extrema_history(datasets, output_path: Path, dpi: int) -> Path:
     return output_path
 
 
+def save_field_pdf_comparison \
+(
+    datasets, output_dir: Path, dpi: int
+) -> tuple[Path, ...]:
+    """Compare dataset spatial PDFs at the initial and final times."""
+    final_time = min(float(times[-1]) for _, times, _ in datasets)
+    target_times = np.array([0.0, final_time])
+    styles = \
+    (
+        ("black", "-"), ("tab:blue", "-"), ("tab:orange", "--"),
+        ("tab:green", "-.")
+    )
+    selected_indices = \
+    [
+        [int(np.argmin(np.abs(times - target))) for target in target_times]
+        for _, times, _ in datasets
+    ]
+    output_paths = []
+    for channel, name in enumerate(FIELD_NAMES):
+        selected_values = \
+        [
+            fields[indices, channel]
+            for (_, _, fields), indices in zip(datasets, selected_indices)
+        ]
+        minimum = min \
+        (
+            float(values.min()) for values in selected_values
+        )
+        maximum = max \
+        (
+            float(values.max()) for values in selected_values
+        )
+        if minimum == maximum:
+            padding = max(abs(minimum) * 0.01, 0.5)
+            minimum -= padding
+            maximum += padding
+        bins = np.linspace(minimum, maximum, 65)
+        figure, axes = plt.subplots \
+        (
+            1, 2, figsize=(12, 5), sharex=True, sharey=True,
+        )
+        field_label = HW_FIELD_LABELS.get(name, name)
+        for time_index, (axis, target_time) in enumerate \
+        (
+            zip(axes.ravel(), target_times)
+        ):
+            for dataset, indices, values, (color, linestyle) in zip \
+            (
+                datasets, selected_indices, selected_values, styles
+            ):
+                label, times, _ = dataset
+                pdf, _ = np.histogram \
+                (
+                    values[time_index].ravel(), bins=bins, density=True
+                )
+                axis.stairs \
+                (
+                    pdf, bins, color=color, linestyle=linestyle,
+                    linewidth=1.6,
+                    label=f"{label} (t={times[indices[time_index]]:g})",
+                )
+            stage = "Initial" if time_index == 0 else "Final"
+            axis.set_title(f"{stage}: target t={target_time:g}")
+            axis.set_xlabel(field_label)
+            axis.set_ylabel("Probability density")
+            axis.set_ylim(bottom=0.0)
+            axis.grid(True, alpha=0.3)
+            axis.legend(fontsize="small")
+        figure.suptitle(f"{field_label} initial and final spatial PDFs")
+        figure.tight_layout()
+        output_path = output_dir / f"{name}_pdf_vs_time.png"
+        figure.savefig(output_path, dpi=dpi, bbox_inches="tight")
+        plt.close(figure)
+        output_paths.append(output_path)
+    return tuple(output_paths)
+
+
 def save_energy_comparison \
 (
     datasets, output_path: Path, lx: float, ly: float, dpi: int
@@ -385,6 +469,35 @@ def save_energy_comparison \
     axis.set_ylabel(r"$E=\frac{1}{2}L_xL_y\sum(n^2+|\nabla\phi|^2)$")
     axis.set_ylim(bottom=0.0)
     axis.set_title("Hasegawa–Wakatani energy versus time")
+    axis.grid(True, alpha=0.3)
+    axis.legend()
+    figure.tight_layout()
+    figure.savefig(output_path, dpi=dpi, bbox_inches="tight")
+    plt.close(figure)
+    return output_path
+
+
+def save_enstrophy_comparison \
+(
+    datasets, output_path: Path, lx: float, ly: float, dpi: int
+) -> Path:
+    """Plot overlaid HW enstrophy histories using the StylES convention."""
+    figure, axis = plt.subplots(figsize=(7.4, 5.2))
+    styles = \
+    (
+        ("black", "-"), ("tab:blue", "-"), ("tab:orange", "--"),
+        ("tab:green", "-.")
+    )
+    for (label, times, fields), (color, linestyle) in zip(datasets, styles):
+        axis.plot \
+        (
+            times, hw_enstrophy(fields, lx, ly), color=color,
+            linestyle=linestyle, linewidth=1.6, label=label,
+        )
+    axis.set_xlabel("simulation time")
+    axis.set_ylabel(r"$Z=\frac{1}{2}\sum(n-\omega)^2\,\Delta x\,\Delta y$")
+    axis.set_ylim(bottom=0.0)
+    axis.set_title("Hasegawa–Wakatani enstrophy versus time")
     axis.grid(True, alpha=0.3)
     axis.legend()
     figure.tight_layout()
@@ -1131,7 +1244,8 @@ def main() -> None:
     datasets = []
     for dataset_path in input_paths:
         times, _, fields = read_history(dataset_path, args.batch)
-        datasets.append((dataset_path.resolve().name, times, fields))
+        label = dataset_path.resolve().name.replace("results_U-Net_", "")
+        datasets.append((label, times, fields))
     reference_hints = tuple(path.resolve() for path in input_paths)
     datasets = order_datasets_with_reference_first \
     (
@@ -1176,6 +1290,11 @@ def main() -> None:
         datasets, args.output_dir / "energy_vs_time.png",
         args.lx, args.ly, args.dpi,
     )
+    enstrophy_path = save_enstrophy_comparison \
+    (
+        datasets, args.output_dir / "enstrophy_vs_time.png",
+        args.lx, args.ly, args.dpi,
+    )
     energy_components_path = save_energy_components_comparison \
     (
         datasets, args.output_dir / "energy_components_vs_time.png",
@@ -1194,8 +1313,12 @@ def main() -> None:
     print(f"Saved {centerpoint_path}")
     print(f"Saved {extrema_path}")
     print(f"Saved {energy_path}")
+    print(f"Saved {enstrophy_path}")
     print(f"Saved {energy_components_path}")
     print(f"Saved {initial_spectra_path}")
+    pdf_paths = save_field_pdf_comparison(datasets, args.output_dir, args.dpi)
+    for pdf_path in pdf_paths:
+        print(f"Saved {pdf_path}")
     if len(datasets) >= 3:
         vorticity_path = save_initial_vorticity_comparison \
         (

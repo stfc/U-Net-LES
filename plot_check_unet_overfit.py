@@ -15,6 +15,7 @@ import torch
 from germano_common import \
 (
     checkpoint_model_class,
+    restore_checkpoint_model_settings,
     calculate_losses,
     filter_snapshot,
     load_checkpoint,
@@ -73,7 +74,7 @@ def parse_args() -> argparse.Namespace:
     (
         "--checkpoint",
         type=Path,
-        help="Checkpoint (default: RUN/checkpoints/best.pt)",
+        help="Evaluate one checkpoint instead of both best.pt and latest.pt",
     )
     parser.add_argument("--samples", type=int, default=10)
     parser.add_argument("--seed", type=int, default=42)
@@ -81,7 +82,7 @@ def parse_args() -> argparse.Namespace:
     (
         "--plot",
         type=Path,
-        help="Comparison image path (default: RUN/vorticity_overfit_check.png)",
+        help="Comparison image path (best/latest suffixes added when evaluating both)",
     )
     return parser.parse_args()
 
@@ -143,11 +144,10 @@ def save_field_comparison(cases, channel: int, field: str, output_path: Path) ->
     plt.close(fig)
 
 
-def score_random_reconstructions(args: argparse.Namespace, run_dir: Path) -> None:
+def score_random_reconstructions(args: argparse.Namespace, run_dir: Path, rows) -> None:
     """Reconstruct random DNS snapshots and print mean relative-L2 and R2."""
     if args.samples < 1:
         raise ValueError("--samples must be positive")
-    checkpoint_path = args.checkpoint or run_dir / "checkpoints" / "best.pt"
     files = recursive_npz_files(args.dataset)
     if len(files) < args.samples:
         raise ValueError \
@@ -156,6 +156,23 @@ def score_random_reconstructions(args: argparse.Namespace, run_dir: Path) -> Non
             f"were found under {args.dataset}"
         )
     selected = random.Random(args.seed).sample(files, args.samples)
+    checkpoints = \
+    (
+        [("custom", args.checkpoint)]
+        if args.checkpoint else
+        [
+            ("best", run_dir / "checkpoints" / "best.pt"),
+            ("latest", run_dir / "checkpoints" / "latest.pt"),
+        ]
+    )
+    for _, checkpoint_path in checkpoints:
+        if not checkpoint_path.is_file():
+            raise FileNotFoundError(f"Checkpoint not found: {checkpoint_path}")
+    for label, checkpoint_path in checkpoints:
+        score_checkpoint(args, run_dir, rows, selected, label, checkpoint_path)
+
+
+def score_checkpoint(args, run_dir, rows, selected, label, checkpoint_path):
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     checkpoint = load_checkpoint(checkpoint_path, device)
@@ -187,11 +204,25 @@ def score_random_reconstructions(args: argparse.Namespace, run_dir: Path) -> Non
         variational=checkpoint.get("variational", False),
     ).to(device=device, dtype=torch_dtype)
     model.load_state_dict(checkpoint["model"])
+    restore_checkpoint_model_settings(model, checkpoint)
     model.eval()
 
     relative_l2, r2, plot_cases = [], [], []
     print(f"\nRandom DNS reconstruction ({args.samples} snapshots, seed={args.seed})")
     print(f"Checkpoint: {checkpoint_path}")
+    epoch = checkpoint.get("epoch")
+    print(f"Checkpoint epoch: {epoch}")
+    history_row = next \
+    (
+        (row for row in rows if int(row["epoch"]) == epoch), None
+    )
+    if history_row is not None:
+        train = float(history_row[f"train_{args.metric}"])
+        validation = float(history_row[f"validation_{args.metric}"])
+        gap = max(0.0, validation - train) / max(abs(train), 1e-15)
+        print(f"{args.metric} train: {train:.6e}; validation: {validation:.6e}; gap: {gap:.1%}")
+    else:
+        print("No matching history row for this checkpoint epoch.")
     with torch.no_grad():
         for path in selected:
             dns_np = load_dns_snapshot(path, fields, fine_n, lx, ly, numpy_dtype)
@@ -252,6 +283,11 @@ def score_random_reconstructions(args: argparse.Namespace, run_dir: Path) -> Non
         "vorticity": plot_path,
     }
     for channel, (field, output_path) in enumerate(comparison_paths.items()):
+        if args.checkpoint is None:
+            output_path = output_path.with_name \
+            (
+                f"{output_path.stem}_{label}{output_path.suffix}"
+            )
         save_field_comparison(plot_cases, channel, field, output_path)
         print(f"{field} comparison: {output_path}")
 
@@ -306,14 +342,28 @@ def main() -> int:
     print(f"Final validation:{validation[-1]:.6e}")
     print(f"Final gap:       {final_gap:.1%}")
     print(f"Late degradation:{degradation:.1%}")
-    score_random_reconstructions(args, run_dir)
+    score_random_reconstructions(args, run_dir, rows)
+    best_gap = max(0.0, best_validation - train[best_index]) / max \
+    (
+        abs(train[best_index]), 1e-15
+    )
+    print("\n")
+    if best_gap > args.max_gap:
+        print("RESULT (best epoch): possible overfitting")
+    else:
+        print("RESULT (best epoch): no clear overfitting signal")
+    print \
+    (
+        f"  - epoch {epochs[best_index]} generalization gap is {best_gap:.1%} "
+        f"(limit {args.max_gap:.1%})"
+    )
     if warnings:
-        print("RESULT: possible overfitting")
+        print("RESULT (final history epoch): possible overfitting")
         for warning in warnings:
             print(f"  - {warning}")
         return 1
 
-    print("RESULT: no clear overfitting signal")
+    print("RESULT (final history epoch): no clear overfitting signal")
     return 0
 
 

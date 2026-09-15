@@ -11,8 +11,9 @@
 
 export CUDA_VISIBLE_DEVICES=0
 
-source /gpfs/mcc/HT04543/jxc06/jxc74-jxc06/programs/miniconda3/etc/profile.d/conda.sh
-conda activate py311
+source ~/downloads/spack/share/spack/setup-env.sh
+spack env activate BOUT-Hermes3
+source ~/.pyenvs/BOUT-Hermes3/bin/activate
 
 # Set these when submitting to choose the grids independently, for example:
 #   DNS_N=256 LES_N=64 sbatch run.sh
@@ -27,6 +28,12 @@ CHECKPOINT_EVERY="${CHECKPOINT_EVERY:-25}"
 DIAGNOSTIC_EVERY="${DIAGNOSTIC_EVERY:-5}"
 DATASET="${DATASET:-../../data/BOUT_runs/HW_2D/Papers/PoP23/HW_N${DNS_N}/fields/}"
 OUTPUT_DIR="${OUTPUT_DIR:-training_dns${DNS_N}_les${LES_N}}"
+
+# Select the pre-inversion filter, for example:
+#   INVERSE_FILTER=cutoff sbatch run.sh
+# The historical resolution-dependent cutoff fraction is a fraction of Nyquist:
+# DNS 256 with LES 32/64/128 gives 0.44/0.5/0.707107 respectively.
+INVERSE_FILTER="${INVERSE_FILTER:-cutoff}"
 
 python train_germano_unet.py \
   --dataset "${DATASET}" \
@@ -44,8 +51,12 @@ python train_germano_unet.py \
   --diagnostic-every "${DIAGNOSTIC_EVERY}" \
   --post-filter none \
   --no-normalize \
-  --inverse-filter filtered_dns_spectrum \
+  --inverse-filter "${INVERSE_FILTER}" \
+  --inverse-cutoff-fraction 0.707107  \
   --inverse-min-wavenumber 1.0 \
-  --variational --lambda-kl 1e-4
+  --no-variational --lambda-kl 0.0 \
+  --inverse-method van_cittert \
+  --van-cittert-iterations 5 \
+  --van-cittert-relaxation 1.0
 
 #python infer_germano_unet.py --checkpoint germano_training_output_32_v3/checkpoints/best.pt --input fields_HW_run0_time501.npz --output-dir inference_output

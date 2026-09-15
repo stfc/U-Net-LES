@@ -11,7 +11,7 @@ not need an argument parser::
 
   PBOUT_UNET_CHECKPOINT=/path/to/best.pt
   PBOUT_UNET_DNS_PATH=/path/to/dns_snapshot.npz
-  PBOUT_UNET_RESCALING=0                # 0=off (default), 1=formula 11, 2=formula 13
+  PBOUT_UNET_RESCALING=0                # 0=off, 1=formula 11, 2=formula 13, 3=initial DNS maxima
   PBOUT_UNET_ALPHA=0.25                  # physical Germano filter width
   PBOUT_UNET_DNS_INIT=0                  # 0=filtered LES, 1=filtered DNS, 2=DNS, 3=DNS replay
   PBOUT_UNET_RECONSTRUCT_CHANNELS=none    # mode-1 U-Net channels
@@ -92,6 +92,7 @@ from dns_time_series import DNSTimeSeries
 from germano_common import \
 (
     checkpoint_model_class,
+    restore_checkpoint_model_settings,
     INVERSE_FILTER_TYPES,
     INVERSE_METHODS,
     POST_FILTER_TYPES,
@@ -141,10 +142,11 @@ _dns_path = os.environ.get("PBOUT_UNET_DNS_PATH")
 DNS_PATH = Path(_dns_path).expanduser() if _dns_path else None
 
 _rescaling_value = os.environ.get("PBOUT_UNET_RESCALING", "0").strip()
-if _rescaling_value not in {"0", "1", "2"}:
-    raise ValueError("PBOUT_UNET_RESCALING must be 0 (off), 1 (formula 11), or 2 (formula 13)")
+if _rescaling_value not in {"0", "1", "2", "3"}:
+    raise ValueError("PBOUT_UNET_RESCALING must be 0 (off), 1 (formula 11), 2 (formula 13), or 3 (initial DNS maxima)")
 RESCALING = int(_rescaling_value)
 _RESCALING_REFERENCE_MAXIMA = None
+_RESCALING_HISTORY = {}
 
 _dns_init_value = os.environ.get("PBOUT_UNET_DNS_INIT", "0")
 _dns_init_error = \
@@ -473,6 +475,7 @@ def _print_init_metadata(initial_state: str) -> None:
     {
         "checkpoint": str(CHECKPOINT),
         "architecture": type(MODEL).__name__,
+        "global_input_skip": getattr(MODEL, "global_input_skip", None),
         "checkpoint_epoch": _checkpoint.get("epoch"),
         "checkpoint_metadata_file": \
         (
@@ -724,6 +727,7 @@ MODEL = checkpoint_model_class(_checkpoint) \
     variational=_checkpoint.get("variational", False),
 ).to(device=DEVICE, dtype=TORCH_DTYPE)
 MODEL.load_state_dict(_checkpoint["model"])
+restore_checkpoint_model_settings(MODEL, _checkpoint)
 MODEL.eval()
 MODEL.requires_grad_(False)
 
@@ -1039,14 +1043,54 @@ def _append_vorticity_for_diagnostics(fields: torch.Tensor) -> torch.Tensor:
 
 
 @torch.inference_mode()
+def _record_rescaling_maxima(simtime, dns, les):
+    if RESCALING == 2:
+        _RESCALING_HISTORY[simtime] = \
+        (
+            dns[:, :2].detach().abs().amax(dim=(-2, -1), keepdim=True).clone(),
+            les[:, :2].detach().abs().amax(dim=(-2, -1), keepdim=True).clone(),
+        )
+
+
+def _prepare_rescaling_time(simtime):
+    global _RESCALING_REFERENCE_MAXIMA
+    if RESCALING != 2:
+        return
+    # Repeated calls use the same preceding time; discard rolled-back futures.
+    for time in list(_RESCALING_HISTORY):
+        if time >= simtime and time != float("-inf"):
+            del _RESCALING_HISTORY[time]
+    if _RESCALING_HISTORY:
+        _RESCALING_REFERENCE_MAXIMA = _RESCALING_HISTORY[max(_RESCALING_HISTORY)]
+
+
+@torch.inference_mode()
 def _apply_rescaling(dns: torch.Tensor, les: torch.Tensor) -> torch.Tensor:
     """Apply the selected density/potential amplitude correction."""
     if RESCALING == 0:
         return dns
     if RESCALING == 1:
-        filtered = _germano_filter_torch(dns[:, :2])
+        dns_max = dns[:, :2].abs().amax(dim=(-2, -1), keepdim=True)
+        les_max = les[:, :2].abs().amax(dim=(-2, -1), keepdim=True)
+        dns_denominator = torch.where(dns_max > 0, dns_max, torch.ones_like(dns_max))
+        les_denominator = torch.where(les_max > 0, les_max, torch.ones_like(les_max))
+        normalized_dns = dns[:, :2] / dns_denominator
+        normalized_les = les[:, :2] / les_denominator
+        filtered = _germano_filter_torch(normalized_dns)
         filtered = _spectral_resize_torch(filtered, les.shape[-1])
-        correction = rescaling_amplitude_correction(les[:, :2], filtered)
+        normalized_ratio = rescaling_amplitude_correction(normalized_les, filtered)
+        new_max = normalized_ratio * les_max
+        correction = new_max / dns_denominator
+        # Retain the amplitude when the filtered normalized field has no support.
+        supported = (torch.isfinite(filtered) & (filtered != 0)).any(dim=(-2, -1), keepdim=True)
+        correction = torch.where(supported | (les_max == 0), correction, torch.ones_like(correction))
+    elif RESCALING == 3:
+        if _RESCALING_REFERENCE_MAXIMA is None:
+            raise RuntimeError("initFlow must initialize rescaling maxima")
+        initial_max = _RESCALING_REFERENCE_MAXIMA[0].to(dns)
+        current_max = dns[:, :2].abs().amax(dim=(-2, -1), keepdim=True)
+        denominator = torch.where(current_max > 0, current_max, torch.ones_like(current_max))
+        correction = initial_max / denominator
     else:
         if _RESCALING_REFERENCE_MAXIMA is None:
             raise RuntimeError("initFlow must initialize formula-13 rescaling maxima")
@@ -1135,7 +1179,7 @@ def _reconstruct_dns \
     dns = enforce_zero_spatial_mean(dns)
     dns = _apply_rescaling(dns, coarse)
     dns = _set_omega_from_potential(dns)
-    dns = _restore_vorticity_mean(dns, coarse)
+    # dns = _restore_vorticity_mean(dns, coarse)
     reconstructed_vorticity = dns[:, FIELD_NAMES.index("P"):][:, :1]
     return \
     (
@@ -1187,7 +1231,7 @@ def _inverse_germano_only \
     dns = enforce_zero_spatial_mean(dns)
     dns = _apply_rescaling(dns, filtered_fields)
     dns = _set_omega_from_potential(dns)
-    dns = _restore_vorticity_mean(dns, filtered_fields)
+    # dns = _restore_vorticity_mean(dns, filtered_fields)
     reconstructed_vorticity = dns[:, FIELD_NAMES.index("P"):][:, :1]
     return \
     (
@@ -1331,6 +1375,7 @@ def initFlow(npv):
     global _LAST_FIELD_OUTPUT_INDEX
 
     _RESCALING_REFERENCE_MAXIMA = None
+    _RESCALING_HISTORY.clear()
     _INITIAL_DNS_REFERENCE = None
     _ENERGY_TIMES = []
     _ENERGY_VALUES = []
@@ -1405,8 +1450,8 @@ def initFlow(npv):
         fields = source_fields
         initial_state = "original unfiltered DNS snapshot"
 
-    if RESCALING == 2:
-        # Equation 13 preserves this ratio, including repeated solver calls.
+    if RESCALING in (2, 3):
+        # Seed the first reconstruction from the initial DNS and LES.
         initial_les = torch.from_numpy(fields[None, :2]).to \
         (
             device=DEVICE, dtype=TORCH_DTYPE,
@@ -1416,6 +1461,8 @@ def initFlow(npv):
             dns_torch[:, :2].abs().amax(dim=(-2, -1), keepdim=True).clone(),
             initial_les.abs().amax(dim=(-2, -1), keepdim=True).clone(),
         )
+        if RESCALING == 2:
+            _RESCALING_HISTORY[float("-inf")] = _RESCALING_REFERENCE_MAXIMA
 
     with torch.inference_mode():
         if DNS_REPLAY:
@@ -1467,6 +1514,8 @@ def initFlow(npv):
                 else "original unfiltered DNS fields"
             )
 
+    if RESCALING == 2:
+        _record_rescaling_maxima(0.0, initial_dns, initial_les)
     initial_laplacian_vorticity = _vorticity_from_potential(initial_dns)
     initial_dns_np = initial_dns[0].detach().cpu().double().numpy()
     _INITIAL_DNS_PLOT_LIMITS = tuple \
@@ -1524,31 +1573,6 @@ def initFlow(npv):
     print("------------------ U-Net parameters---------------", flush=True)
     _print_init_metadata(initial_state)
     print("\n\n", flush=True)
-
-    print \
-    (
-        f"Initialized BOUT++ from {initial_state} "
-        f"{DNS_PATH};\n"
-        f"resolution={fields.shape[-1]}, Lx={LX}, Ly={LY};\n"
-        f"Germano filter="
-        f"{'enabled' if DNS_INIT in (0, 1, 3) else 'disabled'}"
-        f", alpha={ALPHA:g}; diagnostic mode={diagnostic_mode};\n"
-        + \
-        (
-            f"saved fields to {fields_image_output} and spectra to "
-            f"{fields_spectrum_output};\n"
-            f"saved DNS Arakawa terms to {arakawa_image_output} and spectra "
-            f"to {arakawa_spectrum_output}\n"
-            if WRITE_DIAGNOSTICS == 1
-            else \
-            (
-                "saving field diagnostics only\n"
-                if WRITE_DIAGNOSTICS == 2
-                else "image and field diagnostics disabled\n"
-            )
-        ),
-        flush=True,
-    )
 
     return fields.reshape(-1).astype(np.float64, copy=False)
 
@@ -1632,6 +1656,7 @@ def findLESTerms(pLES):
         device=DEVICE, dtype=TORCH_DTYPE
     )
 
+    _prepare_rescaling_time(simtime)
     coarse_fields = None
     if DNS_REPLAY:
         dns = _dns_at_time(simtime, simulation_fields.shape[0])
@@ -1695,6 +1720,7 @@ def findLESTerms(pLES):
     #     dns = _restore_vorticity_mean(dns, simulation_fields)
     #     reconstructed_vorticity = dns[:, FIELD_NAMES.index("P"):][:, :1]
 
+    _record_rescaling_maxima(simtime, dns, simulation_fields)
     diagnostics_due = WRITE_DIAGNOSTICS and _field_output_due(simtime)
     simulation_fields_np = None
     if diagnostics_due:

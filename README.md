@@ -16,20 +16,24 @@ conda activate py311
 
 ## U-Net with bicubic input interpolation
 
-Training uses `BicubicUNetSR`. Periodic bicubic interpolation upsamples LES
+Training uses `LegacyResidualUNetSR`. Periodic bicubic interpolation upsamples LES
 fields to the DNS grid before the U-Net encoder. Encoder–decoder skip
-connections remain; there is no direct interpolated-input addition to the
-output.
+connections remain, and the decoder uses periodic bilinear interpolation.
+The default model does not add the interpolated input directly to its output.
 
 The pipeline is **LES → NN at DNS resolution → configured inverse-input
-filter → Germano inversion**. Training compares the NN output with filtered
-fine-grid targets, not full DNS fields. Inversion stays outside the training
-gradient. Existing post-processing and vorticity derivation remain in place.
+filter → Germano inversion**. Training compares reconstructed DNS density and potential with DNS targets
+using mean absolute error scaled by DNS training standard deviations, plus
+an optional normalized DNS vorticity error. Gradients pass through inversion.
+The loss adds squared normalized DNS errors to the L1 terms with
+`--lambda-mse 0.1` by default, including vorticity scaled by
+`--lambda-vorticity`. Use `--lambda-mse 0` for the L1 objective from
+commit `c52b744`. KL regularization is disabled by default.
 
-Variational heads are enabled by default; use `--no-variational` to disable
-them. `--lambda-kl` controls the KL penalty. Evaluation uses the latent mean.
+Variational heads are disabled by default; use `--variational` to enable
+them. `--lambda-kl` enables and controls the optional KL penalty (default: 0). Evaluation uses the latent mean.
 
-Checkpoints record `architecture: BicubicUNetSR`. Earlier `ResidualUNetSR`,
+Checkpoints record `architecture: LegacyResidualUNetSR`. Earlier `BicubicUNetSR`, `ResidualUNetSR`,
 `PeriodicResidualCNN`, and `PeriodicSubpixelCNN` checkpoints remain supported.
 The small bicubic CNN implementation has been removed; its saved training
 results remain available, but its checkpoints cannot be loaded by this code.
@@ -155,17 +159,25 @@ Set `PBOUT_UNET_RESCALING` to select density/potential rescaling:
 - `0` (default): no rescaling.
 - `1`: formula 11, the median pointwise correction described below.
 - `2`: formula 13, `DNS_max_new = LES_max_new * DNS_max_previous / LES_max_previous`.
-  This uses absolute maxima and the invariant ratio from the initialized DNS
-  and actual LES grid, avoiding state changes during repeated solver calls.
+  This uses the actual reconstructed DNS and LES absolute maxima from the
+  preceding solver time. The initial DNS/LES seed the first call. Repeated
+  calls at the same time reuse the preceding time's ratio; time rollback
+  discards later stored values.
   A zero reference LES maximum or zero reconstruction retains the amplitude;
   a zero current LES requests zero amplitude.
 
+- `3`: keep each reconstructed density/potential absolute maximum equal to
+  its initial DNS absolute maximum at simulation time `t=0`. An identically
+  zero reconstruction stays zero because multiplicative scaling cannot restore it.
+
 With option `1`, DNS reconstruction uses equation (11) with
-one median pointwise correction per batch and field:
-`DNS_corrected = DNS_reconstructed * median(incoming_LES / G(DNS_reconstructed))`.
-The forward Germano-filtered reconstruction is spectrally resized to the
-incoming LES grid before taking the ratio. This is equivalent to the normalized
-maximum estimate in equation (11), since the normalization factors cancel.
+one amplitude estimate per batch and field:
+`DNS_max_new = median((LES / LES_max) / G(DNS / DNS_max)) * LES_max`,
+then `DNS_corrected = (DNS / DNS_max) * DNS_max_new`.
+Here `LES_max` and `DNS_max` are the respective absolute spatial maxima.
+The normalized DNS is Germano-filtered and spectrally resized to the incoming
+LES grid before taking the ratio. For this linear filter, normalization
+cancels algebraically, giving the same correction as the unnormalized ratio.
 Nonfinite ratios and near-zero denominators are excluded. If no valid ratio
 remains, the amplitude is retained; an identically zero LES requests zero
 amplitude. Checkpoint mean/std normalization is unchanged.
@@ -268,7 +280,7 @@ Other useful controls are:
 
 ```bash
 export PBOUT_UNET_IMPLICIT=1
-export PBOUT_UNET_RESCALING=0            # 0=off, 1=formula 11, 2=formula 13
+export PBOUT_UNET_RESCALING=0            # 0=off, 1=formula 11, 2=formula 13, 3=initial DNS maxima
 export PBOUT_UNET_OMEGA_FROM_POTENTIAL=1  # optional override of checkpoint default
 export PBOUT_UNET_LAPLACIAN_ORDER=2       # 2 or 4
 export PBOUT_UNET_POST_FILTER=none        # none, high_order, gaussian

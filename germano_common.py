@@ -922,6 +922,7 @@ class UpBlock(nn.Module):
 
 class ResidualUNetSR(nn.Module):
     global_input_skip = True
+    up_block_class = UpBlock
 
     def __init__ \
     (
@@ -941,9 +942,9 @@ class ResidualUNetSR(nn.Module):
         if variational:
             self.latent_mu = nn.Conv2d(8 * b, 8 * b, 1)
             self.latent_logvar = nn.Conv2d(8 * b, 8 * b, 1)
-        self.d3 = UpBlock(8 * b, 4 * b, 4 * b)
-        self.d2 = UpBlock(4 * b, 2 * b, 2 * b)
-        self.d1 = UpBlock(2 * b, b, b)
+        self.d3 = self.up_block_class(8 * b, 4 * b, 4 * b)
+        self.d2 = self.up_block_class(4 * b, 2 * b, 2 * b)
+        self.d1 = self.up_block_class(2 * b, b, b)
         self.output_channels = output_channels
         self.out = nn.Conv2d(b, output_channels, 1)
 
@@ -976,6 +977,45 @@ class ResidualUNetSR(nn.Module):
         if self.global_input_skip:
             prediction = base[:, : self.output_channels] + prediction
         return (prediction, kl) if return_kl else prediction
+
+
+class LegacyBilinearUpBlock(nn.Module):
+    """Periodic bilinear decoder from commit c52b744; no learned upsampler."""
+
+    def __init__(self, ic, sc, oc):
+        super().__init__()
+        self.net = ConvBlock(ic + sc, oc)
+
+    def forward(self, x, skip):
+        scale_x = skip.shape[-2] // x.shape[-2]
+        scale_y = skip.shape[-1] // x.shape[-1]
+        if x.shape[-2] * scale_x != skip.shape[-2]:
+            raise ValueError("Skip height must be an integer multiple of input.")
+        if x.shape[-1] * scale_y != skip.shape[-1]:
+            raise ValueError("Skip width must be an integer multiple of input.")
+        x = periodic_interpolate(x, (scale_x, scale_y), "bilinear")
+        return self.net(torch.cat((x, skip), 1))
+
+
+class LegacyResidualUNetSR(ResidualUNetSR):
+    """Load c52b744 weights, retaining the requested skip-disabled default.
+
+    Set global_input_skip=True to reproduce the historical model output.
+    Optional latent heads support later variational bilinear-decoder weights.
+    """
+
+    global_input_skip = False
+    up_block_class = LegacyBilinearUpBlock
+
+    def __init__ \
+    (
+        self, channels=3, base_channels=24, scale_factor=8, output_channels=2,
+        variational=False,
+    ):
+        super().__init__ \
+        (
+            channels, base_channels, scale_factor, output_channels, variational
+        )
 
 
 class BicubicUNetSR(ResidualUNetSR):
@@ -1101,9 +1141,24 @@ class PeriodicSubpixelCNN(PeriodicResidualCNN):
         return (prediction, kl) if return_kl else prediction
 
 
+def restore_checkpoint_model_settings(model, checkpoint):
+    """Restore skip semantics separately from the parameter-free class default."""
+    if "global_input_skip" in checkpoint:
+        model.global_input_skip = bool(checkpoint["global_input_skip"])
+    elif isinstance(model, LegacyResidualUNetSR):
+        # Historical ResidualUNetSR checkpoints learned a residual correction.
+        # Explicitly named new legacy models use the new skip-disabled default.
+        model.global_input_skip = \
+        (
+            checkpoint.get("architecture", "ResidualUNetSR") == "ResidualUNetSR"
+        )
+
+
 def checkpoint_model_class(checkpoint):
-    """Dispatch explicitly; checkpoints without metadata use the legacy U-Net."""
+    """Identify historical U-Net decoders by their checkpoint weight keys."""
     architecture = checkpoint.get("architecture", "ResidualUNetSR")
+    if architecture == "LegacyResidualUNetSR":
+        return LegacyResidualUNetSR
     if architecture == "BicubicUNetSR":
         return BicubicUNetSR
     if architecture == "PeriodicSubpixelCNN":
@@ -1111,6 +1166,9 @@ def checkpoint_model_class(checkpoint):
     if architecture == "PeriodicResidualCNN":
         return PeriodicResidualCNN
     if architecture == "ResidualUNetSR":
+        state = checkpoint.get("model", {})
+        if "d3.net.net.0.weight" in state and "d3.up.weight" not in state:
+            return LegacyResidualUNetSR
         return ResidualUNetSR
     raise ValueError(f"Unknown checkpoint architecture: {architecture!r}")
 

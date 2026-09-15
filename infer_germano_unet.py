@@ -5,6 +5,7 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 import numpy as np, torch
 from germano_common import *
+from plot_unet_validation import hw_energy_components
 from visualization_common import \
 (
     save_arakawa_comparison,
@@ -78,6 +79,25 @@ def print_checkpoint_metadata(checkpoint_path, effective_inference):
     print_values(metadata)
     print_values(effective_inference, "effective_inference")
     return metadata_path, metadata
+
+
+def print_energy_comparison(source, dns, reconstructed, lx, ly):
+    """Print validation-convention HW energy components and their total."""
+    reference = np.asarray(hw_energy_components(dns[None].astype(np.float64), lx, ly)).ravel()
+    predicted = np.asarray(hw_energy_components(reconstructed[None].astype(np.float64), lx, ly)).ravel()
+    reference = np.append(reference, reference.sum())
+    predicted = np.append(predicted, predicted.sum())
+    print(f"\nHW energy comparison: {source} (0.5 * Lx * Ly * spatial sum)")
+    print(f"{'Term':<18} {'DNS':>14} {'Reconstructed':>14} {'DNS share':>12} {'Recon share':>12} {'Difference':>12}")
+    for index, label in enumerate(('density', 'potential dx', 'potential dy', 'total')):
+        dns_share = f"{100 * reference[index] / reference[-1]:.2f}%" if reference[-1] else 'n/a'
+        reconstructed_share = f"{100 * predicted[index] / predicted[-1]:.2f}%" if predicted[-1] else 'n/a'
+        difference = f"{100 * (predicted[index] / reference[index] - 1):+.2f}%" if reference[index] else 'n/a'
+        print \
+        (
+            f"{label:<18} {reference[index]:14.6e} {predicted[index]:14.6e} "
+            f"{dns_share:>12} {reconstructed_share:>12} {difference:>12}"
+        )
 
 
 def save_dns_centerline_plots(source, fields, dns, reconstructed, output_dir):
@@ -185,6 +205,22 @@ def recreate_output_directory(path):
             raise ValueError(f"Output path exists but is not a directory: {path}")
         shutil.rmtree(path)
     path.mkdir(parents=True)
+
+
+def save_reconstructed_dns_fields(source, fields, reconstructed, output_dir):
+    """Save a reconstructed snapshot in the results_U-Net/fields layout."""
+    field_dir = output_dir / "fields"
+    field_dir.mkdir(exist_ok=True)
+    snapshot = {name: reconstructed[index] for index, name in enumerate(fields)}
+    with np.load(source) as original:
+        for name in ("pStep", "simtime", "t"):
+            if name in original:
+                snapshot[name] = original[name]
+    np.savez_compressed \
+    (
+        field_dir / f"{source.stem}_reconstructed_DNS.npz",
+        **snapshot,
+    )
 
 
 def main():
@@ -392,6 +428,9 @@ def main():
         variational=c.get("variational", False),
     ).to(device=device, dtype=torch_dtype)
     model.load_state_dict(c["model"])
+    restore_checkpoint_model_settings(model, c)
+    effective_inference["architecture"] = type(model).__name__
+    effective_inference["global_input_skip"] = getattr(model, "global_input_skip", None)
     model.eval()
     mean_np = np.asarray(c["mean"], dtype=numpy_dtype)
     std_np = np.asarray(c["std"], dtype=numpy_dtype)
@@ -482,7 +521,7 @@ def main():
             (
                 device=device, dtype=torch_dtype
             )
-            pd = restore_channel_spatial_mean(pd, dns_reference, 2)
+            # pd = restore_channel_spatial_mean(pd, dns_reference, 2)
             diagnostic_filtered = pf
             diagnostic_inverse_input = inverse_input
             if vorticity_from_potential:
@@ -490,12 +529,12 @@ def main():
                 (
                     pf[:, 1:2], lx, ly
                 )
-                filtered_vorticity = restore_channel_spatial_mean \
-                (
-                    torch.cat((pf, filtered_vorticity), dim=1),
-                    dns_reference,
-                    2,
-                )[:, 2:3]
+                # filtered_vorticity = restore_channel_spatial_mean \
+                # (
+                    # torch.cat((pf, filtered_vorticity), dim=1),
+                    # dns_reference,
+                    # 2,
+                # )[:, 2:3]
                 diagnostic_filtered = torch.cat \
                 (
                     (pf, filtered_vorticity), dim=1
@@ -504,12 +543,12 @@ def main():
                 (
                     inverse_input[:, 1:2], lx, ly
                 )
-                filtered_vorticity = restore_channel_spatial_mean \
-                (
-                    torch.cat((inverse_input, filtered_vorticity), dim=1),
-                    dns_reference,
-                    2,
-                )[:, 2:3]
+                # filtered_vorticity = restore_channel_spatial_mean \
+                # (
+                    # torch.cat((inverse_input, filtered_vorticity), dim=1),
+                    # dns_reference,
+                    # 2,
+                # )[:, 2:3]
                 diagnostic_inverse_input = torch.cat \
                 (
                     (inverse_input, filtered_vorticity), dim=1
@@ -517,6 +556,8 @@ def main():
         pf_np = diagnostic_filtered[0].cpu().numpy()
         inverse_input_np = diagnostic_inverse_input[0].cpu().numpy()
         pd_np = pd[0].cpu().numpy()
+        save_reconstructed_dns_fields(p, fields, pd_np, a.output_dir)
+        print_energy_comparison(p.name, dns, pd_np, lx, ly)
         out = a.output_dir / p.stem
         out.mkdir(parents=True, exist_ok=True)
         save_dns_centerline_plots(p.name, fields, dns, pd_np, out)
