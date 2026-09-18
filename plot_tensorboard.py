@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 from pathlib import Path
 
 import matplotlib.pyplot as plt
@@ -158,7 +159,14 @@ def plot_all_metrics \
             )
         ax.set_xlabel("Epoch")
         ax.set_ylabel("Value")
-        if log_scale:
+        # Empty or nonpositive metrics (for example disabled KL) need a linear axis.
+        has_positive_values = any \
+        (
+            math.isfinite(value) and value > 0
+            for line in ax.lines
+            for value in line.get_ydata()
+        )
+        if log_scale and has_positive_values:
             ax.set_yscale("log")
         ax.grid(True, which="both", alpha=0.25)
         if ax.lines:
