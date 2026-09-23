@@ -1059,7 +1059,7 @@ def run_training(a):
         print("GPU:", torch.cuda.get_device_name(0))
         torch.backends.cudnn.benchmark = True
         torch.backends.cudnn.conv.fp32_precision = "ieee"
-    model = LegacyResidualUNetSR \
+    model = DirectUNetSR \
     (
         len(a.fields),
         a.base_channels,
@@ -1097,10 +1097,10 @@ def run_training(a):
     if a.resume:
         c = load_checkpoint(a.resume, device)
         validate_hw_checkpoint(c)
-        if checkpoint_model_class(c) is not LegacyResidualUNetSR:
+        if checkpoint_model_class(c) is not DirectUNetSR:
             raise ValueError \
             (
-                "Cannot resume a different architecture as a LegacyResidualUNetSR. "
+                "Cannot resume a different architecture as a DirectUNetSR. "
                 "Start fresh training without --resume."
             )
         if c.get("variational", False) != a.variational:
@@ -1215,7 +1215,7 @@ def run_training(a):
         optimizer_epsilon=opt.param_groups[0]["eps"],
         optimizer_amsgrad=opt.param_groups[0]["amsgrad"],
         gradient_clip_norm=1.0,
-        model="LegacyResidualUNetSR",
+        model="DirectUNetSR",
         variational=a.variational,
         lambda_kl=a.lambda_kl,
         lambda_mse=a.lambda_mse,
@@ -1327,7 +1327,7 @@ def run_training(a):
         {
             "epoch": epoch,
             "model": model.state_dict(),
-            "architecture": "LegacyResidualUNetSR",
+            "architecture": "DirectUNetSR",
             "global_input_skip": model.global_input_skip,
             "variational": a.variational,
             "lambda_kl": a.lambda_kl,

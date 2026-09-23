@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Compare up to four field-snapshot histories.
 
-Read ``fields_*.npz`` snapshots from specified directories, then plot
+Read ``fields_*.npz`` snapshots or BOUT NetCDF dumps, then plot
 domain-center values, total/component HW-energy, and enstrophy histories. The dataset whose
 directory name contains ``DNS`` is used as the reference; if none does, the
 first dataset is the reference. Animations and the initial-derivative plot
@@ -11,8 +11,13 @@ compare the first non-reference dataset with it.
 from __future__ import annotations
 
 import argparse
+import os
 from pathlib import Path
 import shutil
+
+# Set before third-party imports can initialize HDF5 on the shared filesystem.
+# Preserve an explicit user override (for example HDF5_USE_FILE_LOCKING=TRUE).
+os.environ.setdefault("HDF5_USE_FILE_LOCKING", "FALSE")
 
 import matplotlib
 
@@ -49,14 +54,14 @@ def parse_args() -> argparse.Namespace:
     (
         "unet_fields",
         type=Path,
-        help="First run directory, or its directory of fields_*.npz snapshots",
+        help="First run/snapshot directory or BOUT.dmp.0.nc file",
     )
     parser.add_argument \
     (
         "dns_fields",
         type=Path,
         nargs="?",
-        help="Second run directory, or its directory of fields_*.npz snapshots",
+        help="Second run/snapshot directory or BOUT.dmp.0.nc file",
     )
     parser.add_argument \
     (
@@ -83,6 +88,15 @@ def parse_args() -> argparse.Namespace:
             "Directory prepended to every relative input dataset path "
             f"(default: {DEFAULT_BOUT_RESULTS_ROOT})"
         ),
+    )
+    parser.add_argument(
+        "--input-format", choices=("auto", "npz", "netcdf"), default="auto",
+        help="Input format for all datasets; auto prefers NPZ in directories "
+             "and accepts .nc files directly (default: auto)",
+    )
+    parser.add_argument(
+        "--bout-y-index", type=int, default=0,
+        help="Interior y-plane for BOUT (t,x,y,z) fields (default: 0)",
     )
     parser.add_argument("--lx", type=float, default=50.176)
     parser.add_argument("--ly", type=float, default=50.176)
@@ -164,16 +178,83 @@ def resolve_input_directory(path: Path, base_directory: Path) -> Path:
     raise FileNotFoundError(f"Input dataset does not exist: {candidate}")
 
 
+def read_bout_history(source: Path, y_index: int = 0):
+    """Read a single-rank HW dump as (time, channel, x, z), without guards.
+
+    Map n/phi/vort to U/V/P. Steps are output indices, not solver steps.
+    Decomposed dumps must be collected into a single-rank file first.
+    """
+    try:
+        from netCDF4 import Dataset
+    except ImportError as error:
+        raise ImportError("Reading BOUT dumps requires netCDF4 (pip install netCDF4)") from error
+
+    with Dataset(source) as archive:
+        def scalar(name, default):
+            return int(np.asarray(archive[name][:]).item()) if name in archive.variables else default
+
+        if scalar("NXPE", 1) != 1 or scalar("NYPE", 1) != 1:
+            raise ValueError(f"{source}: decomposed BOUT dumps are not supported; collect all ranks first")
+        missing = [name for name in ("t_array", "n", "phi", "vort")
+                   if name not in archive.variables]
+        if missing:
+            raise KeyError(f"{source} is missing variables: {missing}")
+        times = np.asarray(np.ma.filled(archive["t_array"][:], np.nan), dtype=np.float64)
+        if times.ndim != 1 or not times.size or not np.all(np.isfinite(times)):
+            raise ValueError(f"{source}: t_array must be a nonempty finite 1-D array")
+        mxg, myg = scalar("MXG", 2), scalar("MYG", 0)
+        if min(mxg, myg, y_index) < 0:
+            raise ValueError(f"{source}: guard widths and y index must be non-negative")
+        planes = []
+        for name in ("n", "phi", "vort"):
+            variable = archive[name]
+            dims = tuple(variable.dimensions)
+            if dims not in (("t", "x", "y", "z"), ("t", "x", "z")):
+                raise ValueError(f"{source}: {name} has unsupported dimensions {dims}")
+            if variable.shape[0] != times.size or variable.shape[1] <= 2 * mxg:
+                raise ValueError(f"{source}: invalid time or x extent for {name}")
+            x_slice = slice(mxg, -mxg if mxg else None)
+            if "y" in dims:
+                if y_index >= variable.shape[2] - 2 * myg:
+                    raise IndexError(f"{source}: y index {y_index} outside interior of {name}")
+                values = variable[:, x_slice, myg + y_index, :]
+            else:
+                if y_index != 0:
+                    raise IndexError(f"{source}: {name} has no y-plane {y_index}")
+                values = variable[:, x_slice, :]
+            values = np.asarray(np.ma.filled(values, np.nan), dtype=np.float64)
+            if not np.all(np.isfinite(values)):
+                raise ValueError(f"{source}: {name} contains missing or non-finite values")
+            if planes and values.shape != planes[0].shape:
+                raise ValueError(f"{source}: inconsistent field shapes")
+            planes.append(values)
+    order = np.argsort(times, kind="stable")
+    return times[order], np.arange(times.size)[order], np.stack(planes, axis=1)[order]
+
+
 def read_history \
 (
-    directory: Path, batch: int
+    directory: Path, batch: int, input_format: str = "auto", bout_y_index: int = 0
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Read time, step, and channel-first fields from a snapshot directory."""
+    """Read NPZ snapshots or a BOUT dump, returning time, step, and fields."""
+    if input_format not in ("auto", "npz", "netcdf"):
+        raise ValueError(f"Unknown input format: {input_format}")
+    if directory.is_file() and input_format != "npz":
+        if batch != 0:
+            raise IndexError("BOUT NetCDF fields are unbatched; use --bout-y-index for y planes")
+        return read_bout_history(directory, bout_y_index)
     if not directory.is_dir():
         raise FileNotFoundError(f"Field directory does not exist: {directory}")
     nested_fields = directory / "fields"
     fields_directory = nested_fields if nested_fields.is_dir() else directory
     files = sorted(fields_directory.glob("fields_*.npz"))
+    if input_format == "netcdf" or (input_format == "auto" and not files):
+        for source in (directory / "BOUT.dmp.0.nc", directory / "data" / "BOUT.dmp.0.nc"):
+            if source.is_file():
+                if batch != 0:
+                    raise IndexError("BOUT NetCDF fields are unbatched; use --bout-y-index for y planes")
+                return read_bout_history(source, bout_y_index)
+        raise FileNotFoundError(f"No BOUT.dmp.0.nc found in {directory} or its data directory")
     if not files:
         raise FileNotFoundError \
         (
@@ -1243,8 +1324,11 @@ def main() -> None:
     )
     datasets = []
     for dataset_path in input_paths:
-        times, _, fields = read_history(dataset_path, args.batch)
-        label = dataset_path.resolve().name.replace("results_U-Net_", "")
+        times, _, fields = read_history(
+            dataset_path, args.batch, args.input_format, args.bout_y_index
+        )
+        label_path = dataset_path.parent if dataset_path.is_file() else dataset_path
+        label = label_path.resolve().name.replace("results_U-Net_", "")
         datasets.append((label, times, fields))
     reference_hints = tuple(path.resolve() for path in input_paths)
     datasets = order_datasets_with_reference_first \

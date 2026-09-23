@@ -14,12 +14,13 @@ source /gpfs/mcc/HT04543/jxc06/jxc74-jxc06/programs/miniconda3/etc/profile.d/con
 conda activate py311
 ```
 
-## U-Net with bicubic input interpolation
+## Direct coarse-grid U-Net
 
-Training uses `LegacyResidualUNetSR`. Periodic bicubic interpolation upsamples LES
-fields to the DNS grid before the U-Net encoder. Encoder–decoder skip
-connections remain, and the decoder uses periodic bilinear interpolation.
-The default model does not add the interpolated input directly to its output.
+Training uses `DirectUNetSR`. The encoder now begins directly on the LES grid:
+the default 3-channel 64x64 input is mapped to 96 feature channels at 64x64,
+without initial bicubic upsampling. A 192-channel 32x32 bottleneck feeds a
+periodic bilinear decoder, which returns through 64x64, 128x128, and 256x256.
+The model predicts the complete filtered fields and has no global input skip.
 
 The pipeline is **LES → NN at DNS resolution → configured inverse-input
 filter → Germano inversion**. Training compares reconstructed DNS density and potential with DNS targets
@@ -33,7 +34,12 @@ commit `c52b744`. KL regularization is disabled by default.
 Variational heads are disabled by default; use `--variational` to enable
 them. `--lambda-kl` enables and controls the optional KL penalty (default: 0). Evaluation uses the latent mean.
 
-Checkpoints record `architecture: LegacyResidualUNetSR`. Earlier `BicubicUNetSR`, `ResidualUNetSR`,
+The default decoder uses periodic bilinear interpolation followed by learned
+convolutions, without the added fixed smoothing filters.
+
+Checkpoints record `architecture: DirectUNetSR`. Existing `FilteredDirectUNetSR`
+checkpoints remain supported and retain their filtered decoder when loaded.
+Earlier `LegacyResidualUNetSR`, `BicubicUNetSR`, `ResidualUNetSR`,
 `PeriodicResidualCNN`, and `PeriodicSubpixelCNN` checkpoints remain supported.
 The small bicubic CNN implementation has been removed; its saved training
 results remain available, but its checkpoints cannot be loaded by this code.
@@ -343,3 +349,47 @@ requested, and effective values and whether they changed the setting. A model
 that outputs only density and potential still requires derived vorticity even if
 an environment override requests otherwise. Runtime controls such as input paths
 and diagnostic modes are shown in `effective_inference`.
+
+## PBOUT environment-variable defaults
+
+The following values are used when the corresponding environment variable is
+not set. A checkpoint/training fallback means that the value embedded in the
+selected checkpoint takes precedence over the final fallback shown here.
+
+| Environment variable | Default and available options |
+| --- | --- |
+| `PBOUT_UNET_ALPHA` | **Default:** checkpoint `alpha`.<br>**Options:** any finite number greater than or equal to `0`. |
+| `PBOUT_UNET_BOUT_INP` | **Default:** `data/BOUT.inp`.<br>**Options:** path to the BOUT++ input file used by the run. |
+| `PBOUT_UNET_CHECKPOINT` | **Default:** `<repository>/results/germano_training_output_v10/checkpoints/best.pt`.<br>**Options:** path to a compatible `.pt` checkpoint. |
+| `PBOUT_UNET_DEVICE` | **Default:** `cuda` when available; otherwise `cpu`.<br>**Options:** a valid PyTorch device, normally `cpu`, `cuda`, or `cuda:N`. |
+| `PBOUT_UNET_DIR` | **Default:** none; it is not read directly by `pBOUT-unet.py`.<br>**Options:** repository path for launch-script use. |
+| `PBOUT_UNET_DNS_FIELD_DIR` | **Default:** `results_U-Net_DNS/fields`.<br>**Options:** directory containing mode-3 DNS replay `.npz` snapshots. |
+| `PBOUT_UNET_DNS_INIT` | **Default:** `0`.<br>**Options:**<br>`0` = initialize with Germano-filtered, downsampled LES fields from `PBOUT_UNET_DNS_PATH`.<br>`1` = initialize with filtered DNS and reconstruct according to `PBOUT_UNET_RECONSTRUCT_CHANNELS`.<br>`2` = initialize and run with unfiltered DNS fields and terms.<br>`3` = initialize like mode `0`, then replay snapshots from `PBOUT_UNET_DNS_FIELD_DIR`. |
+| `PBOUT_UNET_DNS_PATH` | **Default:** unset (`None`).<br>**Options:** path to the initial DNS `.npz` snapshot. |
+| `PBOUT_UNET_IMPLICIT` | **Default:** `1`.<br>**Options:** `0` = return DNS brackets; `1` = return incoming BOUT++ brackets minus DNS brackets. |
+| `PBOUT_UNET_INVERSE_CUTOFF_FRACTION` | **Default:** checkpoint value; otherwise `None`.<br>**Options:** float in `(0, 1]`; `none`, `off`, `disable`, or `disabled` disables it. |
+| `PBOUT_UNET_INVERSE_CUTOFF_ORDER` | **Default:** checkpoint value; otherwise `8.0`.<br>**Options:** any finite positive number. |
+| `PBOUT_UNET_INVERSE_FILTER` | **Default:** checkpoint/training value; otherwise `cutoff`.<br>**Options:** `cutoff` or `filtered_dns_spectrum`; hyphens are normalized to underscores. |
+| `PBOUT_UNET_INVERSE_METHOD` | **Default:** checkpoint/training value; otherwise `exact`.<br>**Options:** `exact` or `van_cittert`; hyphens are normalized to underscores. |
+| `PBOUT_UNET_INVERSE_MIN_WAVENUMBER` | **Default:** checkpoint value; otherwise `1.0`.<br>**Options:** any finite number greater than or equal to `0`. |
+| `PBOUT_UNET_LAPLACIAN_ORDER` | **Default:** checkpoint/training value; otherwise `2`.<br>**Options:** `2` or `4`. |
+| `PBOUT_UNET_OMEGA_FROM_POTENTIAL` | **Default:** derived from checkpoint vorticity mode.<br>**Options:** `0`, `false`, `no`, and `off` are false; any other value is true. A Laplacian-output checkpoint forces true. |
+| `PBOUT_UNET_POST_CUTOFF_FRACTION` | **Default:** checkpoint value; otherwise `None`.<br>**Options:** float in `(0, 1]`; `auto` uses `coarse_n/fine_n`; `none`, `off`, `disable`, or `disabled` disables it. |
+| `PBOUT_UNET_POST_CUTOFF_ORDER` | **Default:** checkpoint value; otherwise `8.0`.<br>**Options:** any finite positive number. |
+| `PBOUT_UNET_POST_FILTER` | **Default:** checkpoint/training value; otherwise `none`.<br>**Options:** `none`, `high_order`, or `gaussian`; hyphens are normalized to underscores. |
+| `PBOUT_UNET_RECONSTRUCT_CHANNELS` | **Default:** `none`.<br>**Options:** `none`/`off`, `all`, or a comma-separated subset of checkpoint field names, such as `U` or `U,V`. |
+| `PBOUT_UNET_RESCALING` | **Default:** `0`.<br>**Options:** `0` = off; `1` = formula 11; `2` = formula 13; `3` = initial-DNS maxima. |
+| `PBOUT_UNET_SITE_PACKAGES` | **Default:** Python-version-dependent; see below.<br>**Options:** matching site-packages path or an empty string to retain the interpreter's existing paths. |
+| `PBOUT_UNET_VAN_CITTERT_ITERATIONS` | **Default:** checkpoint/training value; otherwise `1`.<br>**Options:** any integer greater than or equal to `0`. |
+| `PBOUT_UNET_VAN_CITTERT_RELAXATION` | **Default:** checkpoint/training value; otherwise `1.0`.<br>**Options:** float in `(0, 1]`. |
+| `PBOUT_UNET_WRITE_DIAGNOSTICS` | **Default:** `2`.<br>**Options:** `0` = off; `1` = all diagnostics; `2` = field snapshots only. |
+
+`PBOUT_UNET_SITE_PACKAGES` has these interpreter-specific defaults:
+
+- Python 3.11: `/gpfs/mcc/HT04543/jxc06/jxc74-jxc06/programs/miniconda3/envs/py311/lib/python3.11/site-packages`
+- Python 3.13: `~/.pyenvs/BOUT-Hermes3/lib/python3.13/site-packages`
+- Other Python versions: an empty string, which uses the interpreter's existing
+  package paths
+
+The default checkpoint path must exist for checkpoint-derived defaults to be
+available. If it does not, set `PBOUT_UNET_CHECKPOINT` to a valid checkpoint.

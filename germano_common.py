@@ -1024,6 +1024,101 @@ class BicubicUNetSR(ResidualUNetSR):
     global_input_skip = False
 
 
+class PeriodicBinomialLowPass2d(nn.Module):
+    """Zero-phase periodic [1, 2, 1]/4 filter; rejects axis Nyquist modes."""
+
+    def forward(self, x):
+        for axis in (-2, -1):
+            x = (torch.roll(x, 1, axis) + 2 * x + torch.roll(x, -1, axis)) / 4
+        return x
+
+
+class FilteredBilinearUpBlock(LegacyBilinearUpBlock):
+    def forward(self, x, skip):
+        if skip.shape[-2:] != tuple(2 * n for n in x.shape[-2:]):
+            raise ValueError("Skip dimensions must be twice the input dimensions.")
+        blur = PeriodicBinomialLowPass2d()
+        x = blur(periodic_interpolate(x, 2, "bilinear"))
+        return blur(self.net(torch.cat((x, skip), 1)))
+
+
+class DirectUNetSR(nn.Module):
+    """U-Net that enters the encoder directly on the coarse LES grid.
+
+    The coarse-grid stem uses four times ``base_channels`` (96 by default),
+    avoiding interpolation before feature extraction.  One skip-connected
+    decoder stage returns to the LES resolution, and additional periodic
+    bilinear stages reach the DNS resolution.
+    """
+
+    global_input_skip = False
+    decoder_class = LegacyBilinearUpBlock
+    smoothing_class = nn.Identity
+
+    def __init__ \
+    (
+        self, channels=3, base_channels=24, scale_factor=4, output_channels=2,
+        variational=False,
+    ):
+        super().__init__()
+        if not isinstance(scale_factor, int) or scale_factor < 1 \
+                or scale_factor & (scale_factor - 1):
+            raise ValueError("scale_factor must be a positive power of two.")
+        b = base_channels
+        self.scale_factor = scale_factor
+        self.output_channels = output_channels
+        self.variational = variational
+        self.pool = nn.AvgPool2d(2)
+        self.stem = ConvBlock(channels, 4 * b)
+        self.encoder = ConvBlock(4 * b, 8 * b)
+        self.bn = ConvBlock(8 * b, 8 * b)
+        if variational:
+            self.latent_mu = nn.Conv2d(8 * b, 8 * b, 1)
+            self.latent_logvar = nn.Conv2d(8 * b, 8 * b, 1)
+        self.coarse_decoder = self.decoder_class(8 * b, 4 * b, 4 * b)
+        self.smoothing = self.smoothing_class()
+        decoder_channels = []
+        current_channels = 4 * b
+        for _ in range(scale_factor.bit_length() - 1):
+            next_channels = max(b, current_channels // 2)
+            decoder_channels.append(ConvBlock(current_channels, next_channels))
+            current_channels = next_channels
+        self.upsample_blocks = nn.ModuleList(decoder_channels)
+        self.out = nn.Conv2d(current_channels, output_channels, 1)
+
+    def forward(self, coarse, *, sample=None, return_kl=False):
+        skip = self.stem(coarse)
+        features = self.bn(self.encoder(self.pool(skip)))
+        kl = features.new_zeros(())
+        if self.variational:
+            mu = self.latent_mu(features)
+            logvar = self.latent_logvar(features).clamp(-20.0, 10.0)
+            kl = 0.5 * (mu.square() + logvar.exp() - 1.0 - logvar).mean()
+            sample = self.training if sample is None else sample
+            features = \
+            (
+                mu + torch.randn_like(mu) * (0.5 * logvar).exp()
+                if sample else mu
+            )
+        features = self.coarse_decoder(features, skip)
+        for block in self.upsample_blocks:
+            features = self.smoothing(periodic_interpolate(features, 2, "bilinear"))
+            features = self.smoothing(block(features))
+        prediction = self.smoothing(self.out(features))
+        return (prediction, kl) if return_kl else prediction
+
+
+class FilteredDirectUNetSR(DirectUNetSR):
+    """Direct decoder with fixed periodic smoothing, requiring retraining.
+
+    Filters interpolated and learned features, and the final prediction.
+    Historical DirectUNetSR checkpoints retain their unfiltered behavior.
+    """
+
+    decoder_class = FilteredBilinearUpBlock
+    smoothing_class = PeriodicBinomialLowPass2d
+
+
 class PeriodicResidualBlock(nn.Module):
     """Residual convolutions on a fixed periodic grid."""
 
@@ -1161,6 +1256,10 @@ def checkpoint_model_class(checkpoint):
         return LegacyResidualUNetSR
     if architecture == "BicubicUNetSR":
         return BicubicUNetSR
+    if architecture == "FilteredDirectUNetSR":
+        return FilteredDirectUNetSR
+    if architecture == "DirectUNetSR":
+        return DirectUNetSR
     if architecture == "PeriodicSubpixelCNN":
         return PeriodicSubpixelCNN
     if architecture == "PeriodicResidualCNN":
