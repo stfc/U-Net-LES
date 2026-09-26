@@ -4,15 +4,268 @@ This directory contains the training, standalone inference, diagnostics, and
 BOUT++ coupling code for reconstructing fine-grid Hasegawa--Wakatani fields
 from Germano-filtered LES fields.
 
-## Environment
+## Reproduce the results
 
-Activate an environment containing PyTorch, NumPy, Matplotlib, and TensorBoard.
-For the current system this is normally:
+Two routes lead to the same BOUT++ time-integration workflow:
+
+1. **Faster: use pretrained weights.** Download a matching checkpoint from
+   [Zenodo (DOI: 10.5281/zenodo.22973917)](https://doi.org/10.5281/zenodo.22973917),
+   then run the coupled solver as described in [Option 1](#option-1-pretrained-weights-and-bout-time-integration).
+2. **Train your own model.** Train on DNS snapshots, inspect the learning curves
+   with `plot_tensorboard.py`, check one snapshot with `infer_germano_unet.py`,
+   and use the resulting checkpoint in the same solver workflow. See
+   [Option 2](#option-2-train-check-and-integrate).
+
+The worked example below is **HW, DNS 512² → LES 128²**, using the model and
+physical input in `full_runs/HW_N512`. Run commands from the repository root
+unless a subshell explicitly changes directory.
+
+### Environment and inputs
+
+Use Python 3.10 or newer with PyTorch, NumPy, Matplotlib, TensorBoard, Pillow
+and netCDF4. For example, in a Python environment of your choice:
 
 ```bash
-source /gpfs/mcc/HT04543/jxc06/jxc74-jxc06/programs/miniconda3/etc/profile.d/conda.sh
-conda activate py311
+python -m pip install torch numpy matplotlib tensorboard pillow netCDF4
+export UNET_ROOT="$PWD"
 ```
+
+For CUDA runs, use a PyTorch build compatible with your machine's CUDA runtime.
+A CPU can be used for inference by setting `PBOUT_UNET_DEVICE=cpu`.
+
+**Time integration requires an installed or already built BOUT++ library**,
+its CMake package (`bout++Config.cmake`), a compatible C/C++ compiler and MPI
+installation, and Python development headers/library. Training and standalone
+snapshot inference do not require BOUT++. The executable built here embeds
+Python and imports **`pBOUT-unet.py`** (hyphen, not `pBOUT_unet.py`); do not
+launch that callback module as a standalone simulation script.
+
+You also need a DNS initial condition matching the checkpoint's physical case,
+fine-grid resolution and domain. The worked example uses
+`fields/fields_HW_run0_time381_N512.npz`. Snapshots store `U` (density), `V`
+(potential) and `P` (vorticity). The pretrained weights alone are not initial
+conditions or a training dataset. If the snapshot is absent from your checkout,
+obtain the matching DNS snapshot before running this example.
+
+### Option 1: pretrained weights and BOUT++ time integration
+
+#### Download and select weights
+
+Download and extract the weights from the
+[Zenodo record](https://doi.org/10.5281/zenodo.22973917). Select the **HW,
+`fine_n=512`, `coarse_n=128`** checkpoint for this example. Set its actual local
+path below; the command does not assume a particular archive layout.
+
+```bash
+export PBOUT_UNET_CHECKPOINT="/absolute/path/to/downloaded/HW_dns512_les128/best.pt"
+export PBOUT_UNET_DNS_PATH="$UNET_ROOT/fields/fields_HW_run0_time381_N512.npz"
+```
+
+The checkpoint supplies architecture, domain lengths, Germano filter width,
+normalization and inverse-filter settings. Keep those defaults for the first
+run; do not apply overrides copied from a different training experiment. The
+startup log reports the effective configuration. In this example the domain
+is `Lx=Lz=50.176`; the Germano filter width is distinct from the physical
+adiabaticity parameter `[hw] alpha=1.0` in `BOUT.inp`.
+
+#### Compile the coupled model
+
+Activate the compiler/MPI environment used to build BOUT++ first. The default
+BOUT++ location is **`../BOUT_repo` relative to this repository**, with CMake
+searching that prefix and its `build_release` and `build` directories:
+
+```bash
+cmake -S full_runs/HW_N512 -B full_runs/HW_N512/build_reproduce \
+  -DCMAKE_BUILD_TYPE=Release \
+  -DPython_EXECUTABLE="$(command -v python)"
+cmake --build full_runs/HW_N512/build_reproduce --parallel 4
+```
+
+For another BOUT++ installation, pass `-DBOUT_ROOT=/absolute/path/to/BOUT++`
+to the configure command. This accepts an installation prefix, checkout with
+`build`/`build_release`, or configured build directory. For a differently named
+build directory, you can instead set
+`-Dbout++_DIR=/absolute/path/to/directory/containing/bout++Config.cmake`.
+Use a fresh build directory when changing compilers or Python installations;
+existing build caches and executables contain machine-specific paths.
+
+CMake selects the Python interpreter, development library and NumPy headers
+for embedding. Point the callback at packages for **that same Python version**:
+
+```bash
+export PBOUT_UNET_SITE_PACKAGES="$(python -c 'import sysconfig; print(sysconfig.get_path("purelib"))')"
+export PBOUT_UNET_DEVICE=cpu           # use cuda on a GPU node
+export PBOUT_UNET_IMPLICIT=1          # matches implicitStylES=true in hw.cxx
+export PBOUT_UNET_RESCALING=0
+export PBOUT_UNET_WRITE_DIAGNOSTICS=2  # save field snapshots for plotting
+```
+
+#### Prepare separate LES and DNS runs
+
+The shipped input has a 512² active grid. Create independent run directories
+and change the LES mesh to 128², retaining four X guard cells. Use a fresh working
+directory for each run: diagnostics use the local `results_U-Net` directory,
+and reusing it can overwrite or mix snapshots from different trajectories.
+
+```bash
+python - <<'PY'
+from pathlib import Path
+import re
+
+root = Path('full_runs/HW_N512')
+template = (root / 'data/BOUT.inp').read_text()
+for name, n in [('les128', 128), ('dns512', 512)]:
+    run = root / 'runs' / name / 'data'
+    run.mkdir(parents=True, exist_ok=True)
+    text = re.sub(r'^nx\s*=.*$', f'nx = {n + 4}', template, flags=re.M)
+    text = re.sub(r'^nz\s*=.*$', f'nz = {n}', text, flags=re.M)
+    (run / 'BOUT.inp').write_text(text)
+PY
+```
+
+Run the U-Net closure on the coarse grid, then the DNS baseline from the same
+initial snapshot. The examples use a **single MPI rank**, matching the full
+plane expected by the current Python callback; multi-rank decomposition needs
+separate validation.
+
+```bash
+(
+  cd "$UNET_ROOT/full_runs/HW_N512/runs/les128"
+  export PBOUT_UNET_DNS_INIT=0
+  export PBOUT_UNET_BOUT_INP="$PWD/data/BOUT.inp"
+  "$UNET_ROOT/full_runs/HW_N512/build_reproduce/hasegawa-wakatani" -d data
+)
+(
+  cd "$UNET_ROOT/full_runs/HW_N512/runs/dns512"
+  export PBOUT_UNET_DNS_INIT=2
+  export PBOUT_UNET_BOUT_INP="$PWD/data/BOUT.inp"
+  "$UNET_ROOT/full_runs/HW_N512/build_reproduce/hasegawa-wakatani" -d data
+)
+```
+
+Mode `0` reconstructs fine-grid fields and supplies filtered nonlinear terms
+to the coarse solver. Mode `2` evolves unfiltered DNS without U-Net
+reconstruction, using the checkpoint for grid/domain configuration. Each run
+writes BOUT++ outputs under `data/` and diagnostic snapshots under
+`results_U-Net/fields/`. The template uses `timestep=1`, `nout=100`. A short
+smoke run can use smaller `nout` in **both** generated input files; it will not
+reproduce the full plotted time interval.
+
+Keep `[hw] closure_start_step=0` so the Python nonlinear-term callback runs
+from startup. A positive value delays the callback (and its field diagnostics)
+by that many internal solver steps, which would change the closure experiment.
+
+#### Plot and compare trajectories
+
+```bash
+python plot_unet_validation.py \
+  "$UNET_ROOT/full_runs/HW_N512/runs/les128/results_U-Net/fields" \
+  "$UNET_ROOT/full_runs/HW_N512/runs/dns512/results_U-Net/fields" \
+  --output-dir "$UNET_ROOT/results/reproduction_HW_N512/comparison" \
+  --lx 50.176 --ly 50.176 --spectrum-cutoff-n 128
+```
+
+Absolute input paths avoid the plotting script's legacy BOUT++ base-directory
+default. The plot destination is recreated on each invocation. Outputs include
+`energy_vs_time.png`, `enstrophy_vs_time.png`,
+`hw_energy_spectra_initial_final.png`, `U_pdf_vs_time.png`, `V_pdf_vs_time.png`,
+`P_pdf_vs_time.png` and `particle_flux_vs_time.png`. PDFs compare initial and
+final spatial distributions. For additional coarse resolutions, repeat the
+LES run with its matching checkpoint and mesh, and pass up to two additional
+snapshot directories to the plotting script.
+
+### Option 2: train, check and integrate
+
+#### Train on DNS snapshots
+
+Supply the full DNS training dataset for the selected case as `.npz` files,
+with spatial dimensions matching `fine_n`. A few initial-condition snapshots
+in `fields/` are not the training corpus. The repository does not provide a
+verified download location for that corpus; use the original DNS dataset or
+generate one with matching physical parameters. Exact reproduction requires
+the original data, splits, checkpoint settings and solver configuration.
+
+The following settings match the saved
+`training/training_HW_dns512_les128/training_parameters.json` configuration
+for the example run (apart from input/output paths and device availability):
+
+```bash
+export DNS_DATASET="/absolute/path/to/HW_N512/fields"
+export TRAIN_RUN="$UNET_ROOT/training/reproduction_HW_dns512_les128"
+python train_germano_unet.py \
+  --dataset "$DNS_DATASET" --output-dir "$TRAIN_RUN" \
+  --fine-n 512 --coarse-n 128 --lx 50.176 --ly 50.176 --alpha 0.392 \
+  --epochs 100 --batch-size 4 --base-channels 24 \
+  --precision float64 --no-normalize --no-variational \
+  --learning-rate 0.0001 --lambda-mse 0.1 --lambda-vorticity 0.1 \
+  --split-mode random --seed 7 --validation-fraction 0.1 --test-fraction 0.1 \
+  --inverse-filter cutoff --inverse-cutoff-fraction 0.5 --inverse-cutoff-order 8 \
+  --inverse-method van_cittert --van-cittert-iterations 5 \
+  --van-cittert-relaxation 1 --post-filter none
+```
+
+Random splitting matches this saved run; it does not imply temporal separation
+between training and validation. Use explicit `train/`, `validation/` and
+`test/` datasets or a sequential split when that separation is required.
+`run.sh` is also available as a site-specific SLURM example; adapt its resource
+and environment settings before submitting it.
+
+#### Check training with `plot_tensorboard.py`
+
+```bash
+python plot_tensorboard.py "$TRAIN_RUN" --output-dir "$TRAIN_RUN/tensorboard_plots"
+tensorboard --logdir "$TRAIN_RUN/tensorboard"
+```
+
+Inspect training versus validation losses and DNS relative-L2 diagnostics for
+convergence and a growing generalization gap. The PNG exporter creates
+`tensorboard_summary.png`. This example was generated with that script from
+the archived HW 512² → 128² run's TensorBoard events:
+
+![HW 512 to 128 training and validation diagnostics](diagrams/reproduction/tensorboard_summary.png)
+
+#### Check standalone inference, then integrate
+
+```bash
+export PBOUT_UNET_CHECKPOINT="$TRAIN_RUN/checkpoints/best.pt"
+export PBOUT_UNET_DNS_PATH="$UNET_ROOT/fields/fields_HW_run0_time381_N512.npz"
+python infer_germano_unet.py \
+  --checkpoint "$PBOUT_UNET_CHECKPOINT" \
+  --input "$PBOUT_UNET_DNS_PATH" \
+  --output-dir "$UNET_ROOT/inference_output/reproduction_HW_N512"
+```
+
+Inspect the saved field/error images, spectra and reconstructed snapshot before
+starting a trajectory. The inference output directory is recreated each time.
+Then follow **Compile the coupled model**, **Prepare separate LES and DNS runs**
+and **Plot and compare trajectories** in Option 1, keeping the newly trained
+`PBOUT_UNET_CHECKPOINT`. Snapshot accuracy alone does not establish stable or
+accurate time integration.
+
+### Example validation results
+
+These are archived results, not outputs generated by the commands during
+README preparation. Legends give the coarse resolutions; the worked example
+above reproduces one such resolution at a time. Numerical agreement depends
+on the same initial condition, checkpoint and runtime settings.
+
+![HW N512 energy histories](papers/CPC26/images/HW_N512_energy_vs_time.png)
+
+HW N512: the coarsest trajectory has a persistent energy deficit, while finer
+reconstructions remain closer to DNS but miss part of its late increase.
+
+![mHW N256 enstrophy histories](papers/CPC26/images/mHW_N256_enstrophy_vs_time.png)
+
+mHW N256: the reconstructed enstrophy burst is delayed and the late-time level
+is higher than DNS. This case requires its own mHW checkpoint and physical
+configuration; the HW N512 example is not interchangeable with it.
+
+![HW N512 radial and poloidal particle flux](papers/CPC26/images/HW_N512_particle_flux_vs_time.png)
+
+HW N512: radial-flux magnitudes are similar, with larger discrepancies in the
+coarsest reconstruction and in the timing of poloidal fluctuations. The paper
+in [`papers/CPC26`](papers/CPC26/Paper_Germano_GenerativeAI.tex) includes the
+remaining spectra and PDF comparisons.
 
 ## Direct coarse-grid U-Net
 
@@ -44,36 +297,14 @@ Earlier `LegacyResidualUNetSR`, `BicubicUNetSR`, `ResidualUNetSR`,
 The small bicubic CNN implementation has been removed; its saved training
 results remain available, but its checkpoints cannot be loaded by this code.
 
-## Training
+## Training reference
 
 `train_germano_unet.py` recursively reads `.npz` DNS snapshots from the
 dataset directory. A dataset may either contain all snapshots in one tree, in
 which case the script creates the train/validation/test split, or contain
 explicit `train/`, `validation/`, and `test/` subdirectories.
 
-The supplied `run.sh` is a SLURM example. Its principal settings can be
-overridden when submitting:
-
-```bash
-DNS_N=256 LES_N=128 OUTPUT_DIR=germano_training_output_dns256_les128 sbatch run.sh
-```
-
-An equivalent direct command is:
-
-```bash
-python train_germano_unet.py \
-  --dataset ../../data/BOUT_runs/HW_2D/Papers/PoP23/HW_N256/fields/ \
-  --output-dir germano_training_output_dns256_les128 \
-  --fine-n 256 --coarse-n 128 \
-  --lx 50.176 --ly 50.176 \
-  --alpha 0.392 \
-  --epochs 100 --batch-size 4 \
-  --precision float64 --no-normalize \
-  --inverse-filter filtered_dns_spectrum \
-  --inverse-cutoff-fraction 0.707107 \
-  --inverse-cutoff-order 8 \
-  --post-filter none
-```
+See Option 2 above for a complete training command matching the archived HW 512² → 128² example.
 
 `--alpha` is the physical Germano filter width. If omitted, it defaults to
 `Lx/fine_n`. The fine resolution must be divisible by the coarse resolution.
@@ -225,11 +456,12 @@ Arakawa terms are Germano-filtered when `ALPHA > 0`, except in
 | Value | Diagnostic output |
 | --- | --- |
 | `0` | Disable all diagnostic files. |
-| `1` | Write all field, image, Arakawa, and animation diagnostics (default). |
-| `2` | Write only field snapshots under `results_U-Net/fields`. |
+| `1` | Write all field, image, Arakawa, and animation diagnostics. |
+| `2` | Write only field snapshots under `results_U-Net/fields` (default). |
 
-At the start of every fresh BOUT++ inference, pBOUT removes any existing
-`results_U-Net` directory, even when diagnostic writing is disabled.
+Diagnostic mode `1` recreates `results_U-Net` during initialization. Use a fresh
+working directory for each run in every mode to avoid overwriting or mixing
+diagnostic snapshots.
 
 ### Initialization modes and required BOUT++ grid
 

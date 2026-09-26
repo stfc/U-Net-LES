@@ -2,7 +2,8 @@
 """Compare up to four field-snapshot histories.
 
 Read ``fields_*.npz`` snapshots or BOUT NetCDF dumps, then plot
-domain-center values, total/component HW-energy, and enstrophy histories. The dataset whose
+domain-center values, total/component HW-energy, enstrophy, and particle-flux
+histories. The dataset whose
 directory name contains ``DNS`` is used as the reference; if none does, the
 first dataset is the reference. Animations and the initial-derivative plot
 compare the first non-reference dataset with it.
@@ -35,12 +36,11 @@ from germano_common import \
     SPECTRUM_Y_MIN,
     SPECTRUM_Y_MAX,
     isotropic_hw_energy_spectrum,
-    isotropic_spectrum,
 )
 
 
 FIELD_NAMES = ("U", "V", "P")
-MAX_ANIMATION_FRAMES = 100
+MAX_ANIMATION_FRAMES = 1000
 DEFAULT_BOUT_RESULTS_ROOT = \
 (
     Path(__file__).resolve().parent
@@ -54,14 +54,14 @@ def parse_args() -> argparse.Namespace:
     (
         "unet_fields",
         type=Path,
-        help="First run/snapshot directory or BOUT.dmp.0.nc file",
+        help="First run/snapshot directory or BOUT dump file (MPI splits supported)",
     )
     parser.add_argument \
     (
         "dns_fields",
         type=Path,
         nargs="?",
-        help="Second run/snapshot directory or BOUT.dmp.0.nc file",
+        help="Second run/snapshot directory or BOUT dump file (MPI splits supported)",
     )
     parser.add_argument \
     (
@@ -130,7 +130,7 @@ def parse_args() -> argparse.Namespace:
         help= \
         (
             "Grid size whose Nyquist wavenumber is marked on the static "
-            "initial-spectrum comparison; 0 disables the marker (default: 64)"
+            "initial/final HW-spectrum comparison; 0 disables the marker (default: 64)"
         ),
     )
     parser.add_argument \
@@ -178,11 +178,68 @@ def resolve_input_directory(path: Path, base_directory: Path) -> Path:
     raise FileNotFoundError(f"Input dataset does not exist: {candidate}")
 
 
+def _read_mpi_bout_history(source: Path, y_index: int, nranks: int):
+    """Collect sibling MPI dumps, checking completeness before assembly."""
+    from netCDF4 import Dataset
+    try:
+        from boutdata import collect
+    except ImportError as error:
+        raise ImportError("Reading MPI dumps requires boutdata (pip install boutdata)") from error
+
+    prefix, rank, suffix = source.name.rsplit(".", 2)
+    if not rank.isdigit() or suffix != "nc":
+        raise ValueError(f"{source}: expected a <prefix>.<rank>.nc MPI dump")
+    if y_index < 0:
+        raise ValueError(f"{source}: y index must be non-negative")
+    times = None
+    for rank in range(nranks):
+        filename = source.with_name(f"{prefix}.{rank}.nc")
+        if not filename.is_file():
+            raise FileNotFoundError(f"Missing MPI dump: {filename}")
+        with Dataset(filename) as archive:
+            missing = [name for name in ("t_array", "n", "phi", "vort")
+                       if name not in archive.variables]
+            if missing:
+                raise KeyError(f"{filename} is missing variables: {missing}")
+            rank_times = np.asarray(np.ma.filled(archive["t_array"][:], np.nan))
+            if rank_times.ndim != 1 or not rank_times.size or not np.all(np.isfinite(rank_times)):
+                raise ValueError(f"{filename}: t_array must be a nonempty finite 1-D array")
+            if times is not None and not np.array_equal(times, rank_times):
+                raise ValueError(f"{filename}: MPI ranks have inconsistent output times")
+            times = rank_times
+            for name in ("n", "phi", "vort"):
+                variable = archive[name]
+                if variable.dimensions != ("t", "x", "y", "z"):
+                    raise ValueError(f"{filename}: {name} has unsupported dimensions {variable.dimensions}")
+                if variable.shape[0] != times.size:
+                    raise ValueError(f"{filename}: invalid time extent for {name}")
+            ny = int(np.asarray(archive["MYSUB"][...]).item()) * int(np.asarray(archive["NYPE"][...]).item())
+            if y_index >= ny:
+                raise IndexError(f"{source}: y index {y_index} outside interior [0, {ny})")
+
+    planes = []
+    for name in ("n", "phi", "vort"):
+        values = collect(name, path=str(source.parent), prefix=prefix,
+                         xguards=False, yguards=False, yind=y_index,
+                         info=False, strict=True)
+        values = np.asarray(np.ma.filled(values, np.nan), dtype=np.float64)
+        if values.ndim != 4 or values.shape[0] != times.size or values.shape[2] != 1:
+            raise ValueError(f"{source}: unexpected collected shape for {name}: {values.shape}")
+        values = values[:, :, 0, :]
+        if not np.all(np.isfinite(values)):
+            raise ValueError(f"{source}: {name} contains missing or non-finite values")
+        if planes and values.shape != planes[0].shape:
+            raise ValueError(f"{source}: inconsistent field shapes")
+        planes.append(values)
+    order = np.argsort(times, kind="stable")
+    return times[order], np.arange(times.size)[order], np.stack(planes, axis=1)[order]
+
+
 def read_bout_history(source: Path, y_index: int = 0):
-    """Read a single-rank HW dump as (time, channel, x, z), without guards.
+    """Read single-rank, MPI-split or squashed HW dumps without guards.
 
     Map n/phi/vort to U/V/P. Steps are output indices, not solver steps.
-    Decomposed dumps must be collected into a single-rank file first.
+    For MPI dumps, assemble sibling rank files with boutdata.
     """
     try:
         from netCDF4 import Dataset
@@ -193,8 +250,9 @@ def read_bout_history(source: Path, y_index: int = 0):
         def scalar(name, default):
             return int(np.asarray(archive[name][:]).item()) if name in archive.variables else default
 
-        if scalar("NXPE", 1) != 1 or scalar("NYPE", 1) != 1:
-            raise ValueError(f"{source}: decomposed BOUT dumps are not supported; collect all ranks first")
+        squashed = "squashoutput_version" in archive.ncattrs()
+        if not squashed and (scalar("NXPE", 1) != 1 or scalar("NYPE", 1) != 1):
+            return _read_mpi_bout_history(source, y_index, scalar("NXPE", 1) * scalar("NYPE", 1))
         missing = [name for name in ("t_array", "n", "phi", "vort")
                    if name not in archive.variables]
         if missing:
@@ -205,6 +263,26 @@ def read_bout_history(source: Path, y_index: int = 0):
         mxg, myg = scalar("MXG", 2), scalar("MYG", 0)
         if min(mxg, myg, y_index) < 0:
             raise ValueError(f"{source}: guard widths and y index must be non-negative")
+        if squashed:
+            # squashoutput retains the original decomposition/guard metadata.
+            # Infer whether outer guards were collected from the global sizes.
+            for axis, interior, guards in (
+                ("x", scalar("nx", -1) - 2 * mxg, mxg),
+                ("y", scalar("ny", -1), myg),
+            ):
+                if axis not in archive.dimensions:
+                    continue
+                extent = len(archive.dimensions[axis])
+                if extent == interior:
+                    if axis == "x":
+                        mxg = 0
+                    else:
+                        myg = 0
+                elif extent != interior + 2 * guards:
+                    raise ValueError(
+                        f"{source}: cannot infer {axis} guards in collected HW dump "
+                        f"(extent={extent}, interior={interior})"
+                    )
         planes = []
         for name in ("n", "phi", "vort"):
             variable = archive[name]
@@ -249,12 +327,15 @@ def read_history \
     fields_directory = nested_fields if nested_fields.is_dir() else directory
     files = sorted(fields_directory.glob("fields_*.npz"))
     if input_format == "netcdf" or (input_format == "auto" and not files):
-        for source in (directory / "BOUT.dmp.0.nc", directory / "data" / "BOUT.dmp.0.nc"):
+        for source in (
+            directory / "BOUT.dmp.nc", directory / "BOUT.dmp.0.nc",
+            directory / "data" / "BOUT.dmp.nc", directory / "data" / "BOUT.dmp.0.nc",
+        ):
             if source.is_file():
                 if batch != 0:
                     raise IndexError("BOUT NetCDF fields are unbatched; use --bout-y-index for y planes")
                 return read_bout_history(source, bout_y_index)
-        raise FileNotFoundError(f"No BOUT.dmp.0.nc found in {directory} or its data directory")
+        raise FileNotFoundError(f"No BOUT.dmp.nc or BOUT.dmp.0.nc found in {directory} or its data directory")
     if not files:
         raise FileNotFoundError \
         (
@@ -329,6 +410,33 @@ def hw_energy_components \
         0.5 * domain_factor * np.sum(dphi_dx**2, axis=(-2, -1)),
         0.5 * domain_factor * np.sum(dphi_dy**2, axis=(-2, -1)),
     )
+
+
+def hw_particle_fluxes \
+(
+    fields: np.ndarray, lx: float, ly: float
+) -> tuple[np.ndarray, np.ndarray]:
+    """Return radial and poloidal turbulent flux profiles with shape (t, nx).
+
+    Fields have shape (t, channel, x, y), with U=n and V=phi. Define
+    n_tilde = n - <n>_y, then Gamma_x = -<n_tilde * dphi/dy>_y and
+    Gamma_y = <n_tilde * dphi/dx>_y. Both averages are over poloidal y;
+    no radial or time averaging is applied here. A zonal velocity does not
+    contribute because <n_tilde>_y = 0. Derivatives use the same fourth-order
+    periodic stencil as the energy diagnostics.
+    """
+    if not np.isfinite(lx) or not np.isfinite(ly) or lx <= 0 or ly <= 0:
+        raise ValueError("lx and ly must be finite and positive")
+    density, potential = fields[:, 0], fields[:, 1]
+    density_fluctuation = density - np.mean(density, axis=-1, keepdims=True)
+    dx, dy = lx / potential.shape[-2], ly / potential.shape[-1]
+    radial_flux = -np.mean(
+        density_fluctuation * periodic_derivative(potential, dy, -1), axis=-1
+    )
+    poloidal_flux = np.mean(
+        density_fluctuation * periodic_derivative(potential, dx, -2), axis=-1
+    )
+    return radial_flux, poloidal_flux
 
 
 def hw_energy(fields: np.ndarray, lx: float, ly: float) -> np.ndarray:
@@ -494,6 +602,7 @@ def save_field_pdf_comparison \
             1, 2, figsize=(12, 5), sharex=True, sharey=True,
         )
         field_label = HW_FIELD_LABELS.get(name, name)
+        maximum_density = 0.0
         for time_index, (axis, target_time) in enumerate \
         (
             zip(axes.ravel(), target_times)
@@ -507,6 +616,7 @@ def save_field_pdf_comparison \
                 (
                     values[time_index].ravel(), bins=bins, density=True
                 )
+                maximum_density = max(maximum_density, float(pdf.max()))
                 axis.stairs \
                 (
                     pdf, bins, color=color, linestyle=linestyle,
@@ -517,9 +627,10 @@ def save_field_pdf_comparison \
             axis.set_title(f"{stage}: target t={target_time:g}")
             axis.set_xlabel(field_label)
             axis.set_ylabel("Probability density")
-            axis.set_ylim(bottom=0.0)
             axis.grid(True, alpha=0.3)
             axis.legend(fontsize="small")
+        # Set the shared scale after both panels so a taller final peak is visible.
+        axes[0].set_ylim(0.0, 1.1 * maximum_density if maximum_density else 1.0)
         figure.suptitle(f"{field_label} initial and final spatial PDFs")
         figure.tight_layout()
         output_path = output_dir / f"{name}_pdf_vs_time.png"
@@ -581,6 +692,41 @@ def save_enstrophy_comparison \
     axis.set_title("Hasegawa–Wakatani enstrophy versus time")
     axis.grid(True, alpha=0.3)
     axis.legend()
+    figure.tight_layout()
+    figure.savefig(output_path, dpi=dpi, bbox_inches="tight")
+    plt.close(figure)
+    return output_path
+
+
+def save_particle_flux_comparison \
+(
+    datasets, output_path: Path, lx: float, ly: float, dpi: int
+) -> Path:
+    """Compare radial averages of the poloidally averaged particle fluxes."""
+    figure, axes = plt.subplots(2, 1, figsize=(8.2, 7.5), sharex=True)
+    styles = (
+        ("black", "-"), ("tab:blue", "-"), ("tab:orange", "--"),
+        ("tab:green", "-.")
+    )
+    for (label, times, fields), (color, linestyle) in zip(datasets, styles):
+        for axis, profile in zip(axes, hw_particle_fluxes(fields, lx, ly)):
+            axis.plot(
+                times, np.mean(profile, axis=-1), color=color,
+                linestyle=linestyle, linewidth=1.6, label=label,
+            )
+    labels = (
+        r"$\langle\Gamma_x\rangle_x=-\langle\widetilde{n}\,\partial_y\phi\rangle_{x,y}$",
+        r"$\langle\Gamma_y\rangle_x=\langle\widetilde{n}\,\partial_x\phi\rangle_{x,y}$",
+    )
+    for axis, title, ylabel in zip(
+        axes, ("Radial particle flux", "Poloidal particle flux"), labels
+    ):
+        axis.set_title(title)
+        axis.set_ylabel(ylabel)
+        axis.axhline(0.0, color="gray", linewidth=0.8, linestyle=":")
+        axis.grid(True, alpha=0.3)
+        axis.legend()
+    axes[-1].set_xlabel("simulation time")
     figure.tight_layout()
     figure.savefig(output_path, dpi=dpi, bbox_inches="tight")
     plt.close(figure)
@@ -1024,7 +1170,7 @@ def save_energy_spectrum_comparison_animation \
     datasets, output_dir: Path, lx: float, ly: float, dpi: int, fps: float,
     overall_limits: bool = False, smooth_spectrum: bool = False,
 ) -> Path:
-    """Animate dataset1 and nearest-time DNS HW energy spectra."""
+    """Animate both datasets with black initial and blue current spectra."""
     (first_label, first_times, first_fields), \
     (
         second_label, second_times, second_fields
@@ -1051,6 +1197,12 @@ def save_energy_spectrum_comparison_animation \
         int(np.argmin(np.abs(first_times))),
     )
     positive_energy = []
+    initial_spectra = (
+        _hw_energy_spectrum(first_fields[0], lx, ly, smooth_spectrum),
+        _hw_energy_spectrum(second_fields[0], lx, ly, smooth_spectrum),
+    )
+    for _, energy in initial_spectra:
+        positive_energy.extend(energy[energy > 0.0])
     for index in limit_indices:
         for _, energy in (first_spectra[index], second_spectra[index]):
             positive_energy.extend(energy[energy > 0.0])
@@ -1071,15 +1223,24 @@ def save_energy_spectrum_comparison_animation \
         figure, axis = plt.subplots(figsize=(8.2, 5.8))
         first_k, first_energy = first_spectra[frame_index]
         second_k, second_energy = second_spectra[frame_index]
+        for (initial_k, initial_energy), label, initial_time, style in zip(
+            initial_spectra, (first_label, second_label),
+            (first_times[0], second_times[0]), ("-", "--"),
+        ):
+            axis.loglog(
+                initial_k[1:], initial_energy[1:], color="black",
+                linestyle=style, linewidth=1.8,
+                label=f"{label} initial (t={initial_time:g})",
+            )
         axis.loglog \
         (
-            second_k[1:], second_energy[1:], color="black",
-            linewidth=1.8, label=second_label
+            second_k[1:], second_energy[1:], color="blue", linestyle="--",
+            linewidth=1.8, label=f"{second_label} current (t={second_times[second_index]:g})"
         )
         axis.loglog \
         (
-            first_k[1:], first_energy[1:], color="tab:blue",
-            linewidth=1.8, label=first_label
+            first_k[1:], first_energy[1:], color="blue",
+            linewidth=1.8, label=f"{first_label} current (t={first_time:g})"
         )
         axis.set_ylim(SPECTRUM_Y_MIN, ymax)
         axis.set_xlabel(r"radial wavenumber $k$")
@@ -1111,76 +1272,41 @@ def _hw_energy_spectrum \
     return isotropic_hw_energy_spectrum(fields, lx, ly, smooth=smooth)
 
 
-def save_initial_spectrum_comparison \
+def save_endpoint_spectrum_comparison \
 (
     datasets, path: Path, lx: float, ly: float, dpi: int,
     smooth: bool = False, cutoff_n: int = 64,
 ) -> Path:
-    """Plot U, V, P, and combined HW spectra nearest to t=0."""
-    figure, axes = plt.subplots \
-    (
-        2, 2, figsize=(13, 10), constrained_layout=True
+    """Compare HW energy spectra nearest t=0 and at each retained final time."""
+    figure, axes = plt.subplots(
+        1, 2, figsize=(13, 5.5), sharex=True, sharey=True,
+        constrained_layout=True,
     )
     line_styles = ("-", "--", "-.", ":")
-    field_specs = \
-    (
-        ("U", 0, "Shell power"),
-        ("V", 1, "Shell power"),
-        ("P", 2, "Shell power"),
-    )
-    selected_times = []
-    for dataset_index, (label, times, fields) in enumerate(datasets):
-        time_index = int(np.argmin(np.abs(times)))
-        selected_times.append(float(times[time_index]))
-        values = fields[time_index]
-        style = line_styles[dataset_index % len(line_styles)]
-        for axis, (name, channel, ylabel) in zip \
-        (
-            axes.ravel()[:3], field_specs
-        ):
-            k, power = isotropic_spectrum \
-            (
-                values[channel], lx, ly, smooth=smooth
-            )
-            positive = (k > 0) & (power > 0)
-            axis.loglog \
-            (
-                k[positive], power[positive], style,
+    for axis, stage in zip(axes, ("Initial", "Final")):
+        selected_times = []
+        for dataset_index, (label, times, fields) in enumerate(datasets):
+            time_index = int(np.argmin(np.abs(times))) if stage == "Initial" else -1
+            selected_times.append(f"{label}: t={times[time_index]:g}")
+            k, energy = _hw_energy_spectrum(fields[time_index], lx, ly, smooth)
+            positive = (k > 0) & (energy > 0)
+            axis.loglog(
+                k[positive], energy[positive],
+                line_styles[dataset_index % len(line_styles)],
                 linewidth=2, label=label,
             )
-            axis.set_title(f"{name} spectrum")
-            axis.set_ylabel(ylabel)
-        k, energy = _hw_energy_spectrum(values, lx, ly, smooth)
-        positive = (k > 0) & (energy > 0)
-        axes.ravel()[3].loglog \
-        (
-            k[positive], energy[positive], style,
-            linewidth=2, label=label,
-        )
-
-    for axis in axes.ravel():
         if cutoff_n > 0:
-            cutoff = min \
-            (
-                np.pi / (lx / cutoff_n), np.pi / (ly / cutoff_n)
-            )
-            axis.axvline \
-            (
+            cutoff = min(np.pi / (lx / cutoff_n), np.pi / (ly / cutoff_n))
+            axis.axvline(
                 cutoff, color="black", linestyle=":", linewidth=1.4,
                 label=f"{cutoff_n}-grid Nyquist",
             )
+        axis.set_title(f"{stage} HW energy spectrum\n" + "; ".join(selected_times))
         axis.set_xlabel(r"$k$")
+        axis.set_ylabel(r"Shell energy $E(k)$")
         axis.set_ylim(SPECTRUM_Y_MIN, SPECTRUM_Y_MAX)
         axis.grid(True, which="both", alpha=0.25)
         axis.legend()
-    axes.ravel()[3].set_title("HW energy spectrum")
-    axes.ravel()[3].set_ylabel(r"Shell energy $E(k)$")
-    time_description = ", ".join \
-    (
-        f"{label}: t={time:g}"
-        for (label, _, _), time in zip(datasets, selected_times)
-    )
-    figure.suptitle(f"Initial spectra nearest t=0 ({time_description})")
     figure.savefig(path, dpi=dpi)
     plt.close(figure)
     return path
@@ -1245,7 +1371,7 @@ def save_energy_spectrum_animation \
     dataset, output_dir: Path, lx: float, ly: float, dpi: int, fps: float,
     overall_limits: bool = False, smooth_spectrum: bool = False,
 ) -> Path:
-    """Animate the HW energy spectrum from one dataset."""
+    """Animate current HW spectra in blue against the fixed initial in black."""
     label, times, fields = dataset
     times = times[:MAX_ANIMATION_FRAMES]
     fields = fields[:MAX_ANIMATION_FRAMES]
@@ -1253,6 +1379,7 @@ def save_energy_spectrum_animation \
     [
         _hw_energy_spectrum(frame, lx, ly, smooth_spectrum) for frame in fields
     ]
+    initial_k, initial_energy = spectra[0]
     limit_indices = range(len(times)) if overall_limits else \
     (
         int(np.argmin(np.abs(times))),
@@ -1262,7 +1389,7 @@ def save_energy_spectrum_animation \
          \
         [
             spectra[index][1][spectra[index][1] > 0.0]
-            for index in limit_indices
+            for index in sorted(set(limit_indices) | {0})
         ]
     )
     ymax = \
@@ -1282,8 +1409,13 @@ def save_energy_spectrum_animation \
         figure, axis = plt.subplots(figsize=(8.2, 5.8))
         axis.loglog \
         (
-            wavenumber[1:], energy[1:], color="black",
-            linewidth=1.8, label=label
+            initial_k[1:], initial_energy[1:], color="black",
+            linewidth=1.8, label=f"Initial (t={times[0]:g})"
+        )
+        axis.loglog \
+        (
+            wavenumber[1:], energy[1:], color="blue",
+            linewidth=1.8, label=f"Current (t={time:g})"
         )
         axis.set_ylim(SPECTRUM_Y_MIN, ymax)
         axis.set_xlabel(r"radial wavenumber $k$")
@@ -1329,6 +1461,8 @@ def main() -> None:
         )
         label_path = dataset_path.parent if dataset_path.is_file() else dataset_path
         label = label_path.resolve().name.replace("results_U-Net_", "")
+        if "dns" in str(dataset_path.resolve()).casefold():
+            label = "DNS"
         datasets.append((label, times, fields))
     reference_hints = tuple(path.resolve() for path in input_paths)
     datasets = order_datasets_with_reference_first \
@@ -1379,15 +1513,20 @@ def main() -> None:
         datasets, args.output_dir / "enstrophy_vs_time.png",
         args.lx, args.ly, args.dpi,
     )
+    particle_flux_path = save_particle_flux_comparison \
+    (
+        datasets, args.output_dir / "particle_flux_vs_time.png",
+        args.lx, args.ly, args.dpi,
+    )
     energy_components_path = save_energy_components_comparison \
     (
         datasets, args.output_dir / "energy_components_vs_time.png",
         args.lx, args.ly, args.dpi,
     )
-    initial_spectra_path = save_initial_spectrum_comparison \
+    endpoint_spectra_path = save_endpoint_spectrum_comparison \
     (
         datasets,
-        args.output_dir / "spectra_t0_comparison.png",
+        args.output_dir / "hw_energy_spectra_initial_final.png",
         args.lx,
         args.ly,
         args.dpi,
@@ -1398,8 +1537,9 @@ def main() -> None:
     print(f"Saved {extrema_path}")
     print(f"Saved {energy_path}")
     print(f"Saved {enstrophy_path}")
+    print(f"Saved {particle_flux_path}")
     print(f"Saved {energy_components_path}")
-    print(f"Saved {initial_spectra_path}")
+    print(f"Saved {endpoint_spectra_path}")
     pdf_paths = save_field_pdf_comparison(datasets, args.output_dir, args.dpi)
     for pdf_path in pdf_paths:
         print(f"Saved {pdf_path}")
