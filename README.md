@@ -17,7 +17,7 @@ Two routes lead to the same BOUT++ time-integration workflow:
    [Option 2](#option-2-train-check-and-integrate).
 
 The worked example below is **HW, DNS 512² → LES 128²**, using the model and
-physical input in `full_runs/HW_N512`. Run commands from the repository root
+source and input template in `BOUT_runs/HW_template`. Run commands from the repository root
 unless a subshell explicitly changes directory.
 
 ### Environment and inputs
@@ -31,7 +31,8 @@ export UNET_ROOT="$PWD"
 ```
 
 For CUDA runs, use a PyTorch build compatible with your machine's CUDA runtime.
-A CPU can be used for inference by setting `PBOUT_UNET_DEVICE=cpu`.
+For coupled runs, set `device = cpu` in the `[unet]` section of the run’s
+`data/BOUT.inp`. Standalone inference selects CUDA when available, otherwise CPU.
 
 **Time integration requires an installed or already built BOUT++ library**,
 its CMake package (`bout++Config.cmake`), a compatible C/C++ compiler and MPI
@@ -54,11 +55,13 @@ obtain the matching DNS snapshot before running this example.
 Download and extract the weights from the
 [Zenodo record](https://doi.org/10.5281/zenodo.22973917). Select the **HW,
 `fine_n=512`, `coarse_n=128`** checkpoint for this example. Set its actual local
-path below; the command does not assume a particular archive layout.
+path in the `[unet]` section of each run’s `data/BOUT.inp`; the example does
+not assume a particular archive layout. Use absolute paths here, not shell variables.
 
-```bash
-export PBOUT_UNET_CHECKPOINT="/absolute/path/to/downloaded/HW_dns512_les128/best.pt"
-export PBOUT_UNET_DNS_PATH="$UNET_ROOT/fields/fields_HW_run0_time381_N512.npz"
+```ini
+[unet]
+checkpoint = /absolute/path/to/downloaded/HW_dns512_les128/best.pt
+dns_path = /absolute/path/to/U-Net-LES/fields/fields_HW_run0_time381_N512.npz
 ```
 
 The checkpoint supplies architecture, domain lengths, Germano filter width,
@@ -70,77 +73,78 @@ adiabaticity parameter `[hw] alpha=1.0` in `BOUT.inp`.
 
 #### Compile the coupled model
 
-Activate the compiler/MPI environment used to build BOUT++ first. The default
-BOUT++ location is **`../BOUT_repo` relative to this repository**, with CMake
-searching that prefix and its `build_release` and `build` directories:
+From the repository root, compile HW into a separate run directory:
 
 ```bash
-cmake -S full_runs/HW_N512 -B full_runs/HW_N512/build_reproduce \
-  -DCMAKE_BUILD_TYPE=Release \
-  -DPython_EXECUTABLE="$(command -v python)"
-cmake --build full_runs/HW_N512/build_reproduce --parallel 4
+cd BOUT_runs/
+bash HW_template/build.sh HW_N256
+cd ..
 ```
 
-For another BOUT++ installation, pass `-DBOUT_ROOT=/absolute/path/to/BOUT++`
-to the configure command. This accepts an installation prefix, checkout with
-`build`/`build_release`, or configured build directory. For a differently named
-build directory, you can instead set
-`-Dbout++_DIR=/absolute/path/to/directory/containing/bout++Config.cmake`.
-Use a fresh build directory when changing compilers or Python installations;
-existing build caches and executables contain machine-specific paths.
+The run directory argument is required. This creates `BOUT_runs/HW_N256`
+with an unchanged copy of `HW_template/data/BOUT.inp` and the compiled
+executable in `build_release/`. The directory name does not select the grid size.
+Generated run files are ignored by Git; `HW_template` contains the
+version-controlled source and input template. Existing run inputs are preserved.
+
+The default BOUT++ location is **`../BOUT-dev` relative to this repository**;
+it must already be built. The script activates the cluster's `BOUT-Hermes3`
+environment when available and uses the compilers from the BOUT++ build cache.
+Set `BOUT_ROOT` to select another BOUT++ installation or build tree.
+Set grid sizes and all other simulation parameters directly in `BOUT.inp`;
+the build script does not adjust them. Extra arguments are passed to CMake.
+Use a fresh run directory when changing compilers or Python installations.
 
 CMake selects the Python interpreter, development library and NumPy headers
-for embedding. Point the callback at packages for **that same Python version**:
+for embedding. If the default package path is unsuitable, set `site_packages`
+to an installation for **that same Python version**. Edit the existing `[unet]`
+section in the run’s `data/BOUT.inp` (do not add duplicate sections):
+
+```ini
+[unet]
+# site_packages = /absolute/path/to/matching/python/site-packages
+device = cpu          # use cuda on a GPU node
+implicit = true       # used consistently by C++ and Python
+rescaling = 0
+write_diagnostics = 2 # save field snapshots for plotting
+```
+
+To launch a configured run from the repository root:
 
 ```bash
-export PBOUT_UNET_SITE_PACKAGES="$(python -c 'import sysconfig; print(sysconfig.get_path("purelib"))')"
-export PBOUT_UNET_DEVICE=cpu           # use cuda on a GPU node
-export PBOUT_UNET_IMPLICIT=1          # matches implicitStylES=true in hw.cxx
-export PBOUT_UNET_RESCALING=0
-export PBOUT_UNET_WRITE_DIAGNOSTICS=2  # save field snapshots for plotting
+(cd BOUT_runs/HW_N256 && ./build_release/hasegawa-wakatani -d data)
 ```
 
 #### Prepare separate LES and DNS runs
 
-The shipped input has a 512² active grid. Create independent run directories
-and change the LES mesh to 128², retaining four X guard cells. Use a fresh working
-directory for each run: diagnostics use the local `results_U-Net` directory,
-and reusing it can overwrite or mix snapshots from different trajectories.
+Create separate directories for the worked 512² → 128² example:
 
 ```bash
-python - <<'PY'
-from pathlib import Path
-import re
-
-root = Path('full_runs/HW_N512')
-template = (root / 'data/BOUT.inp').read_text()
-for name, n in [('les128', 128), ('dns512', 512)]:
-    run = root / 'runs' / name / 'data'
-    run.mkdir(parents=True, exist_ok=True)
-    text = re.sub(r'^nx\s*=.*$', f'nx = {n + 4}', template, flags=re.M)
-    text = re.sub(r'^nz\s*=.*$', f'nz = {n}', text, flags=re.M)
-    (run / 'BOUT.inp').write_text(text)
-PY
+(cd BOUT_runs && bash HW_template/build.sh HW_LES128)
+(cd BOUT_runs && bash HW_template/build.sh HW_DNS512)
 ```
 
+The build script copies the template unchanged and preserves existing run
+inputs. Edit each run’s `data/BOUT.inp` explicitly:
+
+| Run directory | `[mesh] nx` | `[mesh] nz` | `[unet] dns_init` |
+| --- | --- | --- | --- |
+| `BOUT_runs/HW_LES128` | `132` | `128` | `0` |
+| `BOUT_runs/HW_DNS512` | `516` | `512` | `2` |
+
+Both inputs need the matching checkpoint and initial snapshot paths shown above,
+with `Lx=Lz=50.176`. The X dimension includes four guard cells. Use a fresh
+working directory for each run: diagnostics use the local `results_U-Net`
+directory, and reusing it can overwrite or mix snapshots from different trajectories.
+
 Run the U-Net closure on the coarse grid, then the DNS baseline from the same
-initial snapshot. The examples use a **single MPI rank**, matching the full
+initial snapshot. These examples use a **single MPI rank**, matching the full
 plane expected by the current Python callback; multi-rank decomposition needs
-separate validation.
+separate validation. The active input file is passed to Python automatically.
 
 ```bash
-(
-  cd "$UNET_ROOT/full_runs/HW_N512/runs/les128"
-  export PBOUT_UNET_DNS_INIT=0
-  export PBOUT_UNET_BOUT_INP="$PWD/data/BOUT.inp"
-  "$UNET_ROOT/full_runs/HW_N512/build_reproduce/hasegawa-wakatani" -d data
-)
-(
-  cd "$UNET_ROOT/full_runs/HW_N512/runs/dns512"
-  export PBOUT_UNET_DNS_INIT=2
-  export PBOUT_UNET_BOUT_INP="$PWD/data/BOUT.inp"
-  "$UNET_ROOT/full_runs/HW_N512/build_reproduce/hasegawa-wakatani" -d data
-)
+(cd BOUT_runs/HW_LES128 && ./build_release/hasegawa-wakatani -d data)
+(cd BOUT_runs/HW_DNS512 && ./build_release/hasegawa-wakatani -d data)
 ```
 
 Mode `0` reconstructs fine-grid fields and supplies filtered nonlinear terms
@@ -159,8 +163,8 @@ by that many internal solver steps, which would change the closure experiment.
 
 ```bash
 python plot_unet_validation.py \
-  "$UNET_ROOT/full_runs/HW_N512/runs/les128/results_U-Net/fields" \
-  "$UNET_ROOT/full_runs/HW_N512/runs/dns512/results_U-Net/fields" \
+  "$UNET_ROOT/BOUT_runs/HW_LES128/results_U-Net/fields" \
+  "$UNET_ROOT/BOUT_runs/HW_DNS512/results_U-Net/fields" \
   --output-dir "$UNET_ROOT/results/reproduction_HW_N512/comparison" \
   --lx 50.176 --ly 50.176 --spectrum-cutoff-n 128
 ```
@@ -227,19 +231,17 @@ the archived HW 512² → 128² run's TensorBoard events:
 #### Check standalone inference, then integrate
 
 ```bash
-export PBOUT_UNET_CHECKPOINT="$TRAIN_RUN/checkpoints/best.pt"
-export PBOUT_UNET_DNS_PATH="$UNET_ROOT/fields/fields_HW_run0_time381_N512.npz"
 python infer_germano_unet.py \
-  --checkpoint "$PBOUT_UNET_CHECKPOINT" \
-  --input "$PBOUT_UNET_DNS_PATH" \
+  --checkpoint "$TRAIN_RUN/checkpoints/best.pt" \
+  --input "$UNET_ROOT/fields/fields_HW_run0_time381_N512.npz" \
   --output-dir "$UNET_ROOT/inference_output/reproduction_HW_N512"
 ```
 
 Inspect the saved field/error images, spectra and reconstructed snapshot before
 starting a trajectory. The inference output directory is recreated each time.
 Then follow **Compile the coupled model**, **Prepare separate LES and DNS runs**
-and **Plot and compare trajectories** in Option 1, keeping the newly trained
-`PBOUT_UNET_CHECKPOINT`. Snapshot accuracy alone does not establish stable or
+and **Plot and compare trajectories** in Option 1, setting `[unet] checkpoint`
+in each run’s `BOUT.inp` to the newly trained checkpoint’s absolute path. Snapshot accuracy alone does not establish stable or
 accurate time integration.
 
 ### Example validation results
@@ -325,7 +327,7 @@ its separate meaning for `cutoff`.
 With the SLURM wrapper, use `INVERSE_MIN_WAVENUMBER=2.0 sbatch run.sh`.
 The threshold is saved in checkpoints. Standalone inference accepts
 `--inverse-min-wavenumber 2.0` to override it; BOUT++ accepts
-`PBOUT_UNET_INVERSE_MIN_WAVENUMBER=2.0`. Old checkpoints default to `1.0`.
+`inverse_min_wavenumber = 2.0` in `[unet]`. Old checkpoints default to `1.0`.
  The default `cutoff` retains the
 existing smooth exponential cutoff and its fraction/order options.
 
@@ -372,16 +374,18 @@ for that operation and is useful as an inverse-filter baseline. The inference
 output directory is recreated on every run, so do not point it at a directory
 containing files that must be retained.
 
-Inference accepts the same runtime spectral regularization overrides used by
-the BOUT++ interface:
+Standalone inference accepts spectral regularization options as command-line
+arguments, for example `--inverse-filter filtered_dns_spectrum`. For coupled
+BOUT++ runs, configure the corresponding values in `BOUT.inp`:
 
-```bash
-export PBOUT_UNET_INVERSE_CUTOFF_FRACTION=0.707107
-export PBOUT_UNET_INVERSE_CUTOFF_ORDER=8
-export PBOUT_UNET_INVERSE_FILTER=filtered_dns_spectrum # or cutoff
-export PBOUT_UNET_POST_FILTER=none        # none, high_order, or gaussian
-export PBOUT_UNET_POST_CUTOFF_FRACTION=none
-export PBOUT_UNET_POST_CUTOFF_ORDER=8
+```ini
+[unet]
+inverse_cutoff_fraction = 0.707107
+inverse_cutoff_order = 8
+inverse_filter = filtered_dns_spectrum # or cutoff
+post_filter = none                    # none, high_order, or gaussian
+post_cutoff_fraction = none
+post_cutoff_order = 8
 ```
 
 An unset override uses the checkpoint value. `none` disables an optional
@@ -391,10 +395,9 @@ reconstruction; the post filter/cutoff is applied afterward. The
 
 ## BOUT++ coupling
 
-Set `PBOUT_UNET_RESCALING` to select density/potential rescaling:
+Set `[unet] rescaling` to select density/potential rescaling:
 
 - `0` (default): no rescaling.
-- `1`: formula 11, the median pointwise correction described below.
 - `2`: formula 13, `DNS_max_new = LES_max_new * DNS_max_previous / LES_max_previous`.
   This uses the actual reconstructed DNS and LES absolute maxima from the
   preceding solver time. The initial DNS/LES seed the first call. Repeated
@@ -407,51 +410,43 @@ Set `PBOUT_UNET_RESCALING` to select density/potential rescaling:
   its initial DNS absolute maximum at simulation time `t=0`. An identically
   zero reconstruction stays zero because multiplicative scaling cannot restore it.
 
-With option `1`, DNS reconstruction uses equation (11) with
-one amplitude estimate per batch and field:
-`DNS_max_new = median((LES / LES_max) / G(DNS / DNS_max)) * LES_max`,
-then `DNS_corrected = (DNS / DNS_max) * DNS_max_new`.
-Here `LES_max` and `DNS_max` are the respective absolute spatial maxima.
-The normalized DNS is Germano-filtered and spectrally resized to the incoming
-LES grid before taking the ratio. For this linear filter, normalization
-cancels algebraically, giving the same correction as the unnormalized ratio.
-Nonfinite ratios and near-zero denominators are excluded. If no valid ratio
-remains, the amplitude is retained; an identically zero LES requests zero
-amplitude. Checkpoint mean/std normalization is unchanged.
+Checkpoint mean/std normalization is unchanged.
 Vorticity is then recomputed from the corrected potential when configured.
 Rescaling applies to U-Net and inverse-only reconstruction; unfiltered DNS and
 DNS replay retain their original amplitudes.
 
 The interface selects packages matching the embedded Python: Python 3.13 uses
 `~/.pyenvs/BOUT-Hermes3/lib/python3.13/site-packages`, and Python 3.11 uses the
-local conda `py311` installation. Set `PBOUT_UNET_SITE_PACKAGES` to override
+local conda `py311` installation. Set `site_packages` to override
 this directory with an installation for the same Python major/minor version.
 An empty override uses the interpreter's existing package paths. Activating
 a virtual environment does not change BOUT++'s linked Python library.
 
 `pBOUT-unet.py` exposes `initFlow()` and `findLESTerms()` to the embedded
 Python interface used by the Hasegawa--Wakatani BOUT++ executable. A typical
-launch configuration is:
+configuration in the run’s `data/BOUT.inp` is:
 
-```bash
-export PBOUT_UNET_DIR="$PWD"
-export PBOUT_UNET_CHECKPOINT="$PWD/germano_training_output_dns256_les128/checkpoints/best.pt"
-export PBOUT_UNET_DNS_PATH="$PWD/fields_HW_run0_time501.npz"
-export PBOUT_UNET_DNS_INIT=1
-export PBOUT_UNET_RECONSTRUCT_CHANNELS=U
-export PBOUT_UNET_ALPHA=0.392
-export PBOUT_UNET_DEVICE=cuda
-export PBOUT_UNET_WRITE_DIAGNOSTICS=2     # save only results_U-Net/fields
-export PBOUT_UNET_INVERSE_CUTOFF_FRACTION=0.707107
-export PBOUT_UNET_INVERSE_CUTOFF_ORDER=8
-
-/path/to/hasegawa-wakatani
+```ini
+[unet]
+checkpoint = /absolute/path/to/germano_training_output_dns256_les128/checkpoints/best.pt
+dns_path = /absolute/path/to/fields_HW_run0_time501.npz
+dns_init = 1
+reconstruct_channels = U
+alpha = 0.392
+device = cuda
+write_diagnostics = 2
+inverse_cutoff_fraction = 0.707107
+inverse_cutoff_order = 8
 ```
 
-`PBOUT_UNET_ALPHA` overrides the checkpoint's physical Germano width. The
+Run `./build_release/hasegawa-wakatani -d data` from the prepared run directory.
+Relative paths in the input resolve from that working directory; shell variables
+are not expanded. Settings omitted from `[unet]` retain Python/checkpoint defaults.
+
+`alpha` overrides the checkpoint's physical Germano width. The
 Arakawa terms are Germano-filtered when `ALPHA > 0`, except in
-`PBOUT_UNET_DNS_INIT=2`, which always uses unfiltered DNS fields and terms.
-`PBOUT_UNET_WRITE_DIAGNOSTICS` accepts three modes:
+`dns_init=2`, which always uses unfiltered DNS fields and terms.
+`write_diagnostics` accepts three modes:
 
 | Value | Diagnostic output |
 | --- | --- |
@@ -465,10 +460,10 @@ diagnostic snapshots.
 
 ### Initialization modes and required BOUT++ grid
 
-`PBOUT_UNET_DNS_INIT` accepts `0`, `1`, `2`, or `3`.
+`dns_init` accepts `0`, `1`, `2`, or `3`.
 Any other value causes pBOUT to stop with a configuration error.
 
-| `PBOUT_UNET_DNS_INIT` | Initialization and runtime behavior | BOUT++ active grid |
+| `dns_init` | Initialization and runtime behavior | BOUT++ active grid |
 | --- | --- | --- |
 | `0` | Germano-filter the DNS snapshot, downsample it, evolve the coarse LES fields, reconstruct fine fields with the U-Net/inverse Germano operation, calculate fine-grid Arakawa terms, filter them when `ALPHA > 0`, and downsample the terms. | `coarse_n` |
 | `1` with reconstruction channels | Germano-filter and downsample the initial DNS. Reconstruct only the selected `U,V` channels; unselected channels use the spectrally resized incoming fields. Apply inverse Germano reconstruction, calculate fine-grid Arakawa terms, filter them when `ALPHA > 0`, and downsample the terms. | `coarse_n` |
@@ -504,7 +499,7 @@ active resolution or grid spacing is rejected by the Python interface.
 
 ### Reconstruction channels
 
-`PBOUT_UNET_RECONSTRUCT_CHANNELS` defaults to `none` and accepts `none`,
+`reconstruct_channels` defaults to `none` and accepts `none`,
 `all`, or a comma-separated subset such as `U` or `U,V`. With the current
 two-output checkpoints, `P` is not independently predicted: it is computed as
 the configured periodic Laplacian of reconstructed `V`. Consequently `U,V`
@@ -516,22 +511,23 @@ model outputs (`U` and `V`). Mode 2 ignores reconstruction-channel selection.
 
 Other useful controls are:
 
-```bash
-export PBOUT_UNET_IMPLICIT=1
-export PBOUT_UNET_RESCALING=0            # 0=off, 1=formula 11, 2=formula 13, 3=initial DNS maxima
-export PBOUT_UNET_OMEGA_FROM_POTENTIAL=1  # optional override of checkpoint default
-export PBOUT_UNET_LAPLACIAN_ORDER=2       # 2 or 4
-export PBOUT_UNET_POST_FILTER=none        # none, high_order, gaussian
-export PBOUT_UNET_POST_CUTOFF_FRACTION=none
-export PBOUT_UNET_POST_CUTOFF_ORDER=8
+```ini
+[unet]
+implicit = true
+rescaling = 0              # 0=off, 2=formula 13, 3=initial DNS maxima
+omega_from_potential = true # optional override of checkpoint default
+laplacian_order = 2         # 2 or 4
+post_filter = none          # none, high_order, gaussian
+post_cutoff_fraction = none
+post_cutoff_order = 8
 ```
 
 At startup, `pBOUT-unet.py` prints checkpoint metadata and the effective
 runtime configuration. Check this output first when diagnosing checkpoint,
 resolution, alpha, precision, or filtering mismatches.
 
-Set `PBOUT_UNET_DNS_INIT=3` to compute Arakawa terms from saved DNS fields
-instead of reconstructing them. `PBOUT_UNET_DNS_FIELD_DIR` defaults to
+Set `dns_init=3` to compute Arakawa terms from saved DNS fields
+instead of reconstructing them. `dns_field_dir` defaults to
 `results_U-Net_DNS/fields`; override it if your snapshots are stored elsewhere
 (for example, in a `fields` directory). Each `.npz` must contain `U`, `V`, `P`
 and a scalar physical timestamp `simtime`. The fields are linearly interpolated
@@ -539,7 +535,7 @@ between the two snapshots surrounding the current BOUT++ physical time, then
 used to calculate the Arakawa brackets. Saved `P` is used directly, without
 replacing it with a Laplacian of `V`. Times outside the saved range are rejected.
 
-Mode 3 initializes exactly as mode 0: load `PBOUT_UNET_DNS_PATH`, apply the
+Mode 3 initializes exactly as mode 0: load `dns_path`, apply the
 Germano filter, and downsample to the coarse LES grid. During each callback,
 it reads and interpolates the saved DNS fields instead of reconstructing them,
 calculates fine-grid Arakawa brackets, applies the Germano filter when `ALPHA > 0`,
@@ -547,12 +543,13 @@ and downsamples the brackets to the coarse grid. The series must cover time zero
 for initial diagnostics and every requested simulation time. The checkpoint
 still supplies grid/domain and filter configuration.
 
-`PBOUT_UNET_IMPLICIT` independently accepts only `0` or `1` (default `1`):
-`0` returns the filtered, downsampled DNS brackets in mode 3; `1` returns
-the incoming BOUT++ brackets minus those filtered, downsampled brackets. This must match `implicitStylES` in `hw.cxx` (`false` for `0`,
-`true` for `1`), which determines whether BOUT++ passes three or five channels.
+`[unet] implicit` independently selects the bracket return convention (default
+`true`): `false` returns the filtered, downsampled DNS brackets in mode 3;
+`true` returns the incoming BOUT++ brackets minus those brackets. The same
+setting controls both Python and C++, including whether BOUT++ passes three
+or five channels. No C++ source edit is needed.
 
-In replay mode (`PBOUT_UNET_DNS_INIT=3`), set `PBOUT_UNET_WRITE_DIAGNOSTICS=1`
+In replay mode (`dns_init=3`), set `write_diagnostics=1`
 to also reconstruct DNS with the U-Net at each diagnostic output time and save
 comparisons under `results_U-Net/images`. Files named
 `fields_unet_vs_interpolated_time*.png` compare U/V/P, while
@@ -576,47 +573,48 @@ their own configuration. Existing checkpoints and older metadata files remain
 supported. Legacy configuration entries in metadata are ignored at startup.
 
 By default, pBOUT preserves the checkpoint's DNS vorticity convention. Explicit
-`PBOUT_UNET_*` overrides of checkpoint settings are printed with their checkpoint,
+`[unet]` overrides of checkpoint settings are printed with their checkpoint,
 requested, and effective values and whether they changed the setting. A model
 that outputs only density and potential still requires derived vorticity even if
-an environment override requests otherwise. Runtime controls such as input paths
+an input setting requests otherwise. Runtime controls such as input paths
 and diagnostic modes are shown in `effective_inference`.
 
-## PBOUT environment-variable defaults
+## U-Net input settings and defaults
 
-The following values are used when the corresponding environment variable is
-not set. A checkpoint/training fallback means that the value embedded in the
+Set these options in the `[unet]` section of the run’s `data/BOUT.inp`.
+The following defaults apply when an option is omitted. A checkpoint/training
+fallback means that the value embedded in the
 selected checkpoint takes precedence over the final fallback shown here.
 
-| Environment variable | Default and available options |
+| `[unet]` option | Default and available options |
 | --- | --- |
-| `PBOUT_UNET_ALPHA` | **Default:** checkpoint `alpha`.<br>**Options:** any finite number greater than or equal to `0`. |
-| `PBOUT_UNET_BOUT_INP` | **Default:** `data/BOUT.inp`.<br>**Options:** path to the BOUT++ input file used by the run. |
-| `PBOUT_UNET_CHECKPOINT` | **Default:** `<repository>/results/germano_training_output_v10/checkpoints/best.pt`.<br>**Options:** path to a compatible `.pt` checkpoint. |
-| `PBOUT_UNET_DEVICE` | **Default:** `cuda` when available; otherwise `cpu`.<br>**Options:** a valid PyTorch device, normally `cpu`, `cuda`, or `cuda:N`. |
-| `PBOUT_UNET_DIR` | **Default:** none; it is not read directly by `pBOUT-unet.py`.<br>**Options:** repository path for launch-script use. |
-| `PBOUT_UNET_DNS_FIELD_DIR` | **Default:** `results_U-Net_DNS/fields`.<br>**Options:** directory containing mode-3 DNS replay `.npz` snapshots. |
-| `PBOUT_UNET_DNS_INIT` | **Default:** `0`.<br>**Options:**<br>`0` = initialize with Germano-filtered, downsampled LES fields from `PBOUT_UNET_DNS_PATH`.<br>`1` = initialize with filtered DNS and reconstruct according to `PBOUT_UNET_RECONSTRUCT_CHANNELS`.<br>`2` = initialize and run with unfiltered DNS fields and terms.<br>`3` = initialize like mode `0`, then replay snapshots from `PBOUT_UNET_DNS_FIELD_DIR`. |
-| `PBOUT_UNET_DNS_PATH` | **Default:** unset (`None`).<br>**Options:** path to the initial DNS `.npz` snapshot. |
-| `PBOUT_UNET_IMPLICIT` | **Default:** `1`.<br>**Options:** `0` = return DNS brackets; `1` = return incoming BOUT++ brackets minus DNS brackets. |
-| `PBOUT_UNET_INVERSE_CUTOFF_FRACTION` | **Default:** checkpoint value; otherwise `None`.<br>**Options:** float in `(0, 1]`; `none`, `off`, `disable`, or `disabled` disables it. |
-| `PBOUT_UNET_INVERSE_CUTOFF_ORDER` | **Default:** checkpoint value; otherwise `8.0`.<br>**Options:** any finite positive number. |
-| `PBOUT_UNET_INVERSE_FILTER` | **Default:** checkpoint/training value; otherwise `cutoff`.<br>**Options:** `cutoff` or `filtered_dns_spectrum`; hyphens are normalized to underscores. |
-| `PBOUT_UNET_INVERSE_METHOD` | **Default:** checkpoint/training value; otherwise `exact`.<br>**Options:** `exact` or `van_cittert`; hyphens are normalized to underscores. |
-| `PBOUT_UNET_INVERSE_MIN_WAVENUMBER` | **Default:** checkpoint value; otherwise `1.0`.<br>**Options:** any finite number greater than or equal to `0`. |
-| `PBOUT_UNET_LAPLACIAN_ORDER` | **Default:** checkpoint/training value; otherwise `2`.<br>**Options:** `2` or `4`. |
-| `PBOUT_UNET_OMEGA_FROM_POTENTIAL` | **Default:** derived from checkpoint vorticity mode.<br>**Options:** `0`, `false`, `no`, and `off` are false; any other value is true. A Laplacian-output checkpoint forces true. |
-| `PBOUT_UNET_POST_CUTOFF_FRACTION` | **Default:** checkpoint value; otherwise `None`.<br>**Options:** float in `(0, 1]`; `auto` uses `coarse_n/fine_n`; `none`, `off`, `disable`, or `disabled` disables it. |
-| `PBOUT_UNET_POST_CUTOFF_ORDER` | **Default:** checkpoint value; otherwise `8.0`.<br>**Options:** any finite positive number. |
-| `PBOUT_UNET_POST_FILTER` | **Default:** checkpoint/training value; otherwise `none`.<br>**Options:** `none`, `high_order`, or `gaussian`; hyphens are normalized to underscores. |
-| `PBOUT_UNET_RECONSTRUCT_CHANNELS` | **Default:** `none`.<br>**Options:** `none`/`off`, `all`, or a comma-separated subset of checkpoint field names, such as `U` or `U,V`. |
-| `PBOUT_UNET_RESCALING` | **Default:** `0`.<br>**Options:** `0` = off; `1` = formula 11; `2` = formula 13; `3` = initial-DNS maxima. |
-| `PBOUT_UNET_SITE_PACKAGES` | **Default:** Python-version-dependent; see below.<br>**Options:** matching site-packages path or an empty string to retain the interpreter's existing paths. |
-| `PBOUT_UNET_VAN_CITTERT_ITERATIONS` | **Default:** checkpoint/training value; otherwise `1`.<br>**Options:** any integer greater than or equal to `0`. |
-| `PBOUT_UNET_VAN_CITTERT_RELAXATION` | **Default:** checkpoint/training value; otherwise `1.0`.<br>**Options:** float in `(0, 1]`. |
-| `PBOUT_UNET_WRITE_DIAGNOSTICS` | **Default:** `2`.<br>**Options:** `0` = off; `1` = all diagnostics; `2` = field snapshots only. |
+| `alpha` | **Default:** checkpoint `alpha`.<br>**Options:** any finite number greater than or equal to `0`. |
+| `checkpoint` | **Default:** `<repository>/results/germano_training_output_v10/checkpoints/best.pt`.<br>**Options:** path to a compatible `.pt` checkpoint. |
+| `device` | **Default:** `cuda` when available; otherwise `cpu`.<br>**Options:** a valid PyTorch device, normally `cpu`, `cuda`, or `cuda:N`. |
+| `dns_field_dir` | **Default:** `results_U-Net_DNS/fields`.<br>**Options:** directory containing mode-3 DNS replay `.npz` snapshots. |
+| `dns_init` | **Default:** `0`.<br>**Options:**<br>`0` = initialize with Germano-filtered, downsampled LES fields from `dns_path`.<br>`1` = initialize with filtered DNS and reconstruct according to `reconstruct_channels`.<br>`2` = initialize and run with unfiltered DNS fields and terms.<br>`3` = initialize like mode `0`, then replay snapshots from `dns_field_dir`. |
+| `dns_path` | **Default:** unset (`None`).<br>**Options:** path to the initial DNS `.npz` snapshot. |
+| `implicit` | **Default:** `true`.<br>**Options:** `false` = return DNS brackets; `true` = return incoming BOUT++ brackets minus DNS brackets. |
+| `inverse_cutoff_fraction` | **Default:** checkpoint value; otherwise `None`.<br>**Options:** float in `(0, 1]`; `none`, `off`, `disable`, or `disabled` disables it. |
+| `inverse_cutoff_order` | **Default:** checkpoint value; otherwise `8.0`.<br>**Options:** any finite positive number. |
+| `inverse_filter` | **Default:** checkpoint/training value; otherwise `cutoff`.<br>**Options:** `cutoff` or `filtered_dns_spectrum`; hyphens are normalized to underscores. |
+| `inverse_method` | **Default:** checkpoint/training value; otherwise `exact`.<br>**Options:** `exact` or `van_cittert`; hyphens are normalized to underscores. |
+| `inverse_min_wavenumber` | **Default:** checkpoint value; otherwise `1.0`.<br>**Options:** any finite number greater than or equal to `0`. |
+| `laplacian_order` | **Default:** checkpoint/training value; otherwise `2`.<br>**Options:** `2` or `4`. |
+| `omega_from_potential` | **Default:** derived from checkpoint vorticity mode.<br>**Options:** `true`/`false`, `1`/`0`, `yes`/`no`, or `on`/`off`. A Laplacian-output checkpoint forces true. |
+| `post_cutoff_fraction` | **Default:** checkpoint value; otherwise `None`.<br>**Options:** float in `(0, 1]`; `auto` uses `coarse_n/fine_n`; `none`, `off`, `disable`, or `disabled` disables it. |
+| `post_cutoff_order` | **Default:** checkpoint value; otherwise `8.0`.<br>**Options:** any finite positive number. |
+| `post_filter` | **Default:** checkpoint/training value; otherwise `none`.<br>**Options:** `none`, `high_order`, or `gaussian`; hyphens are normalized to underscores. |
+| `reconstruct_channels` | **Default:** `none`.<br>**Options:** `none`/`off`, `all`, or a comma-separated subset of checkpoint field names, such as `U` or `U,V`. |
+| `rescaling` | **Default:** `0`.<br>**Options:** `0` = off; `2` = formula 13; `3` = initial-DNS maxima. |
+| `site_packages` | **Default:** Python-version-dependent; see below.<br>**Options:** matching site-packages path or an empty string to retain the interpreter's existing paths. |
+| `van_cittert_iterations` | **Default:** checkpoint/training value; otherwise `1`.<br>**Options:** any integer greater than or equal to `0`. |
+| `van_cittert_relaxation` | **Default:** checkpoint/training value; otherwise `1.0`.<br>**Options:** float in `(0, 1]`. |
+| `profile` | **Default:** `false`.<br>**Options:** enable C++ convective/diffusive timing with `true`. |
+| `write_arakawa_terms` | **Default:** `false`.<br>**Options:** save C++ bracket diagnostics through Python with `true`. |
+| `write_diagnostics` | **Default:** `2`.<br>**Options:** `0` = off; `1` = all diagnostics; `2` = field snapshots only. |
 
-`PBOUT_UNET_SITE_PACKAGES` has these interpreter-specific defaults:
+`site_packages` has these interpreter-specific defaults:
 
 - Python 3.11: `/gpfs/mcc/HT04543/jxc06/jxc74-jxc06/programs/miniconda3/envs/py311/lib/python3.11/site-packages`
 - Python 3.13: `~/.pyenvs/BOUT-Hermes3/lib/python3.13/site-packages`
@@ -624,4 +622,4 @@ selected checkpoint takes precedence over the final fallback shown here.
   package paths
 
 The default checkpoint path must exist for checkpoint-derived defaults to be
-available. If it does not, set `PBOUT_UNET_CHECKPOINT` to a valid checkpoint.
+available. If it does not, set `checkpoint` to a valid checkpoint.

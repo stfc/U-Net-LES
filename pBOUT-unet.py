@@ -6,30 +6,21 @@ The public functions intentionally match :mod:`pBOUT`: ``initFlow(npv)`` and
 network consumes (batch, channel, x, z), reconstructs the fine/DNS fields, and
 the returned nonlinear terms are again flattened in BOUT++ order.
 
-Configuration is through environment variables so that the C++ embedding does
-not need an argument parser::
+Configuration comes only from the BOUT++ [unet] input section. The C++
+embedding passes resolved options before import, including command-line overrides.
+Standalone imports read data/BOUT.inp in the working directory. Omitted settings
+retain checkpoint/Python defaults; PBOUT_UNET_* environment variables are ignored.
+For example, in BOUT.inp::
 
-  PBOUT_UNET_CHECKPOINT=/path/to/best.pt
-  PBOUT_UNET_DNS_PATH=/path/to/dns_snapshot.npz
-  PBOUT_UNET_RESCALING=0                # 0=off, 1=formula 11, 2=formula 13, 3=initial DNS maxima
-  PBOUT_UNET_ALPHA=0.25                  # physical Germano filter width
-  PBOUT_UNET_DNS_INIT=0                  # 0=filtered LES, 1=filtered DNS, 2=DNS, 3=DNS replay
-  PBOUT_UNET_RECONSTRUCT_CHANNELS=none    # mode-1 U-Net channels
-  PBOUT_UNET_DEVICE=cuda                 # or cpu; default is automatic
-  PBOUT_UNET_IMPLICIT=1                  # 0=DNS brackets, 1=-(DNS-LES)
-  PBOUT_UNET_DNS_FIELD_DIR=results_U-Net_DNS/fields  # mode-3 snapshots
-  PBOUT_UNET_WRITE_DIAGNOSTICS=2         # 0=off, 1=all, 2=fields only (default)
-  PBOUT_UNET_OMEGA_FROM_POTENTIAL=1      # explicit override; default follows checkpoint
-  PBOUT_UNET_LAPLACIAN_ORDER=2            # periodic Laplacian order (2 or 4)
-  PBOUT_UNET_INVERSE_CUTOFF_FRACTION=none
-  PBOUT_UNET_INVERSE_CUTOFF_ORDER=8
-  PBOUT_UNET_INVERSE_FILTER=cutoff        # cutoff/filtered_dns_spectrum
-  PBOUT_UNET_INVERSE_METHOD=exact          # exact or van_cittert
-  PBOUT_UNET_VAN_CITTERT_ITERATIONS=1
-  PBOUT_UNET_VAN_CITTERT_RELAXATION=1
-  PBOUT_UNET_POST_CUTOFF_FRACTION=none    # auto = LES Nyquist (coarse_n/fine_n)
-  PBOUT_UNET_POST_CUTOFF_ORDER=8
-  PBOUT_UNET_POST_FILTER=none             # none/high_order/gaussian
+  [unet]
+  checkpoint = /path/to/best.pt
+  dns_path = /path/to/dns_snapshot.npz
+  dns_init = 0
+  implicit = true
+  rescaling = 0
+  device = cpu
+  write_diagnostics = 2
+
 The training-consistent inverse cutoff regularizes the U-Net output before
 inverse Germano reconstruction. The optional post cutoff regularizes the
 reconstructed DNS afterward.
@@ -48,6 +39,13 @@ import warnings
 
 from pathlib import Path
 
+from unet_config import load_unet_config
+
+_embedded_options = sys.modules.get("_pbout_unet_options")
+_CONFIG, _CONFIG_SOURCES = load_unet_config(
+    embedded=vars(_embedded_options) if _embedded_options is not None else None
+)
+
 # BOUT++ embeds Python and may not discover an activated virtual environment.
 # Select packages matching its ABI, including the BOUT-Hermes3 Python 3.13 env.
 _DEFAULT_SITE_PACKAGES = \
@@ -59,19 +57,19 @@ _DEFAULT_SITE_PACKAGES = \
     ),
     (3, 13): str(Path.home() / ".pyenvs/BOUT-Hermes3/lib/python3.13/site-packages"),
 }.get(sys.version_info[:2], "")
-_SITE_PACKAGES = os.environ.get \
+_SITE_PACKAGES = _CONFIG.get \
 (
-    "PBOUT_UNET_SITE_PACKAGES", _DEFAULT_SITE_PACKAGES
+    "site_packages", _DEFAULT_SITE_PACKAGES
 )
 _SITE_PACKAGES = os.path.expanduser(_SITE_PACKAGES)
 _site_version = re.search(r"(?:^|/)python(\d+)\.(\d+)(?:/|$)", _SITE_PACKAGES)
 if _site_version and tuple(map(int, _site_version.groups())) != sys.version_info[:2]:
     raise RuntimeError \
     (
-        f"PBOUT_UNET_SITE_PACKAGES={_SITE_PACKAGES!r} targets Python "
+        f"[unet] site_packages={_SITE_PACKAGES!r} targets Python "
         f"{_site_version.group(1)}.{_site_version.group(2)}, but the BOUT++ "
         f"executable embeds Python {sys.version_info.major}."
-        f"{sys.version_info.minor}. Unset PBOUT_UNET_SITE_PACKAGES to use "
+        f"{sys.version_info.minor}. Omit [unet] site_packages to use "
         "the default matching environment, or set it to a matching installation."
     )
 if _SITE_PACKAGES and _SITE_PACKAGES not in sys.path:
@@ -98,7 +96,6 @@ from germano_common import \
     POST_FILTER_TYPES,
     enforce_zero_spatial_mean,
     restore_channel_spatial_mean,
-    rescaling_amplitude_correction,
     rescaling_amplitude_correction13,
     germano_filter,
     inverse_input_filter_torch,
@@ -137,21 +134,21 @@ _DEFAULT_CHECKPOINT = \
     _HERE
     / "results/germano_training_output_v10/checkpoints/best.pt"
 )
-CHECKPOINT = Path(os.environ.get("PBOUT_UNET_CHECKPOINT", _DEFAULT_CHECKPOINT))
-_dns_path = os.environ.get("PBOUT_UNET_DNS_PATH")
+CHECKPOINT = Path(_CONFIG.get("checkpoint", _DEFAULT_CHECKPOINT)).expanduser()
+_dns_path = _CONFIG.get("dns_path")
 DNS_PATH = Path(_dns_path).expanduser() if _dns_path else None
 
-_rescaling_value = os.environ.get("PBOUT_UNET_RESCALING", "0").strip()
-if _rescaling_value not in {"0", "1", "2", "3"}:
-    raise ValueError("PBOUT_UNET_RESCALING must be 0 (off), 1 (formula 11), 2 (formula 13), or 3 (initial DNS maxima)")
+_rescaling_value = _CONFIG.get("rescaling", "0").strip()
+if _rescaling_value not in {"0", "2", "3"}:
+    raise ValueError("[unet] rescaling must be 0 (off), 2 (formula 13), or 3 (initial DNS maxima)")
 RESCALING = int(_rescaling_value)
 _RESCALING_REFERENCE_MAXIMA = None
 _RESCALING_HISTORY = {}
 
-_dns_init_value = os.environ.get("PBOUT_UNET_DNS_INIT", "0")
+_dns_init_value = _CONFIG.get("dns_init", "0")
 _dns_init_error = \
 (
-    f"PBOUT_UNET_DNS_INIT must be 0, 1, 2, or 3; got {_dns_init_value!r}. "
+    f"[unet] dns_init must be 0, 1, 2, or 3; got {_dns_init_value!r}. "
     "Choose 0=filtered LES, 1=filtered DNS, 2=unfiltered DNS, or 3=DNS replay."
 )
 try:
@@ -164,22 +161,22 @@ if DNS_INIT not in (0, 1, 2, 3):
 # DNS_INIT selects the field source independently of the Arakawa return format.
 BOUT_INPUT = Path \
 (
-    os.environ.get("PBOUT_UNET_BOUT_INP", "data/BOUT.inp")
+    _CONFIG.get("bout_inp", "data/BOUT.inp")
 ).expanduser()
-_implicit_value = os.environ.get("PBOUT_UNET_IMPLICIT", "1").strip().lower()
+_implicit_value = _CONFIG.get("implicit", "1").strip().lower()
 if _implicit_value not in {"0", "1"}:
     raise ValueError \
     (
-        f"PBOUT_UNET_IMPLICIT must be 0 or 1; got {_implicit_value!r}. "
-        "For DNS replay, set PBOUT_UNET_DNS_INIT=3."
+        f"[unet] implicit must be 0 or 1; got {_implicit_value!r}. "
+        "For DNS replay, set [unet] dns_init=3."
     )
 DNS_REPLAY = DNS_INIT == 3
 IMPLICIT = _implicit_value == "1"
 DNS_FIELD_DIR = Path \
 (
-    os.environ.get \
+    _CONFIG.get \
     (
-        "PBOUT_UNET_DNS_FIELD_DIR", "results_U-Net_DNS/fields"
+        "dns_field_dir", "results_U-Net_DNS/fields"
     )
 ).expanduser()
 _DNS_TIME_SERIES = None
@@ -199,15 +196,15 @@ def _dns_at_time(simtime, batch_size=1):
 try:
     WRITE_DIAGNOSTICS = int \
     (
-        os.environ.get("PBOUT_UNET_WRITE_DIAGNOSTICS", "2")
+        _CONFIG.get("write_diagnostics", "2")
     )
 except ValueError as error:
     raise ValueError \
     (
-        "PBOUT_UNET_WRITE_DIAGNOSTICS must be 0, 1, or 2"
+        "[unet] write_diagnostics must be 0, 1, or 2"
     ) from error
 if WRITE_DIAGNOSTICS not in (0, 1, 2):
-    raise ValueError("PBOUT_UNET_WRITE_DIAGNOSTICS must be 0, 1, or 2")
+    raise ValueError("[unet] write_diagnostics must be 0, 1, or 2")
 _BOUT_OUTPUT_TIMESTEP = None
 _BOUT_NOUT = None
 _LAST_FIELD_OUTPUT_INDEX = -1
@@ -218,7 +215,7 @@ _ENERGY_VALUES = []
 
 
 def _optional_float(name: str, default):
-    value = os.environ.get(name)
+    value = _CONFIG.get(name)
     if value is None:
         return default
     if value.lower() in {"none", "off", "disable", "disabled"}:
@@ -234,8 +231,8 @@ def _bout_output_timestep() -> float:
     if not BOUT_INPUT.is_file():
         raise FileNotFoundError \
         (
-            f"BOUT++ input file not found: {BOUT_INPUT}. Set "
-            "PBOUT_UNET_BOUT_INP to the data/BOUT.inp used by this run."
+            f"BOUT++ input file not found: {BOUT_INPUT}. "
+            "Check the active run directory and BOUT++ input-file arguments."
         )
 
     assignment = re.compile \
@@ -546,8 +543,8 @@ def _print_init_metadata(initial_state: str) -> None:
         "device": _training_parameters.get("device"),
     }
     for name, default in override_defaults.items():
-        environment_name = "PBOUT_UNET_" + name.upper()
-        if environment_name not in os.environ:
+        option_name = name
+        if option_name not in _CONFIG:
             continue
         checkpoint_value = _checkpoint.get \
         (
@@ -560,25 +557,25 @@ def _print_init_metadata(initial_state: str) -> None:
         effective_value = effective_inference[name]
         print \
         (
-            f"Environment override {environment_name}: "
+            f"Configuration override {option_name} ({_CONFIG_SOURCES[option_name]}): "
             f"checkpoint={json.dumps(checkpoint_value)}, "
-            f"requested={os.environ[environment_name]!r}, "
+            f"requested={_CONFIG[option_name]!r}, "
             f"effective={json.dumps(effective_value)}, "
             f"changed={effective_value != checkpoint_value}"
         )
 
 
-_device_name = os.environ.get \
+_device_name = _CONFIG.get \
 (
-    "PBOUT_UNET_DEVICE", "cuda" if torch.cuda.is_available() else "cpu"
+    "device", "cuda" if torch.cuda.is_available() else "cpu"
 )
 DEVICE = torch.device(_device_name)
 if DEVICE.type == "cuda" and not torch.cuda.is_available():
-    raise RuntimeError("PBOUT_UNET_DEVICE requests CUDA, but CUDA is unavailable")
+    raise RuntimeError("[unet] device requests CUDA, but CUDA is unavailable")
 if not CHECKPOINT.is_file():
     raise FileNotFoundError \
     (
-        f"U-Net checkpoint not found: {CHECKPOINT}. Set PBOUT_UNET_CHECKPOINT."
+        f"U-Net checkpoint not found: {CHECKPOINT}. Set [unet] checkpoint."
     )
 
 _checkpoint = load_checkpoint(CHECKPOINT, DEVICE)
@@ -590,9 +587,9 @@ NORMALIZATION_ENABLED = _checkpoint.get \
 )
 NO_NORMALIZE = not NORMALIZATION_ENABLED
 FIELD_NAMES = tuple(_checkpoint["field_names"])
-_reconstruct_channels_value = os.environ.get \
+_reconstruct_channels_value = _CONFIG.get \
 (
-    "PBOUT_UNET_RECONSTRUCT_CHANNELS", "none"
+    "reconstruct_channels", "none"
 )
 if _reconstruct_channels_value.strip().lower() == "all":
     RECONSTRUCT_CHANNELS = FIELD_NAMES
@@ -609,7 +606,7 @@ else:
     if unknown_channels:
         raise ValueError \
         (
-            "PBOUT_UNET_RECONSTRUCT_CHANNELS contains unknown channels "
+            "[unet] reconstruct_channels contains unknown channels "
             f"{unknown_channels}; choose from {FIELD_NAMES}, 'all', or 'none'"
         )
     RECONSTRUCT_CHANNELS = tuple \
@@ -620,7 +617,7 @@ FINE_N = int(_checkpoint["fine_n"])
 COARSE_N = int(_checkpoint["coarse_n"])
 LX = float(_checkpoint["lx"])
 LY = float(_checkpoint["ly"])
-_alpha_override = os.environ.get("PBOUT_UNET_ALPHA")
+_alpha_override = _CONFIG.get("alpha")
 ALPHA = \
 (
     float(_checkpoint["alpha"])
@@ -628,7 +625,7 @@ ALPHA = \
     else float(_alpha_override)
 )
 if not np.isfinite(ALPHA) or ALPHA < 0:
-    raise ValueError("PBOUT_UNET_ALPHA must be finite and non-negative")
+    raise ValueError("[unet] alpha must be finite and non-negative")
 BASE_CHANNELS = int(_checkpoint["base_channels"])
 PRECISION = _checkpoint.get("precision", "float32")
 if PRECISION not in ("float32", "float64"):
@@ -648,9 +645,9 @@ _checkpoint_omega_from_potential = \
     )
     in {"derived_from_potential", "laplacian_of_potential"}
 )
-OMEGA_FROM_POTENTIAL = os.environ.get \
+OMEGA_FROM_POTENTIAL = _CONFIG.get \
 (
-    "PBOUT_UNET_OMEGA_FROM_POTENTIAL",
+    "omega_from_potential",
     "1" if _checkpoint_omega_from_potential else "0",
 ).lower() not in {"0", "false", "no", "off"}
 if VORTICITY_MODE == "laplacian_of_potential":
@@ -662,9 +659,9 @@ DNS_VORTICITY_MODE = \
     else "independent_channel"
 )
 _training_parameters = _checkpoint.get("training_parameters", {})
-INVERSE_METHOD = os.environ.get \
+INVERSE_METHOD = _CONFIG.get \
 (
-    "PBOUT_UNET_INVERSE_METHOD",
+    "inverse_method",
     _checkpoint.get \
     (
         "inverse_method", _training_parameters.get("inverse_method", "exact")
@@ -673,14 +670,14 @@ INVERSE_METHOD = os.environ.get \
 if INVERSE_METHOD not in INVERSE_METHODS:
     raise ValueError \
     (
-        "PBOUT_UNET_INVERSE_METHOD must be one of "
+        "[unet] inverse_method must be one of "
         f"{', '.join(INVERSE_METHODS)}."
     )
 VAN_CITTERT_ITERATIONS = int \
 (
-    os.environ.get \
+    _CONFIG.get \
     (
-        "PBOUT_UNET_VAN_CITTERT_ITERATIONS",
+        "van_cittert_iterations",
         _checkpoint.get \
         (
             "van_cittert_iterations",
@@ -690,9 +687,9 @@ VAN_CITTERT_ITERATIONS = int \
 )
 VAN_CITTERT_RELAXATION = float \
 (
-    os.environ.get \
+    _CONFIG.get \
     (
-        "PBOUT_UNET_VAN_CITTERT_RELAXATION",
+        "van_cittert_relaxation",
         _checkpoint.get \
         (
             "van_cittert_relaxation",
@@ -701,14 +698,14 @@ VAN_CITTERT_RELAXATION = float \
     )
 )
 if VAN_CITTERT_ITERATIONS < 0:
-    raise ValueError("PBOUT_UNET_VAN_CITTERT_ITERATIONS must be non-negative.")
+    raise ValueError("[unet] van_cittert_iterations must be non-negative.")
 if not 0 < VAN_CITTERT_RELAXATION <= 1:
-    raise ValueError("PBOUT_UNET_VAN_CITTERT_RELAXATION must be in (0, 1].")
+    raise ValueError("[unet] van_cittert_relaxation must be in (0, 1].")
 LAPLACIAN_ORDER = int \
 (
-    os.environ.get \
+    _CONFIG.get \
     (
-        "PBOUT_UNET_LAPLACIAN_ORDER",
+        "laplacian_order",
         _checkpoint.get \
         (
             "laplacian_order",
@@ -717,7 +714,7 @@ LAPLACIAN_ORDER = int \
     )
 )
 if LAPLACIAN_ORDER not in (2, 4):
-    raise ValueError("PBOUT_UNET_LAPLACIAN_ORDER must be 2 or 4")
+    raise ValueError("[unet] laplacian_order must be 2 or 4")
 OUTPUT_CHANNELS = int(_checkpoint["model_output_channels"])
 SCALE_FACTOR = validate_grid_pair(FINE_N, COARSE_N)
 
@@ -735,30 +732,30 @@ MEAN = torch.as_tensor(_checkpoint["mean"], dtype=TORCH_DTYPE, device=DEVICE)
 STD = torch.as_tensor(_checkpoint["std"], dtype=TORCH_DTYPE, device=DEVICE)
 INVERSE_MIN_WAVENUMBER = float \
 (
-    os.environ.get \
+    _CONFIG.get \
     (
-        "PBOUT_UNET_INVERSE_MIN_WAVENUMBER",
+        "inverse_min_wavenumber",
         _checkpoint.get("inverse_min_wavenumber", 1.0),
     )
 )
 if not np.isfinite(INVERSE_MIN_WAVENUMBER) or INVERSE_MIN_WAVENUMBER < 0:
-    raise ValueError("PBOUT_UNET_INVERSE_MIN_WAVENUMBER must be finite and nonnegative")
+    raise ValueError("[unet] inverse_min_wavenumber must be finite and nonnegative")
 CUTOFF_FRACTION = _optional_float \
 (
-    "PBOUT_UNET_INVERSE_CUTOFF_FRACTION",
+    "inverse_cutoff_fraction",
     _checkpoint.get("inverse_cutoff_fraction"),
 )
 CUTOFF_ORDER = float \
 (
-    os.environ.get \
+    _CONFIG.get \
     (
-        "PBOUT_UNET_INVERSE_CUTOFF_ORDER",
+        "inverse_cutoff_order",
         _checkpoint.get("inverse_cutoff_order", 8.0),
     )
 )
-INVERSE_FILTER_TYPE = os.environ.get \
+INVERSE_FILTER_TYPE = _CONFIG.get \
 (
-    "PBOUT_UNET_INVERSE_FILTER",
+    "inverse_filter",
     _checkpoint.get \
     (
         "inverse_filter", _training_parameters.get("inverse_filter", "cutoff")
@@ -767,7 +764,7 @@ INVERSE_FILTER_TYPE = os.environ.get \
 if INVERSE_FILTER_TYPE not in INVERSE_FILTER_TYPES:
     raise ValueError \
     (
-        "PBOUT_UNET_INVERSE_FILTER must be one of "
+        "[unet] inverse_filter must be one of "
         f"{', '.join(INVERSE_FILTER_TYPES)}."
     )
 _filtered_dns_shell_power = _checkpoint.get("filtered_dns_shell_power")
@@ -791,23 +788,23 @@ FILTERED_DNS_SHELL_POWER = \
 if CUTOFF_FRACTION is not None and not 0 < CUTOFF_FRACTION <= 1:
     raise ValueError \
     (
-        "PBOUT_UNET_INVERSE_CUTOFF_FRACTION must be in (0, 1]."
+        "[unet] inverse_cutoff_fraction must be in (0, 1]."
     )
 if not np.isfinite(CUTOFF_ORDER) or CUTOFF_ORDER <= 0:
-    raise ValueError("PBOUT_UNET_INVERSE_CUTOFF_ORDER must be positive.")
-if os.environ.get("PBOUT_UNET_POST_CUTOFF_FRACTION", "").strip().lower() == "auto":
+    raise ValueError("[unet] inverse_cutoff_order must be positive.")
+if _CONFIG.get("post_cutoff_fraction", "").strip().lower() == "auto":
     POST_CUTOFF_FRACTION = COARSE_N / FINE_N
 else:
     POST_CUTOFF_FRACTION = _optional_float \
     (
-        "PBOUT_UNET_POST_CUTOFF_FRACTION",
+        "post_cutoff_fraction",
         _checkpoint.get("post_cutoff_fraction"),
     )
 POST_CUTOFF_ORDER = float \
 (
-    os.environ.get \
+    _CONFIG.get \
     (
-        "PBOUT_UNET_POST_CUTOFF_ORDER",
+        "post_cutoff_order",
         _checkpoint.get("post_cutoff_order", 8.0),
     )
 )
@@ -818,10 +815,10 @@ if \
 ):
     raise ValueError \
     (
-        "PBOUT_UNET_POST_CUTOFF_FRACTION must be in (0, 1]."
+        "[unet] post_cutoff_fraction must be in (0, 1]."
     )
 if not np.isfinite(POST_CUTOFF_ORDER) or POST_CUTOFF_ORDER <= 0:
-    raise ValueError("PBOUT_UNET_POST_CUTOFF_ORDER must be positive.")
+    raise ValueError("[unet] post_cutoff_order must be positive.")
 _checkpoint_post_filter = _checkpoint.get \
 (
     "post_filter",
@@ -829,9 +826,9 @@ _checkpoint_post_filter = _checkpoint.get \
 )
 if _checkpoint_post_filter == "smooth_exponential_cutoff":
     _checkpoint_post_filter = "high_order"
-POST_FILTER_TYPE = os.environ.get \
+POST_FILTER_TYPE = _CONFIG.get \
 (
-    "PBOUT_UNET_POST_FILTER", _checkpoint_post_filter
+    "post_filter", _checkpoint_post_filter
 ).lower().replace("-", "_")
 if POST_FILTER_TYPE == "dns_spectrum":
     print \
@@ -844,7 +841,7 @@ if POST_FILTER_TYPE == "dns_spectrum":
 if POST_FILTER_TYPE not in POST_FILTER_TYPES:
     raise ValueError \
     (
-        "PBOUT_UNET_POST_FILTER must be one of "
+        "[unet] post_filter must be one of "
         f"{', '.join(POST_FILTER_TYPES)}."
     )
 def _arakawa_bracket(f: torch.Tensor, g: torch.Tensor, dx: float, dy: float):
@@ -1069,35 +1066,22 @@ def _apply_rescaling(dns: torch.Tensor, les: torch.Tensor) -> torch.Tensor:
     """Apply the selected density/potential amplitude correction."""
     if RESCALING == 0:
         return dns
-    if RESCALING == 1:
-        dns_max = dns[:, :2].abs().amax(dim=(-2, -1), keepdim=True)
-        les_max = les[:, :2].abs().amax(dim=(-2, -1), keepdim=True)
-        dns_denominator = torch.where(dns_max > 0, dns_max, torch.ones_like(dns_max))
-        les_denominator = torch.where(les_max > 0, les_max, torch.ones_like(les_max))
-        normalized_dns = dns[:, :2] / dns_denominator
-        normalized_les = les[:, :2] / les_denominator
-        filtered = _germano_filter_torch(normalized_dns)
-        filtered = _spectral_resize_torch(filtered, les.shape[-1])
-        normalized_ratio = rescaling_amplitude_correction(normalized_les, filtered)
-        new_max = normalized_ratio * les_max
-        correction = new_max / dns_denominator
-        # Retain the amplitude when the filtered normalized field has no support.
-        supported = (torch.isfinite(filtered) & (filtered != 0)).any(dim=(-2, -1), keepdim=True)
-        correction = torch.where(supported | (les_max == 0), correction, torch.ones_like(correction))
-    elif RESCALING == 3:
+    if RESCALING == 3:
         if _RESCALING_REFERENCE_MAXIMA is None:
             raise RuntimeError("initFlow must initialize rescaling maxima")
         initial_max = _RESCALING_REFERENCE_MAXIMA[0].to(dns)
         current_max = dns[:, :2].abs().amax(dim=(-2, -1), keepdim=True)
         denominator = torch.where(current_max > 0, current_max, torch.ones_like(current_max))
         correction = initial_max / denominator
-    else:
+    elif RESCALING == 2:
         if _RESCALING_REFERENCE_MAXIMA is None:
             raise RuntimeError("initFlow must initialize formula-13 rescaling maxima")
         correction = rescaling_amplitude_correction13 \
         (
             dns[:, :2], les[:, :2], *_RESCALING_REFERENCE_MAXIMA,
         )
+    else:
+        raise ValueError("[unet] rescaling must be 0, 2, or 3")
     return torch.cat((dns[:, :2] * correction, dns[:, 2:]), dim=1)
 
 
@@ -1387,14 +1371,14 @@ def initFlow(npv):
     if DNS_PATH is None:
         raise ValueError \
         (
-            "PBOUT_UNET_DNS_PATH is required for PBOUT_UNET_DNS_INIT "
+            "[unet] dns_path is required for [unet] dns_init "
             "modes 0, 1, 2, and 3."
         )
     if not DNS_PATH.is_file():
         raise FileNotFoundError \
         (
             f"DNS snapshot not found: {DNS_PATH}. "
-            "Set PBOUT_UNET_DNS_PATH to an existing .npz file."
+            "Set [unet] dns_path to an existing .npz file."
         )
 
     simulation_fields = _load_dns_uvp(DNS_PATH)

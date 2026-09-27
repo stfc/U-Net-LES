@@ -2,51 +2,6 @@ import unittest
 
 import torch
 
-from germano_common import rescaling_amplitude_correction
-
-
-class RescalingTests(unittest.TestCase):
-    def test_independent_amplitudes_and_zero_crossings(self):
-        filtered = torch.tensor([0., -2., 1., 3.], dtype=torch.float64)
-        filtered = filtered.reshape(1, 1, 2, 2).expand(2, 2, 2, 2)
-        expected = torch.tensor([2., 3., 4., 5.], dtype=torch.float64)
-        expected = expected.reshape(2, 2, 1, 1)
-        torch.testing.assert_close \
-        (
-            rescaling_amplitude_correction(filtered * expected, filtered),
-            expected,
-        )
-
-    def test_median_rejects_outlier(self):
-        filtered = torch.ones(1, 1, 2, 2, dtype=torch.float64)
-        les = torch.tensor([2., 3., 3., 100.], dtype=torch.float64).reshape_as(filtered)
-        self.assertEqual(rescaling_amplitude_correction(les, filtered).item(), 3.)
-
-    def test_even_median_averages_middle_values(self):
-        filtered = torch.ones(1, 1, 2, 2)
-        les = torch.tensor([1., 2., 4., 100.]).reshape_as(filtered)
-        self.assertEqual(rescaling_amplitude_correction(les, filtered).item(), 3.)
-
-    def test_excludes_nonfinite_and_near_zero_denominators(self):
-        filtered = torch.tensor([float('nan'), float('inf'), 1e-20, 2.])
-        filtered = filtered.reshape(1, 1, 2, 2)
-        les = torch.tensor([1., 1., 1., 6.]).reshape_as(filtered)
-        self.assertEqual(rescaling_amplitude_correction(les, filtered).item(), 3.)
-
-    def test_degenerate_fields(self):
-        zeros = torch.zeros(1, 1, 2, 2)
-        ones = torch.ones_like(zeros)
-        self.assertEqual(rescaling_amplitude_correction(zeros, ones).item(), 0.)
-        self.assertEqual(rescaling_amplitude_correction(ones, zeros).item(), 1.)
-        self.assertEqual(rescaling_amplitude_correction(zeros, zeros).item(), 0.)
-
-    def test_shape_validation(self):
-        with self.assertRaises(ValueError):
-            rescaling_amplitude_correction(torch.ones(2, 2), torch.ones(2, 2))
-        with self.assertRaises(ValueError):
-            rescaling_amplitude_correction(torch.ones(1, 2, 2, 2), torch.ones(1, 1, 2, 2))
-
-
 class RescalingOptionTests(unittest.TestCase):
     def wrapper(self, mode):
         import ast
@@ -61,10 +16,7 @@ class RescalingOptionTests(unittest.TestCase):
             'torch': torch,
             'RESCALING': mode,
             '_RESCALING_REFERENCE_MAXIMA': (torch.full((1, 2, 1, 1), 6.), torch.full((1, 2, 1, 1), 2.)),
-            'rescaling_amplitude_correction': rescaling_amplitude_correction,
             'rescaling_amplitude_correction13': rescaling_amplitude_correction13,
-            '_germano_filter_torch': lambda field: field,
-            '_spectral_resize_torch': lambda field, size: field,
         }
         exec(compile(ast.Module(body=[function], type_ignores=[]), str(source), 'exec'), namespace)
         return namespace['_apply_rescaling']
@@ -76,7 +28,7 @@ class RescalingOptionTests(unittest.TestCase):
     def test_selects_formulas_and_preserves_vorticity(self):
         dns = torch.ones(1, 3, 2, 2)
         les = torch.tensor([1., 1., 1., 5.]).view(1, 1, 2, 2).expand(1, 3, 2, 2)
-        for mode, expected in ((1, 1.), (2, 15.)):
+        for mode, expected in ((2, 15.), (3, 6.)):
             result = self.wrapper(mode)(dns, les)
             torch.testing.assert_close(result[:, :2], torch.full_like(dns[:, :2], expected))
             torch.testing.assert_close(result[:, 2:], dns[:, 2:])
@@ -96,20 +48,22 @@ class RescalingOptionTests(unittest.TestCase):
             previous_dns = recurrent
             previous_les = les.abs().amax(dim=(-2, -1), keepdim=True)
 
-    def test_formula11_filters_normalized_dns_and_restores_amplitude(self):
-        rescale = self.wrapper(1)
-        seen = []
+    def test_invalid_modes_are_rejected(self):
+        from pathlib import Path
 
-        def filter_field(field):
-            seen.append(field.clone())
-            return field * 0.5
-
-        rescale.__wrapped__.__globals__['_germano_filter_torch'] = filter_field
-        dns = torch.tensor([-2., 1., 0., 2.]).reshape(1, 1, 2, 2).expand(1, 3, 2, 2)
-        result = rescale(dns, dns * 3.)
-        torch.testing.assert_close(seen[0].abs().amax(dim=(-2, -1)), torch.ones(1, 2))
-        torch.testing.assert_close(result[:, :2], dns[:, :2] * 6.)
-        torch.testing.assert_close(result[:, 2:], dns[:, 2:])
+        source = (Path(__file__).resolve().parents[1] / 'pBOUT-unet.py').read_text()
+        block = source[source.index('_rescaling_value ='):source.index('_RESCALING_REFERENCE_MAXIMA =')]
+        for mode in (0, 2, 3):
+            namespace = {'_CONFIG': {'rescaling': str(mode)}}
+            exec(block, namespace)
+            self.assertEqual(namespace['RESCALING'], mode)
+        dns = torch.ones(1, 3, 2, 2)
+        for mode in (1, -1, 4):
+            with self.subTest(mode=mode):
+                with self.assertRaisesRegex(ValueError, 'rescaling must be'):
+                    exec(block, {'_CONFIG': {'rescaling': str(mode)}})
+                with self.assertRaisesRegex(ValueError, 'rescaling must be'):
+                    self.wrapper(mode)(dns, dns)
 
     def test_initial_maxima_preserved_across_calls(self):
         rescale = self.wrapper(3)

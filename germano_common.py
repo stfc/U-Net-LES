@@ -25,49 +25,6 @@ HW_FIELD_LABELS = \
 }
 
 
-def rescaling_amplitude_correction \
-(
-    les: torch.Tensor, filtered_dns: torch.Tensor,
-) -> torch.Tensor:
-    """Return the median equation-11 correction per batch/channel.
-
-    For DNS amplitude A and LES amplitude L, equation 11 gives
-    A_new = median((LES / L) / (G(DNS) / A)) * L.
-    Hence A_new / A = median(LES / G(DNS)); normalization cancels.
-    Inputs must share a grid. Exclude nonfinite ratios and denominators
-    within machine precision of zero. Retain the amplitude if no valid
-    ratio exists; an identically zero LES requests zero amplitude.
-    """
-    if les.shape != filtered_dns.shape or les.ndim != 4:
-        raise ValueError("Rescaling requires matching (batch, channel, x, y) fields")
-    finite_magnitude = torch.where \
-    (
-        torch.isfinite(filtered_dns), filtered_dns.abs(), torch.zeros_like(filtered_dns),
-    )
-    magnitude = finite_magnitude.amax(dim=(-2, -1), keepdim=True)
-    tolerance = torch.finfo(filtered_dns.dtype).eps * magnitude
-    valid = torch.isfinite(les) & torch.isfinite(filtered_dns)
-    valid = valid & (filtered_dns.abs() > tolerance)
-    denominator = torch.where(valid, filtered_dns, torch.ones_like(filtered_dns))
-    ratios = les / denominator
-    valid = valid & torch.isfinite(ratios)
-    ratios = torch.where(valid, ratios, torch.full_like(ratios, float("nan")))
-    # Average the two middle values for an even-sized distribution.
-    correction = torch.nanquantile \
-    (
-        ratios.flatten(-2), 0.5, dim=-1, keepdim=True,
-    ).unsqueeze(-1)
-    correction = torch.where \
-    (
-        torch.isfinite(correction), correction, torch.ones_like(correction),
-    )
-    return torch.where \
-    (
-        (les == 0).all(dim=-1, keepdim=True).all(dim=-2, keepdim=True),
-        torch.zeros_like(correction), correction,
-    )
-
-
 def rescaling_amplitude_correction13 \
 (
     dns: torch.Tensor, les: torch.Tensor,

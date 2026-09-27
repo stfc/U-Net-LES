@@ -3,7 +3,11 @@ __pycache__/
 diagrams/
 err.txt
 fields/
-BOUT_runs/
+BOUT_runs/*
+!BOUT_runs/HW_template/
+BOUT_runs/HW_template/build*/
+BOUT_runs/HW_template/data/BOUT.*
+!BOUT_runs/HW_template/data/BOUT.inp
 inference_output/
 out.txt
 papers/CPC26/Paper_Germano_GenerativeAI.aux

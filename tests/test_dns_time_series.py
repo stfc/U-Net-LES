@@ -1,6 +1,4 @@
 import ast
-import os
-from unittest.mock import patch
 from pathlib import Path
 import tempfile
 import unittest
@@ -20,33 +18,17 @@ class DNSReplayTests(unittest.TestCase):
         block = source[source.index('_dns_init_value ='):source.index('DNS_FIELD_DIR =')]
         for mode in range(4):
             for implicit in (0, 1):
-                with self.subTest(mode=mode, implicit=implicit), patch.dict \
-                (
-                    os.environ, \
-                    {
-                        'PBOUT_UNET_DNS_INIT': str(mode),
-                        'PBOUT_UNET_IMPLICIT': str(implicit)
-                    }
-                ):
-                    namespace = dict(os=os, Path=Path)
+                with self.subTest(mode=mode, implicit=implicit):
+                    namespace = dict(Path=Path, _CONFIG={
+                        'dns_init': str(mode), 'implicit': str(implicit)
+                    })
                     exec(block, namespace)
                     self.assertEqual(namespace['DNS_REPLAY'], mode == 3)
                     self.assertEqual(namespace['IMPLICIT'], bool(implicit))
-        for key, value in \
-        [
-            ('PBOUT_UNET_DNS_INIT', '4'),
-            ('PBOUT_UNET_IMPLICIT', '3')
-        ]:
-            with patch.dict \
-            (
-                os.environ, \
-                {
-                    'PBOUT_UNET_DNS_INIT': '0',
-                    'PBOUT_UNET_IMPLICIT': '1', key: value
-                }
-            ):
-                with self.assertRaisesRegex(ValueError, key):
-                    exec(block, dict(os=os, Path=Path))
+        for key, value in [('dns_init', '4'), ('implicit', '3')]:
+            config = {'dns_init': '0', 'implicit': '1', key: value}
+            with self.assertRaisesRegex(ValueError, key):
+                exec(block, dict(Path=Path, _CONFIG=config))
 
     def test_interpolation_and_time_order(self):
         with tempfile.TemporaryDirectory() as directory:
