@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import re
 from pathlib import Path
 import shutil
 
@@ -44,7 +45,7 @@ MAX_ANIMATION_FRAMES = 1000
 DEFAULT_BOUT_RESULTS_ROOT = \
 (
     Path(__file__).resolve().parent
-    / "./BOUT_runs/"
+    / "./"
 ).resolve()
 
 
@@ -98,6 +99,12 @@ def parse_args() -> argparse.Namespace:
         "--bout-y-index", type=int, default=0,
         help="Interior y-plane for BOUT (t,x,y,z) fields (default: 0)",
     )
+    parser.add_argument(
+        "--t-start", "--t_start", type=float, default=500.0,
+        help="Add this time offset to LES histories (e.g. 500 for a DNS restart "
+             "at t=500). DNS retains its original times; comparisons use the "
+             "shared time interval. Default: 500 (use 0 for unshifted LES).",
+    )
     parser.add_argument("--lx", type=float, default=50.176)
     parser.add_argument("--ly", type=float, default=50.176)
     parser.add_argument("--dpi", type=int, default=180)
@@ -105,6 +112,13 @@ def parse_args() -> argparse.Namespace:
     (
         "--fps", type=float, default=5.0,
         help="Frame rate of the 2-D comparison animation (default: 5)",
+    )
+    parser.add_argument(
+        "--animation-step", type=int, default=1,
+        help="Render every Nth saved output in field and spectrum animations "
+             "(default: 1; use 100 for outputs 0, 100, 200, ...). "
+             "Field PNG filenames preserve these output indices. "
+             "Static plots retain all outputs.",
     )
     parser.add_argument \
     (
@@ -139,7 +153,7 @@ def parse_args() -> argparse.Namespace:
         help= \
         (
             "Set animation color limits from all frames instead of the "
-            "snapshots nearest t=0"
+            "snapshots nearest t=0 (field_frames always uses full-dataset min/max)"
         ),
     )
     parser.add_argument \
@@ -451,6 +465,39 @@ def hw_enstrophy(fields: np.ndarray, lx: float, ly: float) -> np.ndarray:
     return 0.5 * np.sum((density - vorticity)**2, axis=(-2, -1)) * dx * dy
 
 
+def is_dns_reference(hint):
+    """Identify DNS without misclassifying runs named HW_DNS512_LES64."""
+    for part in reversed(Path(str(hint)).parts):
+        name = part.casefold()
+        if "les" in name:
+            return False
+        if "dns" in name:
+            return True
+    return False
+
+
+def dataset_label(path: Path) -> str:
+    """Name LES by its run-folder resolution, including nested data inputs."""
+    resolved = path.resolve()
+    if is_dns_reference(resolved):
+        return "DNS"
+    for part in reversed(resolved.parts):
+        match = re.search(r"(?:^|[_-])LES[_-]?(\d+)(?=$|[_-])", part, re.IGNORECASE)
+        if match:
+            return f"LES{int(match.group(1))}"
+    label_path = resolved.parent if path.is_file() else resolved
+    return label_path.name.replace("results_U-Net_", "")
+
+
+def shift_les_times(datasets, t_start):
+    """Shift models after reference ordering; a lone non-DNS input is LES."""
+    return tuple(
+        (label, times + t_start if index > 0 or
+         (len(datasets) == 1 and label != "DNS") else times, fields)
+        for index, (label, times, fields) in enumerate(datasets)
+    )
+
+
 def order_datasets_with_reference_first(datasets, reference_hints=None):
     """Put the DNS dataset first, falling back to the original first dataset."""
     if reference_hints is None:
@@ -459,7 +506,7 @@ def order_datasets_with_reference_first(datasets, reference_hints=None):
     (
         (
             index for index, hint in enumerate(reference_hints)
-            if "dns" in str(hint).casefold()
+            if is_dns_reference(hint)
         ),
         0,
     )
@@ -473,15 +520,26 @@ def order_datasets_with_reference_first(datasets, reference_hints=None):
 
 def truncate_to_common_time(datasets):
     """Restrict histories to the time interval covered by every dataset."""
+    start_time = max(float(times[0]) for _, times, _ in datasets)
     final_time = min(float(times[-1]) for _, times, _ in datasets)
+    if start_time > final_time:
+        ranges = "; ".join(
+            f"{label}: [{float(times[0]):g}, {float(times[-1]):g}]"
+            for label, times, _ in datasets
+        )
+        raise ValueError(
+            "No overlapping DNS/LES time interval after applying --t-start. "
+            f"Time ranges: {ranges}. The offset is added only to LES times; "
+            "use a DNS history covering the shifted LES interval."
+        )
     truncated = []
     for label, times, fields in datasets:
-        keep = times <= final_time
+        keep = (times >= start_time) & (times <= final_time)
         if not np.any(keep):
             raise ValueError \
             (
-                f"Dataset {label} has no snapshots at or before the common "
-                f"final time {final_time:g}"
+                f"Dataset {label} has no snapshots in the common "
+                f"time interval [{start_time:g}, {final_time:g}]"
             )
         truncated.append((label, times[keep], fields[keep]))
     return tuple(truncated), final_time
@@ -518,6 +576,7 @@ def save_centerpoint_history(datasets, output_path: Path, dpi: int) -> Path:
         axis.grid(True, alpha=0.3)
     axes[0, 0].legend()
     axes[-1, 0].set_xlabel("simulation time")
+    axes[-1, 0].set_xlim(left=0.0)
     figure.suptitle("Domain-center field trajectories")
     figure.tight_layout()
     figure.savefig(output_path, dpi=dpi, bbox_inches="tight")
@@ -553,6 +612,7 @@ def save_field_extrema_history(datasets, output_path: Path, dpi: int) -> Path:
         axis.grid(True, alpha=0.3)
     axes[0, 0].legend(ncol=2)
     axes[-1, 0].set_xlabel("simulation time")
+    axes[-1, 0].set_xlim(left=0.0)
     figure.suptitle("Field minima and maxima versus time")
     figure.tight_layout()
     figure.savefig(output_path, dpi=dpi, bbox_inches="tight")
@@ -565,6 +625,7 @@ def save_field_pdf_comparison \
     datasets, output_dir: Path, dpi: int
 ) -> tuple[Path, ...]:
     """Compare dataset spatial PDFs at the initial and final times."""
+    start_time = max(float(times[0]) for _, times, _ in datasets)
     final_time = min(float(times[-1]) for _, times, _ in datasets)
     target_times = np.array([0.0, final_time])
     styles = \
@@ -658,6 +719,7 @@ def save_energy_comparison \
             linestyle=linestyle, linewidth=1.6, label=label,
         )
     axis.set_xlabel("simulation time")
+    axis.set_xlim(left=0.0)
     axis.set_ylabel(r"$E=\frac{1}{2}L_xL_y\sum(n^2+|\nabla\phi|^2)$")
     axis.set_ylim(bottom=0.0)
     axis.set_title("Hasegawa–Wakatani energy versus time")
@@ -687,6 +749,7 @@ def save_enstrophy_comparison \
             linestyle=linestyle, linewidth=1.6, label=label,
         )
     axis.set_xlabel("simulation time")
+    axis.set_xlim(left=0.0)
     axis.set_ylabel(r"$Z=\frac{1}{2}\sum(n-\omega)^2\,\Delta x\,\Delta y$")
     axis.set_ylim(bottom=0.0)
     axis.set_title("Hasegawa–Wakatani enstrophy versus time")
@@ -727,6 +790,7 @@ def save_particle_flux_comparison \
         axis.grid(True, alpha=0.3)
         axis.legend()
     axes[-1].set_xlabel("simulation time")
+    axes[-1].set_xlim(left=0.0)
     figure.tight_layout()
     figure.savefig(output_path, dpi=dpi, bbox_inches="tight")
     plt.close(figure)
@@ -769,6 +833,7 @@ def save_energy_components_comparison \
         axis.grid(True, alpha=0.3)
     axes[0, 0].legend()
     axes[-1, 0].set_xlabel("simulation time")
+    axes[-1, 0].set_xlim(left=0.0)
     figure.suptitle("Hasegawa–Wakatani energy components versus time")
     figure.tight_layout()
     figure.savefig(output_path, dpi=dpi, bbox_inches="tight")
@@ -946,15 +1011,16 @@ def save_initial_vorticity_comparison \
 
 def save_field_comparison_animation \
 (
-    datasets, output_dir: Path, dpi: int, fps: float, overall_limits: bool = False
+    datasets, output_dir: Path, dpi: int, fps: float, overall_limits: bool = False,
+    animation_step: int = 1,
 ) -> Path:
     """Animate both 2-D solutions and their absolute error at nearest times."""
     (first_label, first_times, first_fields), \
     (
         second_label, second_times, second_fields
     ) = datasets
-    first_times = first_times[:MAX_ANIMATION_FRAMES]
-    first_fields = first_fields[:MAX_ANIMATION_FRAMES]
+    first_times = first_times[::animation_step][:MAX_ANIMATION_FRAMES]
+    first_fields = first_fields[::animation_step][:MAX_ANIMATION_FRAMES]
     if first_fields.shape[1:] != second_fields.shape[1:]:
         raise ValueError \
         (
@@ -1033,7 +1099,7 @@ def save_field_comparison_animation \
             f"{second_label} t={second_times[second_index]:g}"
         )
         figure.tight_layout()
-        frame_path = frames_dir / f"field_comparison_{frame_index:07d}.png"
+        frame_path = frames_dir / f"field_comparison_{frame_index * animation_step:07d}.png"
         figure.savefig(frame_path, dpi=dpi, bbox_inches="tight")
         plt.close(figure)
         frame_paths.append(frame_path)
@@ -1048,6 +1114,7 @@ def save_three_dataset_field_animations \
 (
     datasets, output_dir: Path, lx: float, ly: float, dpi: int, fps: float,
     overall_limits: bool = False,
+    animation_step: int = 1,
 ) -> tuple[Path, ...]:
     """Animate each field for a reference, two models, and their differences."""
     if len(datasets) < 3:
@@ -1064,8 +1131,8 @@ def save_three_dataset_field_animations \
             f"{sorted(spatial_shapes)}"
         )
     reference_label, reference_times, reference_fields = selected[0]
-    reference_times = reference_times[:MAX_ANIMATION_FRAMES]
-    reference_fields = reference_fields[:MAX_ANIMATION_FRAMES]
+    reference_times = reference_times[::animation_step][:MAX_ANIMATION_FRAMES]
+    reference_fields = reference_fields[::animation_step][:MAX_ANIMATION_FRAMES]
     matched = []
     matched_times = []
     for _, times, fields in selected[1:]:
@@ -1148,7 +1215,7 @@ def save_three_dataset_field_animations \
             )
             frame_path = \
             (
-                frames_directory / f"{field_name}_{frame_index:07d}.png"
+                frames_directory / f"{field_name}_{frame_index * animation_step:07d}.png"
             )
             figure.savefig(frame_path, dpi=dpi, bbox_inches="tight")
             plt.close(figure)
@@ -1169,14 +1236,15 @@ def save_energy_spectrum_comparison_animation \
 (
     datasets, output_dir: Path, lx: float, ly: float, dpi: int, fps: float,
     overall_limits: bool = False, smooth_spectrum: bool = False,
+    animation_step: int = 1,
 ) -> Path:
     """Animate both datasets with black initial and blue current spectra."""
     (first_label, first_times, first_fields), \
     (
         second_label, second_times, second_fields
     ) = datasets
-    first_times = first_times[:MAX_ANIMATION_FRAMES]
-    first_fields = first_fields[:MAX_ANIMATION_FRAMES]
+    first_times = first_times[::animation_step][:MAX_ANIMATION_FRAMES]
+    first_fields = first_fields[::animation_step][:MAX_ANIMATION_FRAMES]
     nearest = np.asarray \
     (
         [np.argmin(np.abs(second_times - time)) for time in first_times]
@@ -1316,20 +1384,22 @@ def save_field_animation \
 (
     dataset, output_dir: Path, dpi: int, fps: float,
     overall_limits: bool = False,
+    animation_step: int = 1,
 ) -> Path:
-    """Animate the fields from one dataset without comparison panels."""
+    """Animate fields with fixed per-channel extrema from the full history.
+
+    Limits include outputs omitted by animation_step and MAX_ANIMATION_FRAMES.
+    overall_limits is retained for call compatibility; full-history limits are
+    always used for field_frames.
+    """
+    colormaps = {"U": "Blues", "V": "Reds_r", "P": "hot"}  # n, phi, omega
     label, times, fields = dataset
-    times = times[:MAX_ANIMATION_FRAMES]
-    fields = fields[:MAX_ANIMATION_FRAMES]
-    limit_fields = fields if overall_limits else fields \
-    [
-        int(np.argmin(np.abs(times))):int(np.argmin(np.abs(times))) + 1
-    ]
-    field_limits = \
-    [
-        float(np.max(np.abs(limit_fields[:, channel]))) or 1.0
+    field_limits = [
+        (float(np.min(fields[:, channel])), float(np.max(fields[:, channel])))
         for channel in range(len(FIELD_NAMES))
     ]
+    times = times[::animation_step][:MAX_ANIMATION_FRAMES]
+    fields = fields[::animation_step][:MAX_ANIMATION_FRAMES]
 
     frames_dir = output_dir / "field_frames"
     frames_dir.mkdir(parents=True, exist_ok=True)
@@ -1337,7 +1407,7 @@ def save_field_animation \
     for frame_index, time in enumerate(times):
         figure, axes = plt.subplots(1, len(FIELD_NAMES), figsize=(14, 4.6))
         for channel, name in enumerate(FIELD_NAMES):
-            limit = field_limits[channel]
+            minimum, maximum = field_limits[channel]
             image = axes[channel].imshow \
             (
                 fields[frame_index, channel].T,
@@ -1345,9 +1415,9 @@ def save_field_animation \
                 extent=(0.0, 1.0, 0.0, 1.0),
                 aspect="equal",
                 interpolation="nearest",
-                cmap="RdBu_r",
-                vmin=-limit,
-                vmax=limit,
+                cmap=colormaps[name],
+                vmin=minimum,
+                vmax=maximum,
             )
             axes[channel].set_title(HW_FIELD_LABELS.get(name, name))
             axes[channel].set_xlabel("x / Lx")
@@ -1355,7 +1425,7 @@ def save_field_animation \
             figure.colorbar(image, ax=axes[channel], shrink=0.78)
         figure.suptitle(f"{label}: t={time:g}")
         figure.tight_layout()
-        frame_path = frames_dir / f"fields_{frame_index:07d}.png"
+        frame_path = frames_dir / f"fields_{frame_index * animation_step:07d}.png"
         figure.savefig(frame_path, dpi=dpi, bbox_inches="tight")
         plt.close(figure)
         frame_paths.append(frame_path)
@@ -1370,11 +1440,12 @@ def save_energy_spectrum_animation \
 (
     dataset, output_dir: Path, lx: float, ly: float, dpi: int, fps: float,
     overall_limits: bool = False, smooth_spectrum: bool = False,
+    animation_step: int = 1,
 ) -> Path:
     """Animate current HW spectra in blue against the fixed initial in black."""
     label, times, fields = dataset
-    times = times[:MAX_ANIMATION_FRAMES]
-    fields = fields[:MAX_ANIMATION_FRAMES]
+    times = times[::animation_step][:MAX_ANIMATION_FRAMES]
+    fields = fields[::animation_step][:MAX_ANIMATION_FRAMES]
     spectra = \
     [
         _hw_energy_spectrum(frame, lx, ly, smooth_spectrum) for frame in fields
@@ -1439,12 +1510,17 @@ def main() -> None:
     args = parse_args()
     if args.lx <= 0 or args.ly <= 0:
         raise ValueError("lx and ly must be positive")
+    if not np.isfinite(args.t_start) or args.t_start < 0:
+        raise ValueError("t-start must be finite and non-negative")
     if args.batch < 0:
         raise ValueError("batch must be non-negative")
     if args.spectrum_cutoff_n < 0:
         raise ValueError("spectrum-cutoff-n must be non-negative")
     if args.animations and args.fps <= 0:
         raise ValueError("fps must be positive")
+
+    if args.animation_step <= 0:
+        raise ValueError("animation-step must be positive")
 
     optional_paths = (args.dataset2_fields, args.dataset3_fields)
     dataset_paths = (args.unet_fields, args.dns_fields, *optional_paths)
@@ -1459,18 +1535,27 @@ def main() -> None:
         times, _, fields = read_history(
             dataset_path, args.batch, args.input_format, args.bout_y_index
         )
-        label_path = dataset_path.parent if dataset_path.is_file() else dataset_path
-        label = label_path.resolve().name.replace("results_U-Net_", "")
-        if "dns" in str(dataset_path.resolve()).casefold():
-            label = "DNS"
+        label = dataset_label(dataset_path)
         datasets.append((label, times, fields))
     reference_hints = tuple(path.resolve() for path in input_paths)
     datasets = order_datasets_with_reference_first \
     (
         tuple(datasets), reference_hints
     )
+    datasets = shift_les_times(datasets, args.t_start)
+    for label, times, _ in datasets:
+        print(f"Plot time range for {label}: {times[0]:g} to {times[-1]:g}")
+    history_datasets = datasets
     datasets, common_final_time = truncate_to_common_time(datasets)
-    print(f"Restricting all datasets to t <= {common_final_time:g}")
+    # Keep the DNS development phase in time-series plots. LES retains its
+    # shifted start, so no LES samples are invented before the restart time.
+    history_datasets = tuple(
+        (label, times[times <= common_final_time], fields[times <= common_final_time])
+        for label, times, fields in history_datasets
+    )
+    common_start_time = max(float(times[0]) for _, times, _ in datasets)
+    print(f"Comparisons use {common_start_time:g} <= t <= {common_final_time:g}; "
+          "time-series plots retain the DNS history from t=0.")
     comparison_datasets = \
     (
         (datasets[1], datasets[0])
@@ -1497,30 +1582,30 @@ def main() -> None:
     args.output_dir.mkdir(parents=True, exist_ok=True)
     centerpoint_path = save_centerpoint_history \
     (
-        datasets, args.output_dir / "centerpoint_vs_time.png", args.dpi
+        history_datasets, args.output_dir / "centerpoint_vs_time.png", args.dpi
     )
     extrema_path = save_field_extrema_history \
     (
-        datasets, args.output_dir / "field_minmax_vs_time.png", args.dpi
+        history_datasets, args.output_dir / "field_minmax_vs_time.png", args.dpi
     )
     energy_path = save_energy_comparison \
     (
-        datasets, args.output_dir / "energy_vs_time.png",
+        history_datasets, args.output_dir / "energy_vs_time.png",
         args.lx, args.ly, args.dpi,
     )
     enstrophy_path = save_enstrophy_comparison \
     (
-        datasets, args.output_dir / "enstrophy_vs_time.png",
+        history_datasets, args.output_dir / "enstrophy_vs_time.png",
         args.lx, args.ly, args.dpi,
     )
     particle_flux_path = save_particle_flux_comparison \
     (
-        datasets, args.output_dir / "particle_flux_vs_time.png",
+        history_datasets, args.output_dir / "particle_flux_vs_time.png",
         args.lx, args.ly, args.dpi,
     )
     energy_components_path = save_energy_components_comparison \
     (
-        datasets, args.output_dir / "energy_components_vs_time.png",
+        history_datasets, args.output_dir / "energy_components_vs_time.png",
         args.lx, args.ly, args.dpi,
     )
     endpoint_spectra_path = save_endpoint_spectrum_comparison \
@@ -1566,23 +1651,27 @@ def main() -> None:
             (
                 datasets[0], args.output_dir, args.dpi, args.fps,
                 args.overall_animation_limits,
+                animation_step=args.animation_step,
             )
             spectrum_animation_path = save_energy_spectrum_animation \
             (
                 datasets[0], args.output_dir, args.lx, args.ly, args.dpi,
                 args.fps, args.overall_animation_limits, args.smooth_spectrum,
+                animation_step=args.animation_step,
             )
         else:
             animation_path = save_field_comparison_animation \
             (
                 comparison_datasets, args.output_dir, args.dpi, args.fps,
                 args.overall_animation_limits,
+                animation_step=args.animation_step,
             )
             spectrum_animation_path = save_energy_spectrum_comparison_animation \
             (
                 comparison_datasets, args.output_dir, args.lx, args.ly,
                 args.dpi, args.fps, args.overall_animation_limits,
                 args.smooth_spectrum,
+                animation_step=args.animation_step,
             )
         print(f"Saved {animation_path}")
         print(f"Saved {spectrum_animation_path}")
@@ -1596,6 +1685,7 @@ def main() -> None:
                 args.dpi,
                 args.fps,
                 args.overall_animation_limits,
+                animation_step=args.animation_step,
             )
             for field_animation_path in field_animation_paths:
                 print(f"Saved {field_animation_path}")
