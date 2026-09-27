@@ -100,7 +100,7 @@ def parse_args() -> argparse.Namespace:
         help="Interior y-plane for BOUT (t,x,y,z) fields (default: 0)",
     )
     parser.add_argument(
-        "--t-start", "--t_start", type=float, default=500.0,
+        "--tLES-start", "--tLES_start", dest="t_start", type=float, default=500.0,
         help="Add this time offset to LES histories (e.g. 500 for a DNS restart "
              "at t=500). DNS retains its original times; comparisons use the "
              "shared time interval. Default: 500 (use 0 for unshifted LES).",
@@ -484,7 +484,7 @@ def dataset_label(path: Path) -> str:
     for part in reversed(resolved.parts):
         match = re.search(r"(?:^|[_-])LES[_-]?(\d+)(?=$|[_-])", part, re.IGNORECASE)
         if match:
-            return f"LES{int(match.group(1))}"
+            return f"LES {int(match.group(1))}"
     label_path = resolved.parent if path.is_file() else resolved
     return label_path.name.replace("results_U-Net_", "")
 
@@ -528,7 +528,7 @@ def truncate_to_common_time(datasets):
             for label, times, _ in datasets
         )
         raise ValueError(
-            "No overlapping DNS/LES time interval after applying --t-start. "
+            "No overlapping DNS/LES time interval after applying --tLES-start. "
             f"Time ranges: {ranges}. The offset is added only to LES times; "
             "use a DNS history covering the shifted LES interval."
         )
@@ -1511,7 +1511,7 @@ def main() -> None:
     if args.lx <= 0 or args.ly <= 0:
         raise ValueError("lx and ly must be positive")
     if not np.isfinite(args.t_start) or args.t_start < 0:
-        raise ValueError("t-start must be finite and non-negative")
+        raise ValueError("tLES-start must be finite and non-negative")
     if args.batch < 0:
         raise ValueError("batch must be non-negative")
     if args.spectrum_cutoff_n < 0:

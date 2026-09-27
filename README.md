@@ -157,6 +157,71 @@ reproduce the full plotted time interval.
 `0`, `1`, and `3` run it from startup; mode `2` uses native BOUT++ brackets
 without the callback or its runtime field diagnostics.
 
+#### Launch the HW and modified HW DNS/LES sweep
+
+Run the DNS/LES sweep from `BOUT_runs` (starting at the repository root):
+
+```bash
+cd BOUT_runs
+python launch_hw_runs.py --dry-run
+python launch_hw_runs.py
+```
+
+The launcher plans eight HW and eight modified HW (mHW) runs, skips existing
+run directories, and builds all new cases before submitting jobs using copies
+of `HW_template/run.sh`:
+
+| Model | DNS grid | kappa | modified | LES grids (factors 2, 4, 8) |
+| --- | --- | --- | --- | --- |
+| HW | 256 | 0.5 | false | 128, 64, 32 |
+| HW | 512 | 1.0 | false | 256, 128, 64 |
+| mHW | 256 | 1.0 | true | 128, 64, 32 |
+| mHW | 512 | 1.0 | true | 256, 128, 64 |
+
+DNS256 uses 32 MPI ranks on one node; DNS512 uses 128 MPI ranks across two
+nodes (64 per node). Both use one CPU per rank, `dns_init=-1`, `timestep=1`, and
+`nout=2000`. No `NXPE`, `NYPE`, or `NZPE` is specified; BOUT++ selects the
+mesh decomposition. Each run folder contains the submitted `run.sh`, including
+its Slurm resource requests and dependencies. DNS scripts run
+`mpirun -np 32 ./hasegawa-wakatani` for DNS256 and
+`mpirun -np 128 ./hasegawa-wakatani` for DNS512; the executable is linked to the build output.
+Each DNS folder also retains its snapshot export submission as `export.sh`.
+The launcher calls `sbatch` from the folder containing the saved script.
+
+DNS starts with the native `BOUT.inp` initial conditions at t=0,
+without importing Python, a checkpoint, or a DNS snapshot. Mode `dns_init=2`
+remains DNS initialized from `dns_path` through Python.
+
+Each DNS job is followed by a dependent export job that collects the output at
+exactly t=500 from all MPI dumps into `data/les_initial.npz`, with guard cells
+removed and keys `U=n`, `V=phi`, `P=vort`. The three LES jobs depend on successful
+export. They use `dns_init=0`, their matching training checkpoints, and the NPZ
+from their parent DNS run. Each LES uses one MPI rank, 32 CPUs and one GPU.
+
+LES defaults to 1500 output steps at timestep 1. Its simulation clock begins at
+zero, corresponding to DNS time 500, and thus covers DNS times 500 through 2000.
+Override durations or snapshot time with `--dns-nout`, `--les-nout`, and
+`--snapshot-time`. Export waits for the entire DNS job to finish.
+
+Run directories use prefixes `HW` and `mHW`; checkpoints use the matching
+`training_HW_*` and `training_mHW_*` folders. `--prefix NAME` changes these to
+`NAME` and `mNAME`. Existing run directories are skipped without building,
+modifying, or resubmitting them. A missing LES case can reuse its existing DNS
+`data/les_initial.npz`; if that file is absent, the LES case is skipped until
+it becomes available. Submitted job IDs are appended to `hw_submissions.log`; if a
+submission fails, already submitted jobs remain queued.
+
+The combiner also works independently, from `BOUT_runs`:
+
+```bash
+python HW_template/combine_bout_dumps.py HW_DNS256/data \
+  --snapshot HW_DNS256/data/les_initial.npz --time 500
+```
+
+Without `--snapshot`, it retains its original behavior of combining all output
+into a single NetCDF file. `--time-index` can select an output index instead of
+an exact time for snapshot export.
+
 #### Plot and compare trajectories
 
 ```bash
