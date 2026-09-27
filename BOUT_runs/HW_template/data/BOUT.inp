@@ -31,7 +31,6 @@ mxstep = 1e7
 enabled = true 
 
 [hw]
-closure_start_step = 0  # Call pBOUT-unet from the first solver evaluation
 alpha = 1.0    # Adiabaticity (~ conductivity)
 kappa = 1.0    # Density gradient drive
 Dvort = 1.e-3   # Vorticity diffusion
@@ -57,8 +56,8 @@ function = mixmode(2*pi*x) * mixmode(z) # Fluctuation function
 # Relative paths are relative to the run working directory, not this input file.
 
 # These are the most common flags
-dns_init = 0  # 0=filtered LES, 1=filtered DNS, 2=DNS, 3=DNS replay
-write_diagnostics = 1  # 0=off, 1=all, 2=fields only
+dns_init = 0  # -1=fresh DNS, 0=filtered LES, 1=filtered DNS, 2=DNS from fields, 3=DNS replay
+write_diagnostics = 2  # 0=off, 1=all, 2=fields only
 checkpoint = ../../training/training_HW_dns256_les32/checkpoints/best.pt
 dns_path = ../../fields/fields_HW_run0_time501_N256.npz
 

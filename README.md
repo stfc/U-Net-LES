@@ -1,8 +1,7 @@
 # Germano U-Net for Hasegawa--Wakatani
 
-This directory contains the training, standalone inference, diagnostics, and
-BOUT++ coupling code for reconstructing fine-grid Hasegawa--Wakatani fields
-from Germano-filtered LES fields.
+This project shows the use of Germano's filter combined to U-Net and BOUT++
+for accelerating Hasegawa-Wakatani simulations.
 
 ## Reproduce the results
 
@@ -78,7 +77,6 @@ From the repository root, compile HW into a separate run directory:
 ```bash
 cd BOUT_runs/
 bash HW_template/build.sh HW_N256
-cd ..
 ```
 
 The run directory argument is required. This creates `BOUT_runs/HW_N256`
@@ -155,9 +153,9 @@ writes BOUT++ outputs under `data/` and diagnostic snapshots under
 smoke run can use smaller `nout` in **both** generated input files; it will not
 reproduce the full plotted time interval.
 
-Keep `[hw] closure_start_step=0` so the Python nonlinear-term callback runs
-from startup. A positive value delays the callback (and its field diagnostics)
-by that many internal solver steps, which would change the closure experiment.
+`[unet] dns_init` alone controls the Python nonlinear-term callback: modes
+`0`, `1`, and `3` run it from startup; mode `2` uses native BOUT++ brackets
+without the callback or its runtime field diagnostics.
 
 #### Plot and compare trajectories
 

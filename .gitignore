@@ -21,3 +21,4 @@ papers/CPC26/Paper_Germano_GenerativeAI.synctex.gz
 results/
 tests/__pycache__/
 training/
+validation_U-Net/

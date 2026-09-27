@@ -310,7 +310,7 @@ double* initFlow(double dx, double dy, Field3D n, Field3D phi, Field3D vort, PyO
 
 
 
-double* findLESTerms(const int pStep, const int pStepStart, const double dx, const double simtime, const Field3D& n, Field3D& phi, Field3D& vort, Field3D& pPhiVort, Field3D& pPhiN,
+double* findLESTerms(const int pStep, const double dx, const double simtime, const Field3D& n, Field3D& phi, Field3D& vort, Field3D& pPhiVort, Field3D& pPhiN,
   const bool implicitStylES, PyObject *pModule, PyObject *pFindLESTerms) {
 
   // local variables
@@ -341,7 +341,7 @@ double* findLESTerms(const int pStep, const int pStepStart, const double dx, con
 
   // pass n and vort arrays to pLES
   pLES[0] = double(pStep);
-  pLES[1] = double(pStepStart);
+  pLES[1] = 0.0; // Reserved header slot; Python reads dns_init from BOUT options.
   pLES[2] = dx;
   pLES[3] = simtime;
 
@@ -466,7 +466,7 @@ private:
   PyObject *pSaveArakawaTerms;
 
   int pStep      = 0;
-  int pStepStart = 0;  // Enable the Python nonlinear-term callback from startup.
+  int dns_init = 0;  // dns_init: -1=fresh DNS, 2=DNS from fields; both use native brackets.
 
   double deltax;
   double deltaz;
@@ -522,8 +522,15 @@ protected:
     Dn = options["Dn"].withDefault(1e-2);
 
     modified = options["modified"].withDefault(false);
-    pStepStart = options["closure_start_step"].withDefault(0);
     auto& unet = Options::root()["unet"];
+    dns_init = unet["dns_init"].withDefault(0);
+    if (dns_init < -1 || dns_init > 3) {
+      throw BoutException("dns_init must be -1, 0, 1, 2, or 3");
+    }
+    if (dns_init == -1) {
+      // Python-only settings may remain in a shared input file for fresh DNS.
+      unet.setConditionallyUsed();
+    }
     writeArakawaTerms = unet["write_arakawa_terms"].isSet()
         ? unet["write_arakawa_terms"].as<bool>()
         : options["write_arakawa_terms"].withDefault(false);
@@ -547,7 +554,7 @@ protected:
 
 
 
-    if (pStep==0) {
+    if (dns_init != -1) {
       initPythonModule(&pModule, &pInitFlow, &pFindLESTerms,
                        &pSaveArakawaTerms, implicitStylES);
     }
@@ -558,21 +565,21 @@ protected:
     deltax = metric->dx(0,0,0);
     deltaz = metric->dz(0,0,0);
 
-    double *npv;
-
-    npv = initFlow(deltax, deltaz, n, phi, vort, pModule, pInitFlow);
-
-    // return npv
-    int N_LES = n.getNz();
-    int cont=0;
-    for(int i=2; i<n.getNx()-2; i++)   // we assume 2 guards cells in x-direction
-      for(int j=0; j<1; j++)
-        for(int k=0; k<n.getNz(); k++){
-          n(i,j,k)    = npv[cont + 0*N_LES*N_LES];
-          phi(i,j,k)  = npv[cont + 1*N_LES*N_LES];
-          vort(i,j,k) = npv[cont + 2*N_LES*N_LES];
-          cont = cont+1;
-        }
+    // Native DNS starts at t=0 with BOUT.inp initial conditions.
+    // Mode 2 and LES/filter/replay modes still import fields through Python.
+    if (dns_init != -1) {
+      double* npv = initFlow(deltax, deltaz, n, phi, vort, pModule, pInitFlow);
+      const int N_LES = n.getNz();
+      int cont = 0;
+      for (int i = 2; i < n.getNx() - 2; ++i)
+        for (int j = 0; j < 1; ++j)
+          for (int k = 0; k < n.getNz(); ++k) {
+            n(i,j,k) = npv[cont + 0*N_LES*N_LES];
+            phi(i,j,k) = npv[cont + 1*N_LES*N_LES];
+            vort(i,j,k) = npv[cont + 2*N_LES*N_LES];
+            ++cont;
+          }
+    }
 
     // // close Python console
     // closePythonModule(&pModule, &pInitFlow, &pFindLESTerms);
@@ -621,7 +628,7 @@ protected:
     // Non-stiff, convective part of the problem
 
     // Solve for potential
-    if (pStep>0){
+    if (pStep>0 || dns_init == -1){
       phi = phiSolver->solve(vort, phi);
     }
 
@@ -630,7 +637,7 @@ protected:
     // Communicate variables
     mesh->communicate(n, vort, phi);
 
-    if (writeArakawaTerms) {
+    if (writeArakawaTerms && dns_init != -1) {
       Field3D arakawaPhiVort = bracket(phi, vort, bm);
       Field3D arakawaPhiN = bracket(phi, n, bm);
       saveArakawaTerms(pStep, time, arakawaPhiVort, arakawaPhiN,
@@ -642,7 +649,7 @@ protected:
     }
 
     // find brackets term (for explicit) or subgrid scale terms (for implicit) via StylES
-    if (pStep>=pStepStart)
+    if (dns_init != -1 && dns_init != 2)
     {
       if (implicitStylES){
         pPhiVort = bracket(phi, vort, bm);
@@ -650,7 +657,7 @@ protected:
       }
       double simtime = time;
       output_progress.print("\r");
-      rLES = findLESTerms(pStep, pStepStart, deltax, simtime, n, phi, vort, pPhiVort, pPhiN, implicitStylES, pModule, pFindLESTerms);
+      rLES = findLESTerms(pStep, deltax, simtime, n, phi, vort, pPhiVort, pPhiN, implicitStylES, pModule, pFindLESTerms);
       int N_LES = n.getNz();
       int LES_it = int(rLES[0]);
       int cont=1;

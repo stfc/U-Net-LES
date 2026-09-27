@@ -44,7 +44,7 @@ MAX_ANIMATION_FRAMES = 1000
 DEFAULT_BOUT_RESULTS_ROOT = \
 (
     Path(__file__).resolve().parent
-    / "../BOUT_repo/build_release/examples/hasegawa-wakatani"
+    / "./BOUT_runs/"
 ).resolve()
 
 
