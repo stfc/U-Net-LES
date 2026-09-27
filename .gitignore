@@ -5,6 +5,7 @@ err.txt
 fields/
 BOUT_runs/*
 !BOUT_runs/HW_template/
+!BOUT_runs/launch_hw_runs.py
 BOUT_runs/HW_template/build*/
 BOUT_runs/HW_template/data/BOUT.*
 !BOUT_runs/HW_template/data/BOUT.inp
