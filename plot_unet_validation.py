@@ -410,19 +410,19 @@ def hw_energy_components \
 (
     fields: np.ndarray, lx: float, ly: float
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Return HW energy terms using the StylES ``L**2 * sum`` convention."""
+    """Return spatially integrated HW energy terms using cell-area quadrature."""
     if min(fields.shape[-2:]) < 5:
         raise ValueError("HW energy requires at least five points per direction")
     density, potential = fields[:, 0], fields[:, 1]
     dx, dy = lx / potential.shape[-2], ly / potential.shape[-1]
     dphi_dx = periodic_derivative(potential, dx, -2)
     dphi_dy = periodic_derivative(potential, dy, -1)
-    domain_factor = lx * ly
+    cell_area = dx * dy
     return \
     (
-        0.5 * domain_factor * np.sum(density**2, axis=(-2, -1)),
-        0.5 * domain_factor * np.sum(dphi_dx**2, axis=(-2, -1)),
-        0.5 * domain_factor * np.sum(dphi_dy**2, axis=(-2, -1)),
+        0.5 * cell_area * np.sum(density**2, axis=(-2, -1)),
+        0.5 * cell_area * np.sum(dphi_dx**2, axis=(-2, -1)),
+        0.5 * cell_area * np.sum(dphi_dy**2, axis=(-2, -1)),
     )
 
 
@@ -454,7 +454,7 @@ def hw_particle_fluxes \
 
 
 def hw_energy(fields: np.ndarray, lx: float, ly: float) -> np.ndarray:
-    """Compute the StylES ``E=0.5*L**2*sum(...)`` energy convention."""
+    """Compute E = 0.5 * integral(n**2 + (dphi/dx)**2 + (dphi/dy)**2) dx dy."""
     return np.sum(hw_energy_components(fields, lx, ly), axis=0)
 
 
@@ -720,7 +720,7 @@ def save_energy_comparison \
         )
     axis.set_xlabel("simulation time")
     axis.set_xlim(left=0.0)
-    axis.set_ylabel(r"$E=\frac{1}{2}L_xL_y\sum(n^2+|\nabla\phi|^2)$")
+    axis.set_ylabel(r"$E=\frac{1}{2}\iint\left(n^2+\left(\frac{\partial\phi}{\partial x}\right)^2+\left(\frac{\partial\phi}{\partial y}\right)^2\right)\,dx\,dy$")
     axis.set_ylim(bottom=0.0)
     axis.set_title("Hasegawa–Wakatani energy versus time")
     axis.grid(True, alpha=0.3)
@@ -804,9 +804,9 @@ def save_energy_components_comparison \
     """Plot each additive HW energy component versus time."""
     component_labels = \
     (
-        r"Density: $E_n=\frac{1}{2}\langle n^2\rangle$",
-        r"Potential x-gradient: $E_{\phi,x}=\frac{1}{2}\langle(\partial_x\phi)^2\rangle$",
-        r"Potential y-gradient: $E_{\phi,y}=\frac{1}{2}\langle(\partial_y\phi)^2\rangle$",
+        r"Density: $E_n=\frac{1}{2}\iint n^2\,dx\,dy$",
+        r"Potential x-gradient: $E_{\phi,x}=\frac{1}{2}\iint(\partial_x\phi)^2\,dx\,dy$",
+        r"Potential y-gradient: $E_{\phi,y}=\frac{1}{2}\iint(\partial_y\phi)^2\,dx\,dy$",
     )
     figure, axes = plt.subplots \
     (
