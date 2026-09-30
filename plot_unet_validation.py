@@ -102,6 +102,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--lx", type=float, default=50.176)
     parser.add_argument("--ly", type=float, default=50.176)
     parser.add_argument("--dpi", type=int, default=180)
+    parser.add_argument(
+        "--final-time", type=float, default=None,
+        help="Inclusive upper simulation-time limit for all plots and animations "
+             "(default: earliest final time shared by all datasets)",
+    )
     parser.add_argument \
     (
         "--fps", type=float, default=5.0,
@@ -504,17 +509,22 @@ def order_datasets_with_reference_first(datasets, reference_hints=None):
     )
 
 
-def truncate_to_common_time(datasets):
+def truncate_to_common_time(datasets, final_time_limit=None):
     """Restrict histories to the time interval covered by every dataset."""
     start_time = max(float(times[0]) for _, times, _ in datasets)
     final_time = min(float(times[-1]) for _, times, _ in datasets)
+    if final_time_limit is not None:
+        if not np.isfinite(final_time_limit):
+            raise ValueError("final-time must be finite")
+        final_time = min(final_time, final_time_limit)
     if start_time > final_time:
         ranges = "; ".join(
             f"{label}: [{float(times[0]):g}, {float(times[-1]):g}]"
             for label, times, _ in datasets
         )
         raise ValueError(
-            f"No overlapping DNS/LES time interval. Time ranges: {ranges}."
+            f"No overlapping DNS/LES time interval through t={final_time:g}. "
+            f"Time ranges: {ranges}."
         )
     truncated = []
     for label, times, fields in datasets:
@@ -1492,6 +1502,8 @@ def save_energy_spectrum_animation \
 
 def main() -> None:
     args = parse_args()
+    if args.final_time is not None and not np.isfinite(args.final_time):
+        raise ValueError("final-time must be finite")
     if args.lx <= 0 or args.ly <= 0:
         raise ValueError("lx and ly must be positive")
     if args.batch < 0:
@@ -1527,7 +1539,7 @@ def main() -> None:
     for label, times, _ in datasets:
         print(f"Plot time range for {label}: {times[0]:g} to {times[-1]:g}")
     history_datasets = datasets
-    datasets, common_final_time = truncate_to_common_time(datasets)
+    datasets, common_final_time = truncate_to_common_time(datasets, args.final_time)
     # Use recorded times for all runs, retaining history through the common end.
     history_datasets = tuple(
         (label, times[times <= common_final_time], fields[times <= common_final_time])

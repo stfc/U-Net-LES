@@ -34,7 +34,7 @@
 \begin{abstract}
 We present a novel method which combines the invertibility of Germano's filter with generative artificial intelligence to accelerate edge plasma turbulence simulations. Rather than learning the mapping from coarse LES fields to fine DNS, the proposed method learns the mapping from coarse LES fields to Germano Differential-filtered DNS fields. We then use the inverse of Germano's filter to reconstruct the fine-scale DNS fields and hence calculate exactly the nonlinear terms in the governing equations, or the subgrid-scale terms in the LES.
 
-The method is tested on the Hasegawa--Wakatani and modified Hasegawa--Wakatani plasma turbulence models at $256^2$ and $512^2$ DNS resolutions using 2, 4 and 8 times smaller LES grids in each direction. We compare the generative model with DNS and conventional LES diagnostics, including energy, enstrophy, spectra, probability distributions, poloidal and radial fluxes and computational cost. The supplied U-Net validation results show qualitative agreement in several integral and spectral diagnostics, but also delayed transients and excess late-time enstrophy in the modified $256^2$ case. Ten-time-unit HW and mHW benchmarks show MPI task-time reductions of 4.74--48.84, with a maximum wall-clock speedup of 1.53.
+The method is tested on the Hasegawa--Wakatani and modified Hasegawa--Wakatani plasma turbulence models at $256^2$ and $512^2$ DNS resolutions using 2, 4 and 8 times smaller LES grids in each direction. We compare the generative model with DNS and conventional LES diagnostics, including energy, enstrophy, spectra, probability distributions, poloidal and radial fluxes and computational cost. Validation extends to 1000 simulation time units for HW and 100 for mHW, whose faster dynamics lead toward laminarization. Finer LES meshes retain several integral and spectral features, while the coarsest HW $256^2$ reconstruction shows substantial energy, enstrophy and transport deficits and its mHW counterpart develops excess fluctuations and transport. Thousand-time-unit HW and mHW benchmarks show MPI task-time reductions of 4.82--49.45, with a maximum wall-clock speedup of 1.55.
 \end{abstract}
 
 \begin{keyword}
@@ -390,259 +390,337 @@ $32^2$ LES $\to$ $256^2$ DNS configuration. A rapid decrease in the total object
 %----------------------------------------------------------------
 \section{Results}\label{sec:Results}
 
-We present the results of the LES for the four test cases using three different downsampling: 2, 4, and 8, for a total of twelve configurations. We looked at the energy and enstrophy evolution, the energy spectra, the poloidal and radial fluxes. The results are compared with the DNS reference solution. Each LES run is started from the DNS solution after 500 time units and evolved for 1500 time units, which corresponds $\approx 300k$ time steps. This is well beyond the 72 time units
-presented in the paper of \cite{van_de_wetering_neural_2026}.
+We compare HW and mHW at DNS resolutions of $256^2$ and $512^2$, each with three LES resolutions. The $256^2$ cases use $128^2$, $64^2$ and $32^2$ LES meshes; the $512^2$ cases use $256^2$, $128^2$ and $64^2$ meshes. These correspond to reductions by factors of two, four and eight in each direction. The updated HW diagnostics cover $0\leq t\leq1000$, whereas the mHW diagnostics cover $0\leq t\leq100$. The shorter mHW window reflects its faster dynamics and the tendency of the flow to laminarize beyond this interval. Endpoint statistics are evaluated at $t=0$ and the final time of each model; spatial comparisons remain at $t=0$.
+
+The statistical figures show energy, enstrophy and particle-flux histories, endpoint spectra and three endpoint PDFs. The mHW\_N256 plots are regenerated from the DNS dumps and saved U-Net reconstructed fields for the $128^2$, $64^2$ and $32^2$ LES meshes, using the same $0\leq t\leq100$ window. The comparisons are against DNS; no separate conventional-closure curve is present. Approximate numerical values below are read from the plotted curves.
+
+\subsection{Spatial reconstruction}
+
+Figures~\ref{fig:fields-HW_N256}--\ref{fig:fields-mHW_N512} compare the initial density, potential and vorticity fields at $t=0$ for DNS and the two finer LES meshes. These comparisons assess the spatial fidelity of the initial reconstruction. The HW panels resolve vortex structures, while the mHW potential panels show bands extended in the poloidal direction. The signed difference panels, defined as DNS minus LES, identify local reconstruction errors in each field.
+
+Only the initial spatial comparisons are shown here. They provide a qualitative assessment of reconstruction fidelity but do not establish dynamical accuracy or an integrated error norm. The subsequent evolution is assessed through the statistical diagnostics below. The coarsest LES meshes are included in those diagnostics, but are absent from the archived spatial comparison panels.
+
+\begin{figure}[p]
+\centering
+\includegraphics[width=\linewidth]{images/validation_current/HW_N256/U_comparison_frames/U_0000000.png}
+\par\smallskip
+\includegraphics[width=\linewidth]{images/validation_current/HW_N256/V_comparison_frames/V_0000000.png}
+\par\smallskip
+\includegraphics[width=\linewidth]{images/validation_current/HW_N256/P_comparison_frames/P_0000000.png}
+\par\smallskip
+\caption{HW\_N256 spatial comparisons at $t=0$: density (top), potential (middle) and vorticity (bottom). Each row shows DNS, the two finer LES reconstructions and their signed differences from DNS, as labelled. Signed differences are defined as DNS minus LES.}
+\label{fig:fields-HW_N256}
+\end{figure}
+
+\begin{figure}[p]
+\centering
+\includegraphics[width=\linewidth]{images/validation_current/HW_N512/U_comparison_frames/U_0000000.png}
+\par\smallskip
+\includegraphics[width=\linewidth]{images/validation_current/HW_N512/V_comparison_frames/V_0000000.png}
+\par\smallskip
+\includegraphics[width=\linewidth]{images/validation_current/HW_N512/P_comparison_frames/P_0000000.png}
+\par\smallskip
+\caption{HW\_N512 spatial comparisons at $t=0$: density (top), potential (middle) and vorticity (bottom). Each row shows DNS, the two finer LES reconstructions and their signed differences from DNS, as labelled. Signed differences are defined as DNS minus LES.}
+\label{fig:fields-HW_N512}
+\end{figure}
+
+\begin{figure}[p]
+\centering
+\includegraphics[width=\linewidth]{images/validation_current/mHW_N256/U_comparison_frames/U_0000000.png}
+\par\smallskip
+\includegraphics[width=\linewidth]{images/validation_current/mHW_N256/V_comparison_frames/V_0000000.png}
+\par\smallskip
+\includegraphics[width=\linewidth]{images/validation_current/mHW_N256/P_comparison_frames/P_0000000.png}
+\par\smallskip
+\caption{mHW\_N256 spatial comparisons at $t=0$: density (top), potential (middle) and vorticity (bottom). Each row shows DNS, the two finer LES reconstructions and their signed differences from DNS, as labelled. Signed differences are defined as DNS minus LES.}
+\label{fig:fields-mHW_N256}
+\end{figure}
+
+\begin{figure}[p]
+\centering
+\includegraphics[width=\linewidth]{images/validation_current/mHW_N512/U_comparison_frames/U_0000000.png}
+\par\smallskip
+\includegraphics[width=\linewidth]{images/validation_current/mHW_N512/V_comparison_frames/V_0000000.png}
+\par\smallskip
+\includegraphics[width=\linewidth]{images/validation_current/mHW_N512/P_comparison_frames/P_0000000.png}
+\par\smallskip
+\caption{mHW\_N512 spatial comparisons at $t=0$: density (top), potential (middle) and vorticity (bottom). Each row shows DNS, the two finer LES reconstructions and their signed differences from DNS, as labelled. Signed differences are defined as DNS minus LES.}
+\label{fig:fields-mHW_N512}
+\end{figure}
 
 \subsection{Energy and enstrophy}
 
-The continuum energy and generalized enstrophy are
+The diagnostics are the spatially integrated HW energy and generalized enstrophy,
 \begin{align}
- E &= \frac12\int_\Omega\left(n^2+|\nabla\phi|^2\right)\,d\mathbf{x},\\
+ E &= \frac12\int_\Omega\left(n^2+|\nabla_\perp\phi|^2\right)\,d\mathbf{x},\\
  W &= \frac12\int_\Omega(n-\zeta)^2\,d\mathbf{x}.
 \end{align}
-The supplied energy plots use the diagnostic convention
-\begin{equation}
- E_{\mathrm{plot}}=\frac{L_xL_y}{2}\sum_{i,j}
- \left[n_{ij}^2+(D_x\phi)_{ij}^2+(D_y\phi)_{ij}^2\right],
-\end{equation}
-where $D_x$ and $D_y$ are fourth-order periodic finite-difference derivatives. This differs from the usual integral quadrature by the number of diagnostic grid points, $N_xN_y$, since $\Delta x\Delta y=L_xL_y/(N_xN_y)$. The enstrophy plots instead use
-\begin{equation}
- W_{\mathrm{plot}}=\frac{\Delta x\Delta y}{2}\sum_{i,j}(n_{ij}-\zeta_{ij})^2.
-\end{equation}
-We retain the normalization of the supplied images. Absolute energy levels across diagnostic grids must therefore not be interpreted as directly comparable continuum integrals.
+The current plotting routine evaluates both with cell-area quadrature:
+\begin{align}
+ E_h &= \frac{\Delta x\Delta y}{2}\sum_{i,j}
+ \left[n_{ij}^2+(D_x\phi)_{ij}^2+(D_y\phi)_{ij}^2\right],\\
+ W_h &= \frac{\Delta x\Delta y}{2}\sum_{i,j}(n_{ij}-\zeta_{ij})^2,
+\end{align}
+where $D_x$ and $D_y$ are fourth-order periodic finite-difference derivatives. The plots label generalized enstrophy as $Z$ and vorticity as $\omega$; these correspond to $W$ and $\zeta$ here.
 
-Figures~\ref{fig:energy} and~\ref{fig:enstrophy} show that the HW reconstructions retain the overall magnitude of both diagnostics, but do not track all DNS fluctuations. For HW\_N256, the 64-grid trajectory lies below DNS over substantial intervals, while the 128-grid trajectory also exhibits timing differences. For HW\_N512, the 64-grid solution has the clearest persistent deficit; the finer reconstructions remain closer but miss part of the late DNS increase.
+Figures~\ref{fig:energy} and~\ref{fig:enstrophy} reveal a strong resolution dependence over the longer HW interval. In HW\_N256, DNS energy fluctuates around $4.1$--$5.4\times10^3$. The $128^2$ and $64^2$ LES meshes retain comparable energy levels, although their fluctuations do not remain synchronized with DNS. The $32^2$ LES instead decays rapidly to approximately $1.0$--$1.3\times10^3$ after $t\simeq150$. Its generalized enstrophy falls to roughly $2.5$--$3.0\times10^3$, compared with DNS levels of approximately $7.5$--$9.5\times10^3$. Thus the coarse reconstruction loses both diagnostics over the longer interval.
 
-For mHW\_N256, the initial decay is captured, but the subsequent recovery in energy and the enstrophy burst occur later in the reconstructions than in DNS. At late times, the reconstructed energy returns near the DNS level while the enstrophy remains substantially higher. Agreement in total energy alone therefore does not establish agreement in the density--vorticity diagnostic. In mHW\_N512, the 256- and 128-grid curves closely follow the energy and enstrophy decay over the shorter observation window, while the 64-grid curves show a larger deficit. This shorter window does not test the late evolution seen in mHW\_N256.
+For HW\_N512, DNS energy is typically $1.4$--$1.7\times10^4$, with intermittent larger excursions. The $256^2$ LES retains this range, while $128^2$ generally lies lower and $64^2$ remains near $1.1$--$1.4\times10^4$. Enstrophy shows a similar ordering: the coarsest curve is mostly around $2.3$--$2.9\times10^4$, below the DNS range of roughly $2.9$--$3.8\times10^4$. Agreement here concerns fluctuation levels and statistical behaviour rather than pointwise tracking of the turbulent trajectory.
+
+For mHW\_N256, DNS energy rises from approximately $3.55\times10^3$ to $4.33\times10^3$ near $t=30$, before declining to $3.86\times10^3$ at $t=100$. The $128^2$ and $64^2$ reconstructions end near $3.86\times10^3$ and $3.90\times10^3$, respectively. The $32^2$ reconstruction instead continues growing to $5.23\times10^3$. Its generalized enstrophy reaches $8.81\times10^3$, compared with $3.51\times10^3$ for DNS and $3.54\times10^3$ and $3.76\times10^3$ for the two finer meshes. Thus the coarsest reconstruction fails to reproduce the decay and develops excess enstrophy well before the end of the mHW validation window.
+
+In mHW\_N512, DNS energy initially rises from approximately $3.3\times10^3$ to $3.6\times10^3$ near $t=12$--$15$, then falls to about $3.0\times10^3$ at $t=100$. Generalized enstrophy similarly peaks near $5.4\times10^3$ before declining to about $2.7\times10^3$. The $256^2$ LES closely follows both trends. The $128^2$ and $64^2$ energy curves end near $2.9\times10^3$ and $2.75\times10^3$, respectively, with corresponding enstrophy deficits. This decay is consistent with the progression toward laminarization motivating the shorter mHW validation window.
 
 \begin{figure}[p]
 \centering
 \begin{subfigure}[t]{0.48\textwidth}
 \centering
-\includegraphics[width=\linewidth]{images/HW_N256_energy_vs_time.png}
-\caption{\texttt{HW\_N256}}
+\includegraphics[width=\linewidth]{images/validation_current/HW_N256/energy_vs_time.png}
+\caption{HW\_N256}
 \end{subfigure}
 \hfill
 \begin{subfigure}[t]{0.48\textwidth}
 \centering
-\includegraphics[width=\linewidth]{images/HW_N512_energy_vs_time.png}
-\caption{\texttt{HW\_N512}}
+\includegraphics[width=\linewidth]{images/validation_current/HW_N512/energy_vs_time.png}
+\caption{HW\_N512}
 \end{subfigure}
 \par\smallskip
 \begin{subfigure}[t]{0.48\textwidth}
 \centering
-\includegraphics[width=\linewidth]{images/mHW_N256_energy_vs_time.png}
-\caption{\texttt{mHW\_N256}}
+\includegraphics[width=\linewidth]{images/validation_current/mHW_N256/energy_vs_time.png}
+\caption{mHW\_N256}
 \end{subfigure}
 \hfill
 \begin{subfigure}[t]{0.48\textwidth}
 \centering
-\includegraphics[width=\linewidth]{images/mHW_N512_energy_vs_time.png}
-\caption{\texttt{mHW\_N512}}
+\includegraphics[width=\linewidth]{images/validation_current/mHW_N512/energy_vs_time.png}
+\caption{mHW\_N512}
 \end{subfigure}
-\caption{Energy histories using the $E_{\mathrm{plot}}$ normalization defined in the text. Each panel compares DNS with the coarse-grid sizes listed in its legend. The observation interval differs between the $256^2$ and $512^2$ cases.}
+\caption{Spatially integrated HW energy over $0\leq t\leq1000$ for HW and $0\leq t\leq100$ for mHW. Each available panel includes DNS and all three LES resolutions; energy uses cell-area quadrature on the diagnostic grid.}
 \label{fig:energy}
 \end{figure}
+
 \begin{figure}[p]
 \centering
 \begin{subfigure}[t]{0.48\textwidth}
 \centering
-\includegraphics[width=\linewidth]{images/HW_N256_enstrophy_vs_time.png}
-\caption{\texttt{HW\_N256}}
+\includegraphics[width=\linewidth]{images/validation_current/HW_N256/enstrophy_vs_time.png}
+\caption{HW\_N256}
 \end{subfigure}
 \hfill
 \begin{subfigure}[t]{0.48\textwidth}
 \centering
-\includegraphics[width=\linewidth]{images/HW_N512_enstrophy_vs_time.png}
-\caption{\texttt{HW\_N512}}
+\includegraphics[width=\linewidth]{images/validation_current/HW_N512/enstrophy_vs_time.png}
+\caption{HW\_N512}
 \end{subfigure}
 \par\smallskip
 \begin{subfigure}[t]{0.48\textwidth}
 \centering
-\includegraphics[width=\linewidth]{images/mHW_N256_enstrophy_vs_time.png}
-\caption{\texttt{mHW\_N256}}
+\includegraphics[width=\linewidth]{images/validation_current/mHW_N256/enstrophy_vs_time.png}
+\caption{mHW\_N256}
 \end{subfigure}
 \hfill
 \begin{subfigure}[t]{0.48\textwidth}
 \centering
-\includegraphics[width=\linewidth]{images/mHW_N512_enstrophy_vs_time.png}
-\caption{\texttt{mHW\_N512}}
+\includegraphics[width=\linewidth]{images/validation_current/mHW_N512/enstrophy_vs_time.png}
+\caption{mHW\_N512}
 \end{subfigure}
-\caption{Generalized enstrophy histories, $W_{\mathrm{plot}}=\frac12\Delta x\Delta y\sum(n-\zeta)^2$. The delayed transient and elevated late-time enstrophy in mHW\_N256 contrast with the closer agreement over the shorter mHW\_N512 interval.}
+\caption{Generalized enstrophy over $0\leq t\leq1000$ for HW and $0\leq t\leq100$ for mHW. The coarse HW reconstructions have reduced enstrophy; the $32^2$ mHW\_N256 reconstruction instead develops excess enstrophy, while mHW\_N512 shows decay after an initial peak.}
 \label{fig:enstrophy}
 \end{figure}
 
 \subsection{Spectral statistics}
 
-The archived spectra are shell sums of the total HW energy, including both density and potential-gradient contributions, rather than kinetic energy alone:
+The radial shell spectra include density and potential-gradient energy,
 \begin{equation}
  E(k_s)=\frac12\sum_{\mathbf{k}\in\mathcal{S}_s}
  \left(|\widehat n_{\mathbf{k}}|^2+|\mathbf{k}|^2|\widehat\phi_{\mathbf{k}}|^2\right),
 \end{equation}
-where the Fourier coefficients are normalized by $N_xN_y$ and $\mathcal{S}_s$ denotes a radial wavenumber shell. This spectral normalization is distinct from that of $E_{\mathrm{plot}}$.
+where Fourier coefficients are normalized by the number of grid points and $\mathcal{S}_s$ is a radial wavenumber shell. This is a spectral energy density convention; summing the unsmoothed shells gives energy per unit area with spectral derivatives, rather than the finite-difference spatial integral above.
 
-Figure~\ref{fig:spectra} includes all three available initial/final spectrum images. No corresponding initial/final image is present for HW\_N512, so no final-spectrum conclusion is drawn for that case. Initial spectra nearly overlap over the energetic scales. At the final time, HW\_N256 retains a similar spectral shape, with differences at the lowest wavenumbers and in the dissipative tail. For mHW\_N256, the reconstructions retain more high-wavenumber energy than DNS, consistent with the elevated late-time enstrophy. For mHW\_N512, agreement is close over the energetic scales, but the reconstructed tails depart from DNS at high wavenumbers. The vertical reference marks the 64-grid Nyquist wavenumber, not a measured boundary of accurate reconstruction.
+Figure~\ref{fig:spectra} compares the initial and final spectra. Initial spectra nearly overlap across the energetic modes. At $t=1000$, HW\_N256 with a $32^2$ LES mesh has a pronounced deficit across low and intermediate wavenumbers, consistent with its reduced integrated energy. A weak high-wavenumber tail remains, but does not compensate for the loss of energetic scales. The $128^2$ and $64^2$ LES spectra retain the main peak and broad decay more closely. HW\_N512 preserves the broad spectral shape across all three LES meshes, with differences at low wavenumbers, around the peak and in the weak dissipative tail. At $t=100$, the mHW\_N512 spectra remain close through the principal energy-containing range, with smaller differences toward the tail.
+
+For mHW\_N256, the two finer LES meshes retain the final DNS spectral shape closely. The $32^2$ reconstruction has excess energy at intermediate and high wavenumbers, particularly for $k\gtrsim1$, consistent with its growing generalized enstrophy. Agreement near the principal spectral peak therefore does not imply correct small-scale behaviour.
+
+Spectral agreement on logarithmic axes should be assessed together with the integrated diagnostics: similar shapes can coexist with energy deficits. The dotted line marks the $64^2$-grid Nyquist wavenumber in all panels; it is a fixed reference, not the cutoff of every LES mesh or a measured accuracy threshold.
 
 \begin{figure}[p]
 \centering
 \begin{subfigure}[t]{0.98\textwidth}
 \centering
-\includegraphics[width=\linewidth,height=0.235\textheight,keepaspectratio]{images/HW_N256_hw_energy_spectra_initial_final.png}
-\caption{\texttt{HW\_N256}}
+\includegraphics[width=\linewidth,height=0.175\textheight,keepaspectratio]{images/validation_current/HW_N256/hw_energy_spectra_initial_final.png}
+\caption{HW\_N256}
 \end{subfigure}
 \par\smallskip
 \begin{subfigure}[t]{0.98\textwidth}
 \centering
-\includegraphics[width=\linewidth,height=0.235\textheight,keepaspectratio]{images/mHW_N256_hw_energy_spectra_initial_final.png}
-\caption{\texttt{mHW\_N256}}
+\includegraphics[width=\linewidth,height=0.175\textheight,keepaspectratio]{images/validation_current/HW_N512/hw_energy_spectra_initial_final.png}
+\caption{HW\_N512}
 \end{subfigure}
 \par\smallskip
 \begin{subfigure}[t]{0.98\textwidth}
 \centering
-\includegraphics[width=\linewidth,height=0.235\textheight,keepaspectratio]{images/mHW_N512_hw_energy_spectra_initial_final.png}
-\caption{\texttt{mHW\_N512}}
+\includegraphics[width=\linewidth,height=0.175\textheight,keepaspectratio]{images/validation_current/mHW_N256/U_pdf_vs_time.png}
+\caption{mHW\_N256}
 \end{subfigure}
-\caption{Initial (left) and final (right) shell-summed HW energy spectra for the available cases. Times are those printed in each image: for mHW\_N512 the final DNS snapshot is at $t=99.001$ and the reconstructed snapshots are at $t=100$. The dotted vertical line marks the 64-grid Nyquist wavenumber. HW\_N512 is omitted because its requested endpoint-spectrum image is unavailable.}
+\par\smallskip
+\begin{subfigure}[t]{0.98\textwidth}
+\centering
+\includegraphics[width=\linewidth,height=0.175\textheight,keepaspectratio]{images/validation_current/mHW_N512/hw_energy_spectra_initial_final.png}
+\caption{mHW\_N512}
+\end{subfigure}
+\caption{Initial ($t=0$, left) and final ($t=1000$ for HW and $t=100$ for mHW, right) shell-summed HW energy spectra for the available cases and all three LES resolutions. The dotted vertical line marks the $64^2$-grid Nyquist wavenumber.}
 \label{fig:spectra}
 \end{figure}
 
 \subsection{Probability-density functions}
 
-Figures~\ref{fig:pdf-density}--\ref{fig:pdf-vorticity} compare spatial probability-density functions (PDFs) of density, electrostatic potential and vorticity. The saved channels are $U=n$, $V=\phi$ and $P=\zeta$; the vorticity axes use the equivalent symbol $\omega$. Despite their filenames, these plots contain initial and final snapshot PDFs, not continuously sampled PDF histories or time-averaged distributions.
+Figures~\ref{fig:pdf-density}--\ref{fig:pdf-vorticity} compare spatial PDFs at the two endpoints. The stored channels $U$, $V$ and $P$ denote $n$, $\phi$ and $\zeta$, respectively. Despite their filenames, these are endpoint distributions rather than PDFs accumulated over time.
 
-The initial distributions nearly coincide in all four cases. For HW, the final PDFs retain similar single-peaked shapes, although peak heights and widths differ, especially for the coarsest HW\_N512 reconstruction. In mHW\_N256, larger final discrepancies appear: the DNS density distribution is more sharply peaked, and the potential and vorticity distributions exhibit structures whose locations and amplitudes differ between trajectories. In mHW\_N512, the final distributions remain closer over the shorter interval, including the broad potential distribution and its pronounced peaks. Agreement of these one-point distributions does not establish agreement of spatial organization or density--potential cross-correlations. The linear-scale PDFs do not support a quantitative claim about rare-event tail probabilities.
+Initial PDFs nearly overlap for all resolutions. At $t=1000$, the HW\_N256 $32^2$ LES has much narrower density and potential distributions: their central PDF peaks reach approximately $0.6$, compared with about $0.28$ for DNS. The vorticity PDF also becomes more sharply peaked. These changes agree with the loss of field amplitude indicated by energy and enstrophy. The two finer LES meshes retain broader distributions closer to DNS. For HW\_N512, the final distributions remain broadly similar, although the coarsest mesh sharpens the central vorticity peak and changes the density and potential peaks.
+
+At $t=100$, mHW\_N512 retains a single dominant density peak, a broad structured potential PDF and a two-peaked vorticity PDF. The LES curves reproduce these qualitative shapes. Coarser density reconstructions have higher central peaks, while the potential and vorticity distributions differ locally around their peaks and the intervening troughs. Agreement of these spatial distributions does not imply that the instantaneous fields remain phase-aligned.
+
+In mHW\_N256, the $128^2$ and $64^2$ reconstructions retain the final density and vorticity PDFs more closely than $32^2$. At $t=100$, the coarsest density PDF has a lower central peak (about $0.37$ versus $0.53$ for DNS) and broader tails; its vorticity PDF likewise broadens, with a peak near $0.26$ versus $0.39$ for DNS. The potential PDF remains broad and structured, with local differences between all reconstructions and DNS. These changes support the energy and enstrophy evidence of excessive fluctuations on the coarsest mesh.
+
+These one-point statistics complement the field comparisons but do not measure spatial phase agreement or density--potential correlations. Their agreement can therefore coexist with differences in transport. The displayed linear-scale PDFs also do not establish quantitative accuracy for rare-event tails.
 
 \begin{figure}[p]
 \centering
 \begin{subfigure}[t]{0.98\textwidth}
 \centering
-\includegraphics[width=\linewidth,height=0.18\textheight,keepaspectratio]{images/HW_N256_U_pdf_vs_time.png}
-\caption{\texttt{HW\_N256}}
+\includegraphics[width=\linewidth,height=0.175\textheight,keepaspectratio]{images/validation_current/HW_N256/U_pdf_vs_time.png}
+\caption{HW\_N256}
 \end{subfigure}
 \par\smallskip
 \begin{subfigure}[t]{0.98\textwidth}
 \centering
-\includegraphics[width=\linewidth,height=0.18\textheight,keepaspectratio]{images/HW_N512_U_pdf_vs_time.png}
-\caption{\texttt{HW\_N512}}
+\includegraphics[width=\linewidth,height=0.175\textheight,keepaspectratio]{images/validation_current/HW_N512/U_pdf_vs_time.png}
+\caption{HW\_N512}
 \end{subfigure}
 \par\smallskip
 \begin{subfigure}[t]{0.98\textwidth}
 \centering
-\includegraphics[width=\linewidth,height=0.18\textheight,keepaspectratio]{images/mHW_N256_U_pdf_vs_time.png}
-\caption{\texttt{mHW\_N256}}
+\includegraphics[width=\linewidth,height=0.175\textheight,keepaspectratio]{images/validation_current/mHW_N256/U_pdf_vs_time.png}
+\caption{mHW\_N256}
 \end{subfigure}
 \par\smallskip
 \begin{subfigure}[t]{0.98\textwidth}
 \centering
-\includegraphics[width=\linewidth,height=0.18\textheight,keepaspectratio]{images/mHW_N512_U_pdf_vs_time.png}
-\caption{\texttt{mHW\_N512}}
+\includegraphics[width=\linewidth,height=0.175\textheight,keepaspectratio]{images/validation_current/mHW_N512/U_pdf_vs_time.png}
+\caption{mHW\_N512}
 \end{subfigure}
-\caption{Initial (left) and final (right) spatial PDFs of density $n$. The final target is $t=1000$ for the $256^2$ cases and $t=100$ for HW\_N512. For mHW\_N512, the final DNS sample is at $t=99.001$ and reconstruction samples are at $t=99$; actual sample times are printed in the legends.}
+\caption{Spatial PDFs of density $n$ at $t=0$ (left) and $t=1000$ for HW or $t=100$ for mHW (right). Each available case includes DNS and three LES resolutions.}
 \label{fig:pdf-density}
 \end{figure}
+
 \begin{figure}[p]
 \centering
 \begin{subfigure}[t]{0.98\textwidth}
 \centering
-\includegraphics[width=\linewidth,height=0.18\textheight,keepaspectratio]{images/HW_N256_V_pdf_vs_time.png}
-\caption{\texttt{HW\_N256}}
+\includegraphics[width=\linewidth,height=0.175\textheight,keepaspectratio]{images/validation_current/HW_N256/V_pdf_vs_time.png}
+\caption{HW\_N256}
 \end{subfigure}
 \par\smallskip
 \begin{subfigure}[t]{0.98\textwidth}
 \centering
-\includegraphics[width=\linewidth,height=0.18\textheight,keepaspectratio]{images/HW_N512_V_pdf_vs_time.png}
-\caption{\texttt{HW\_N512}}
+\includegraphics[width=\linewidth,height=0.175\textheight,keepaspectratio]{images/validation_current/HW_N512/V_pdf_vs_time.png}
+\caption{HW\_N512}
 \end{subfigure}
 \par\smallskip
 \begin{subfigure}[t]{0.98\textwidth}
 \centering
-\includegraphics[width=\linewidth,height=0.18\textheight,keepaspectratio]{images/mHW_N256_V_pdf_vs_time.png}
-\caption{\texttt{mHW\_N256}}
+\includegraphics[width=\linewidth,height=0.175\textheight,keepaspectratio]{images/validation_current/mHW_N256/V_pdf_vs_time.png}
+\caption{mHW\_N256}
 \end{subfigure}
 \par\smallskip
 \begin{subfigure}[t]{0.98\textwidth}
 \centering
-\includegraphics[width=\linewidth,height=0.18\textheight,keepaspectratio]{images/mHW_N512_V_pdf_vs_time.png}
-\caption{\texttt{mHW\_N512}}
+\includegraphics[width=\linewidth,height=0.175\textheight,keepaspectratio]{images/validation_current/mHW_N512/V_pdf_vs_time.png}
+\caption{mHW\_N512}
 \end{subfigure}
-\caption{Initial (left) and final (right) spatial PDFs of electrostatic potential $\phi$. The final target is $t=1000$ for the $256^2$ cases and $t=100$ for HW\_N512. For mHW\_N512, the final DNS sample is at $t=99.001$ and reconstruction samples are at $t=99$; actual sample times are printed in the legends.}
+\caption{Spatial PDFs of electrostatic potential $\phi$ at $t=0$ (left) and $t=1000$ for HW or $t=100$ for mHW (right). Each available case includes DNS and three LES resolutions.}
 \label{fig:pdf-potential}
 \end{figure}
+
 \begin{figure}[p]
 \centering
 \begin{subfigure}[t]{0.98\textwidth}
 \centering
-\includegraphics[width=\linewidth,height=0.18\textheight,keepaspectratio]{images/HW_N256_P_pdf_vs_time.png}
-\caption{\texttt{HW\_N256}}
+\includegraphics[width=\linewidth,height=0.175\textheight,keepaspectratio]{images/validation_current/HW_N256/P_pdf_vs_time.png}
+\caption{HW\_N256}
 \end{subfigure}
 \par\smallskip
 \begin{subfigure}[t]{0.98\textwidth}
 \centering
-\includegraphics[width=\linewidth,height=0.18\textheight,keepaspectratio]{images/HW_N512_P_pdf_vs_time.png}
-\caption{\texttt{HW\_N512}}
+\includegraphics[width=\linewidth,height=0.175\textheight,keepaspectratio]{images/validation_current/HW_N512/P_pdf_vs_time.png}
+\caption{HW\_N512}
 \end{subfigure}
 \par\smallskip
 \begin{subfigure}[t]{0.98\textwidth}
 \centering
-\includegraphics[width=\linewidth,height=0.18\textheight,keepaspectratio]{images/mHW_N256_P_pdf_vs_time.png}
-\caption{\texttt{mHW\_N256}}
+\includegraphics[width=\linewidth,height=0.175\textheight,keepaspectratio]{images/validation_current/mHW_N256/P_pdf_vs_time.png}
+\caption{mHW\_N256}
 \end{subfigure}
 \par\smallskip
 \begin{subfigure}[t]{0.98\textwidth}
 \centering
-\includegraphics[width=\linewidth,height=0.18\textheight,keepaspectratio]{images/mHW_N512_P_pdf_vs_time.png}
-\caption{\texttt{mHW\_N512}}
+\includegraphics[width=\linewidth,height=0.175\textheight,keepaspectratio]{images/validation_current/mHW_N512/P_pdf_vs_time.png}
+\caption{mHW\_N512}
 \end{subfigure}
-\caption{Initial (left) and final (right) spatial PDFs of vorticity $\zeta$ (labelled $\omega$ in the images). The final target is $t=1000$ for the $256^2$ cases and $t=100$ for HW\_N512. For mHW\_N512, the final DNS sample is at $t=99.001$ and reconstruction samples are at $t=99$; actual sample times are printed in the legends.}
+\caption{Spatial PDFs of vorticity $\zeta$ (labelled $\omega$ in the plots) at $t=0$ (left) and $t=1000$ for HW or $t=100$ for mHW (right). Each available case includes DNS and three LES resolutions.}
 \label{fig:pdf-vorticity}
 \end{figure}
 
 \subsection{Transport diagnostics}
 
-The archived particle-flux histories use the non-zonal density $n'=n-\langle n\rangle_y$ and the velocities
-\begin{equation}
- v_x=-\partial_y\phi,\qquad v_y=\partial_x\phi.
-\end{equation}
-The plotted quantities are domain-averaged turbulent fluxes,
+The flux diagnostic removes the poloidal mean density, $n'=n-\langle n\rangle_y$, and uses $v_x=-\partial_y\phi$ and $v_y=\partial_x\phi$. The displayed domain averages are
 \begin{equation}
  \overline\Gamma_x=-\langle n'\partial_y\phi\rangle_{x,y},\qquad
  \overline\Gamma_y=\langle n'\partial_x\phi\rangle_{x,y}.
 \end{equation}
-Here the prime denotes removal of the poloidal mean, distinct from the LES spatial filter denoted by a tilde elsewhere. The poloidal flux therefore excludes transport by the zonal density component.
+The same fourth-order periodic derivatives used for energy enter the flux calculation. A zonal velocity contributes no net flux to this diagnostic because the poloidal mean of $n'$ vanishes.
 
-Figure~\ref{fig:particle-flux} shows positive radial flux throughout the plotted intervals. In the HW cases, the reconstructions preserve its overall scale, but the coarsest solution generally underpredicts it and the temporal fluctuations differ from DNS. For mHW\_N256, the initial radial-flux decay is reproduced, while the subsequent burst is delayed, in parallel with the energy and enstrophy transients. The mHW\_N512 radial-flux decay is followed more closely over the available interval. Poloidal flux is smaller and changes sign; its detailed timing is less consistently reproduced, particularly after the initial transient. These results support qualitative transport agreement in some intervals, but not a uniform error bound or a quantified temporal correlation.
+Figure~\ref{fig:particle-flux} shows positive radial transport in all available cases. For HW\_N256, DNS fluctuates mainly around $0.11$--$0.15$, while the $32^2$ LES drops to approximately $0.04$ after the initial transient. The $128^2$ and $64^2$ meshes retain substantially more radial transport, although the latter is generally below DNS. In HW\_N512, DNS and the finest LES fluctuate mostly around $0.7$--$0.9$, whereas the coarsest mesh is typically around $0.55$--$0.65$. These deficits accompany the lower energy and enstrophy of the coarse solutions.
+
+For mHW\_N256, DNS radial flux decreases from approximately $0.12$ to $0.026$ by $t=100$. The $128^2$ and $64^2$ reconstructions broadly follow this decline but end higher, at approximately $0.035$ and $0.033$. The $32^2$ reconstruction remains strongly fluctuating around $0.07$--$0.10$ after its initial transient and ends near $0.090$, more than three times the DNS value. Its excess transport accompanies the growth of energy and enstrophy rather than the DNS tendency toward laminarization. The finer meshes capture the early poloidal-flux extrema more closely; the coarsest mesh differs substantially in both timing and sign.
+
+The mHW\_N512 radial flux peaks near $0.10$ early in the evolution and decreases to approximately $0.02$--$0.03$ by $t=100$. The finest LES follows the overall decline closely, and coarser meshes generally underpredict the early and intermediate transport. The marked decrease in transport accompanies the decay of generalized enstrophy as the flow evolves toward laminarization.
+
+Poloidal transport fluctuates about zero and is smaller than radial transport. In HW\_N256, the $32^2$ LES strongly suppresses these fluctuations after the transient; the two finer meshes retain larger excursions but do not reproduce every DNS event. In HW\_N512, all curves remain strongly time dependent, with differences in the timing and amplitude of individual excursions. The mHW\_N512 LES curves capture the early negative excursions near $t\simeq13$ and $t\simeq27$ qualitatively, but differ from DNS later, including in sign. These comparisons distinguish preservation of the overall transport trend from agreement of instantaneous fluxes.
 
 \begin{figure}[p]
 \centering
 \begin{subfigure}[t]{0.48\textwidth}
 \centering
-\includegraphics[width=\linewidth]{images/HW_N256_particle_flux_vs_time.png}
-\caption{\texttt{HW\_N256}}
+\includegraphics[width=\linewidth]{images/validation_current/HW_N256/particle_flux_vs_time.png}
+\caption{HW\_N256}
 \end{subfigure}
 \hfill
 \begin{subfigure}[t]{0.48\textwidth}
 \centering
-\includegraphics[width=\linewidth]{images/HW_N512_particle_flux_vs_time.png}
-\caption{\texttt{HW\_N512}}
+\includegraphics[width=\linewidth]{images/validation_current/HW_N512/particle_flux_vs_time.png}
+\caption{HW\_N512}
 \end{subfigure}
 \par\smallskip
 \begin{subfigure}[t]{0.48\textwidth}
 \centering
-\includegraphics[width=\linewidth]{images/mHW_N256_particle_flux_vs_time.png}
-\caption{\texttt{mHW\_N256}}
+\includegraphics[width=\linewidth]{images/validation_current/mHW_N256/particle_flux_vs_time.png}
+\caption{mHW\_N256}
 \end{subfigure}
 \hfill
 \begin{subfigure}[t]{0.48\textwidth}
 \centering
-\includegraphics[width=\linewidth]{images/mHW_N512_particle_flux_vs_time.png}
-\caption{\texttt{mHW\_N512}}
+\includegraphics[width=\linewidth]{images/validation_current/mHW_N512/particle_flux_vs_time.png}
+\caption{mHW\_N512}
 \end{subfigure}
-\caption{Domain-averaged turbulent particle-flux histories. Each case shows radial flux above and poloidal flux below, using the non-zonal density $n'=n-\langle n\rangle_y$. The original plots denote this fluctuation by $\widetilde n$. DNS and reconstruction labels follow the supplied legends.}
+\caption{Domain-averaged radial (upper axes) and poloidal (lower axes) turbulent particle flux over $0\leq t\leq1000$ for HW and $0\leq t\leq100$ for mHW. Density fluctuations are defined relative to the poloidal mean. All three LES resolutions are shown for each available case.}
 \label{fig:particle-flux}
 \end{figure}
+
 \subsection{Computational performance}
 
-Wall-clock runtimes and MPI task counts were extracted from the final \texttt{Run time} entry and the \texttt{Processor number} entry, respectively, in the HW and mHW \texttt{BOUT.log.0} files under \texttt{BOUT\_runs/*/data}. Each LES run is compared with the DNS run for the same model and reference resolution. The current logs, recorded on 29 September 2026, cover ten simulation time units for all 16 completed runs. DNS uses 32 MPI tasks and LES uses one. Raw and duration-normalized wall-clock speedups therefore coincide. We define:
+Wall-clock runtimes and MPI task counts were extracted from the final \texttt{Run time} entry and the \texttt{Processor number} entry, respectively, in the HW and mHW \texttt{BOUT.log.0} files. Each LES run is compared with the DNS run for the same model and reference resolution. The timing logs cover 1000 simulation time units for all 16 completed runs. These benchmark durations are distinct from the mHW statistical validation window, which is restricted to the first 100 time units. DNS uses 32 MPI tasks and LES uses one. Raw and duration-normalized wall-clock speedups therefore coincide. We define:
 \begin{equation}
     S_{\mathrm{raw}}=\frac{T_{\mathrm{DNS}}}{T_{\mathrm{LES}}},
     \qquad
@@ -658,54 +736,46 @@ where $T$ is wall-clock runtime and $P$ is the number of MPI tasks. Here $S_{\ma
 \begin{table}[ht]
 \centering
 \small
-\caption{Current HW and mHW runtimes extracted from \texttt{BOUT.log.0}. All runs cover ten simulation time units. Each DNS row is the baseline for its LES rows. Times are the integer-second values reported by BOUT++; $S_{\mathrm{raw}}=S_{\mathrm{wall}}$ for these equal durations.}
+\caption{Current HW and mHW runtimes extracted from \texttt{BOUT.log.0}. All runs cover 1000 simulation time units. Each DNS row is the baseline for its LES rows. Runtimes are displayed in minutes (m) and seconds (s), retaining the one-second precision reported by BOUT++; $S_{\mathrm{raw}}=S_{\mathrm{wall}}$ for these equal durations.}
 \label{tab:performance}
 \begin{tabular}{lrrrr}
 \toprule
-Run & MPI tasks & Runtime [s] & $S_{\mathrm{wall}}$ & $S_{\mathrm{MPI}}$ \\
+Run & MPI tasks & Runtime & $S_{\mathrm{wall}}$ & $S_{\mathrm{MPI}}$ \\
 \midrule
-HW\_DNS256 & 32 & 3 & 1.00 & 1.00 \\
-HW\_DNS256\_LES32 & 1 & 6 & 0.50 & 16.00 \\
-HW\_DNS256\_LES64 & 1 & 7 & 0.43 & 13.71 \\
-HW\_DNS256\_LES128 & 1 & 20 & 0.15 & 4.80 \\
+HW\_DNS256 & 32 & 4~m 36~s & 1.00 & 1.00 \\
+HW\_DNS256\_LES32 & 1 & 7~m 19~s & 0.63 & 20.12 \\
+HW\_DNS256\_LES64 & 1 & 12~m 42~s & 0.36 & 11.59 \\
+HW\_DNS256\_LES128 & 1 & 27~m 26~s & 0.17 & 5.37 \\
 \midrule
-HW\_DNS512 & 32 & 32 & 1.00 & 1.00 \\
-HW\_DNS512\_LES64 & 1 & 26 & 1.23 & 39.38 \\
-HW\_DNS512\_LES128 & 1 & 61 & 0.52 & 16.79 \\
-HW\_DNS512\_LES256 & 1 & 216 & 0.15 & 4.74 \\
+HW\_DNS512 & 32 & 59~m 3~s & 1.00 & 1.00 \\
+HW\_DNS512\_LES64 & 1 & 42~m 25~s & 1.39 & 44.55 \\
+HW\_DNS512\_LES128 & 1 & 92~m 5~s & 0.64 & 20.52 \\
+HW\_DNS512\_LES256 & 1 & 320~m 41~s & 0.18 & 5.89 \\
 \midrule
-mHW\_DNS256 & 32 & 5 & 1.00 & 1.00 \\
-mHW\_DNS256\_LES32 & 1 & 8 & 0.62 & 20.00 \\
-mHW\_DNS256\_LES64 & 1 & 12 & 0.42 & 13.33 \\
-mHW\_DNS256\_LES128 & 1 & 28 & 0.18 & 5.71 \\
+mHW\_DNS256 & 32 & 6~m 13~s & 1.00 & 1.00 \\
+mHW\_DNS256\_LES32 & 1 & 21~m 27~s & 0.29 & 9.27 \\
+mHW\_DNS256\_LES64 & 1 & 17~m 50~s & 0.35 & 11.16 \\
+mHW\_DNS256\_LES128 & 1 & 41~m 17~s & 0.15 & 4.82 \\
 \midrule
-mHW\_DNS512 & 32 & 29 & 1.00 & 1.00 \\
-mHW\_DNS512\_LES64 & 1 & 19 & 1.53 & 48.84 \\
-mHW\_DNS512\_LES128 & 1 & 37 & 0.78 & 25.08 \\
-mHW\_DNS512\_LES256 & 1 & 126 & 0.23 & 7.37 \\
+mHW\_DNS512 & 32 & 42~m 42~s & 1.00 & 1.00 \\
+mHW\_DNS512\_LES64 & 1 & 27~m 38~s & 1.55 & 49.45 \\
+mHW\_DNS512\_LES128 & 1 & 63~m 1~s & 0.68 & 21.68 \\
+mHW\_DNS512\_LES256 & 1 & 185~m 37~s & 0.23 & 7.36 \\
 \bottomrule
 \end{tabular}
 \end{table}
 
-Table~\ref{tab:performance} shows MPI task-time reductions of 4.74--48.84 for the LES runs. HW\_DNS512\_LES64 and mHW\_DNS512\_LES64 achieve wall-clock speedups of 1.23 and 1.53, respectively. All other LES runs have $S_{\mathrm{wall}}<1$. These short measurements use integer-second runtimes, so rounding is significant for the fastest runs. MPI task-time does not include accelerator resource costs, and these measurements do not quantify training cost or memory usage.
-%----------------------------------------------------------------
-%
-%
-%
-%
-%
-%
-%
-%----------------------------------------------------------------
-\section{Discussion}
+Table~\ref{tab:performance} shows MPI task-time reductions of 4.82--49.45 for the LES runs. The HW and mHW $512^2$ cases with $64^2$ LES meshes achieve wall-clock speedups of 1.39 and 1.55, respectively. All other LES runs have $S_{\mathrm{wall}}<1$. These measurements use integer-second runtimes and cover 1000 simulation time units per run. MPI task-time does not include accelerator resource costs, and these measurements do not quantify training cost or memory usage.
 
+
+\subsection{Discussion}
 The supplied results assess the evolution of reconstructed-field diagnostics; they do not compare against direct prediction of sub-grid terms. Physical consistency remains an important constraint on the reconstruction. In particular, calculating vorticity from the generated electrostatic potential enforces the elliptic relationship
 \[
 \zeta=\nabla^2\phi
 \]
 and prevents independent-field drift.
 
-The modified $256^2$ case highlights a limitation of relying on energy alone: near-DNS energy can coexist with excess enstrophy, altered PDFs and delayed transport bursts. The closer agreement of the modified $512^2$ case applies to a much shorter interval and does not establish improved long-time stability with increasing resolution.
+The longer HW validation exposes a marked failure of the $32^2$ reconstruction for HW\_N256: energy, generalized enstrophy and radial transport all collapse to levels well below DNS, and the endpoint PDFs become too narrow. Finer meshes retain more of the statistical behaviour, although instantaneous trajectories diverge. The mHW\_N512 results instead follow an early growth phase and subsequent decay through $t=100$, consistent with faster evolution toward laminarization. The different validation windows should therefore be interpreted in relation to the different dynamics, rather than as equal-duration stationary turbulence tests. The corrected mHW\_N256 diagnostics show that its $32^2$ reconstruction instead develops excess energy, enstrophy and radial transport, failing to reproduce the DNS decay. The two finer meshes retain the integral trends much more closely.
 
 The approach has several limitations. First, the generator may produce nonphysical small-scale structures outside the training distribution. Second, long-time stability is not guaranteed solely by minimizing instantaneous reconstruction error. Finally, the present method is limited by the validity of the chosen filter and by the statistical coverage of the training dataset.
 %----------------------------------------------------------------
@@ -725,10 +795,10 @@ The method was tested with the HW\_N256, HW\_N512, mHW\_N256 and mHW\_N512 confi
 
 \begin{itemize}
     \item the generative model reconstructs the dominant spatial structures of the DNS fields;
-    \item the learned fields retain several large-scale statistical features, while high-wavenumber spectral tails and late-time mHW\_N256 enstrophy show discrepancies;
-    \item radial-flux trends are reproduced in several intervals, but burst timing and poloidal-flux fluctuations differ from DNS;
-    \item the ten-time-unit HW and mHW benchmarks show MPI task-time reductions of 4.74--48.84, with a maximum wall-clock speedup of 1.53 for mHW\_DNS512\_LES64;
-    \item the mHW\_N256 trajectory exhibits pronounced late-time discrepancies; unequal observation windows preclude a controlled resolution ranking.
+    \item the finer HW reconstructions retain several statistical features over 1000 time units, while the $32^2$ LES for HW\_N256 substantially underpredicts energy, enstrophy and radial transport;
+    \item the mHW\_N512 reconstruction captures the growth and subsequent decay through 100 time units; this shorter window reflects faster dynamics and the tendency toward laminarization;
+    \item the thousand-time-unit HW and mHW benchmarks show MPI task-time reductions of 4.82--49.45, with a maximum wall-clock speedup of 1.55 for mHW\_DNS512\_LES64;
+    \item the $32^2$ mHW\_N256 reconstruction develops excess energy, enstrophy and radial transport, whereas the finer meshes follow the DNS decay more closely; finite-window agreement does not establish stability beyond the tested conditions.
 \end{itemize}
 
 Future work will investigate parameter-conditioned generators, explicit enforcement of conservation laws, uncertainty quantification and extension to fully three-dimensional edge-plasma models such as Hermes-3.
