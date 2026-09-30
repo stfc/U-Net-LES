@@ -99,12 +99,6 @@ def parse_args() -> argparse.Namespace:
         "--bout-y-index", type=int, default=0,
         help="Interior y-plane for BOUT (t,x,y,z) fields (default: 0)",
     )
-    parser.add_argument(
-        "--tLES-start", "--tLES_start", dest="t_start", type=float, default=500.0,
-        help="Add this time offset to LES histories (e.g. 500 for a DNS restart "
-             "at t=500). DNS retains its original times; comparisons use the "
-             "shared time interval. Default: 500 (use 0 for unshifted LES).",
-    )
     parser.add_argument("--lx", type=float, default=50.176)
     parser.add_argument("--ly", type=float, default=50.176)
     parser.add_argument("--dpi", type=int, default=180)
@@ -129,11 +123,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument \
     (
         "--smooth-spectrum",
-        action="store_true",
+        action=argparse.BooleanOptionalAction,
+        default=True,
         help= \
         (
             "Smooth energy spectra with the StylES five-bin moving average; "
-            "the first four bins remain unsmoothed"
+            "the first four bins remain unsmoothed (enabled by default)"
         ),
     )
     parser.add_argument \
@@ -489,15 +484,6 @@ def dataset_label(path: Path) -> str:
     return label_path.name.replace("results_U-Net_", "")
 
 
-def shift_les_times(datasets, t_start):
-    """Shift models after reference ordering; a lone non-DNS input is LES."""
-    return tuple(
-        (label, times + t_start if index > 0 or
-         (len(datasets) == 1 and label != "DNS") else times, fields)
-        for index, (label, times, fields) in enumerate(datasets)
-    )
-
-
 def order_datasets_with_reference_first(datasets, reference_hints=None):
     """Put the DNS dataset first, falling back to the original first dataset."""
     if reference_hints is None:
@@ -528,9 +514,7 @@ def truncate_to_common_time(datasets):
             for label, times, _ in datasets
         )
         raise ValueError(
-            "No overlapping DNS/LES time interval after applying --tLES-start. "
-            f"Time ranges: {ranges}. The offset is added only to LES times; "
-            "use a DNS history covering the shifted LES interval."
+            f"No overlapping DNS/LES time interval. Time ranges: {ranges}."
         )
     truncated = []
     for label, times, fields in datasets:
@@ -575,7 +559,7 @@ def save_centerpoint_history(datasets, output_path: Path, dpi: int) -> Path:
         axis.set_ylabel(field_label)
         axis.grid(True, alpha=0.3)
     axes[0, 0].legend()
-    axes[-1, 0].set_xlabel("simulation time")
+    axes[-1, 0].set_xlabel(r"$\omega_{ci}t$")
     axes[-1, 0].set_xlim(left=0.0)
     figure.suptitle("Domain-center field trajectories")
     figure.tight_layout()
@@ -611,7 +595,7 @@ def save_field_extrema_history(datasets, output_path: Path, dpi: int) -> Path:
         axis.set_ylabel(field_label)
         axis.grid(True, alpha=0.3)
     axes[0, 0].legend(ncol=2)
-    axes[-1, 0].set_xlabel("simulation time")
+    axes[-1, 0].set_xlabel(r"$\omega_{ci}t$")
     axes[-1, 0].set_xlim(left=0.0)
     figure.suptitle("Field minima and maxima versus time")
     figure.tight_layout()
@@ -718,9 +702,9 @@ def save_energy_comparison \
             times, hw_energy(fields, lx, ly), color=color,
             linestyle=linestyle, linewidth=1.6, label=label,
         )
-    axis.set_xlabel("simulation time")
+    axis.set_xlabel(r"$\omega_{ci}t$")
     axis.set_xlim(left=0.0)
-    axis.set_ylabel(r"$E=\frac{1}{2}\iint\left(n^2+\left(\frac{\partial\phi}{\partial x}\right)^2+\left(\frac{\partial\phi}{\partial y}\right)^2\right)\,dx\,dy$")
+    axis.set_ylabel(r"$E=\frac{1}{2}\int\left(n^2+|\nabla\phi|^2\right)\,dx\,dy$")
     axis.set_ylim(bottom=0.0)
     axis.set_title("Hasegawa–Wakatani energy versus time")
     axis.grid(True, alpha=0.3)
@@ -748,9 +732,9 @@ def save_enstrophy_comparison \
             times, hw_enstrophy(fields, lx, ly), color=color,
             linestyle=linestyle, linewidth=1.6, label=label,
         )
-    axis.set_xlabel("simulation time")
+    axis.set_xlabel(r"$\omega_{ci}t$")
     axis.set_xlim(left=0.0)
-    axis.set_ylabel(r"$Z=\frac{1}{2}\sum(n-\omega)^2\,\Delta x\,\Delta y$")
+    axis.set_ylabel(r"$Z=\frac{1}{2}\int(n-\omega)^2\,dx\,dy$")
     axis.set_ylim(bottom=0.0)
     axis.set_title("Hasegawa–Wakatani enstrophy versus time")
     axis.grid(True, alpha=0.3)
@@ -789,7 +773,7 @@ def save_particle_flux_comparison \
         axis.axhline(0.0, color="gray", linewidth=0.8, linestyle=":")
         axis.grid(True, alpha=0.3)
         axis.legend()
-    axes[-1].set_xlabel("simulation time")
+    axes[-1].set_xlabel(r"$\omega_{ci}t$")
     axes[-1].set_xlim(left=0.0)
     figure.tight_layout()
     figure.savefig(output_path, dpi=dpi, bbox_inches="tight")
@@ -832,7 +816,7 @@ def save_energy_components_comparison \
         axis.set_ylabel("Energy")
         axis.grid(True, alpha=0.3)
     axes[0, 0].legend()
-    axes[-1, 0].set_xlabel("simulation time")
+    axes[-1, 0].set_xlabel(r"$\omega_{ci}t$")
     axes[-1, 0].set_xlim(left=0.0)
     figure.suptitle("Hasegawa–Wakatani energy components versus time")
     figure.tight_layout()
@@ -1510,8 +1494,6 @@ def main() -> None:
     args = parse_args()
     if args.lx <= 0 or args.ly <= 0:
         raise ValueError("lx and ly must be positive")
-    if not np.isfinite(args.t_start) or args.t_start < 0:
-        raise ValueError("tLES-start must be finite and non-negative")
     if args.batch < 0:
         raise ValueError("batch must be non-negative")
     if args.spectrum_cutoff_n < 0:
@@ -1542,20 +1524,17 @@ def main() -> None:
     (
         tuple(datasets), reference_hints
     )
-    datasets = shift_les_times(datasets, args.t_start)
     for label, times, _ in datasets:
         print(f"Plot time range for {label}: {times[0]:g} to {times[-1]:g}")
     history_datasets = datasets
     datasets, common_final_time = truncate_to_common_time(datasets)
-    # Keep the DNS development phase in time-series plots. LES retains its
-    # shifted start, so no LES samples are invented before the restart time.
+    # Use recorded times for all runs, retaining history through the common end.
     history_datasets = tuple(
         (label, times[times <= common_final_time], fields[times <= common_final_time])
         for label, times, fields in history_datasets
     )
     common_start_time = max(float(times[0]) for _, times, _ in datasets)
-    print(f"Comparisons use {common_start_time:g} <= t <= {common_final_time:g}; "
-          "time-series plots retain the DNS history from t=0.")
+    print(f"Comparisons use {common_start_time:g} <= t <= {common_final_time:g}.")
     comparison_datasets = \
     (
         (datasets[1], datasets[0])
@@ -1580,14 +1559,14 @@ def main() -> None:
     if args.output_dir.exists():
         shutil.rmtree(args.output_dir)
     args.output_dir.mkdir(parents=True, exist_ok=True)
-    centerpoint_path = save_centerpoint_history \
-    (
-        history_datasets, args.output_dir / "centerpoint_vs_time.png", args.dpi
-    )
-    extrema_path = save_field_extrema_history \
-    (
-        history_datasets, args.output_dir / "field_minmax_vs_time.png", args.dpi
-    )
+    # centerpoint_path = save_centerpoint_history \
+    # (
+        # history_datasets, args.output_dir / "centerpoint_vs_time.png", args.dpi
+    # )
+    # extrema_path = save_field_extrema_history \
+    # (
+        # history_datasets, args.output_dir / "field_minmax_vs_time.png", args.dpi
+    # )
     energy_path = save_energy_comparison \
     (
         history_datasets, args.output_dir / "energy_vs_time.png",
@@ -1603,11 +1582,11 @@ def main() -> None:
         history_datasets, args.output_dir / "particle_flux_vs_time.png",
         args.lx, args.ly, args.dpi,
     )
-    energy_components_path = save_energy_components_comparison \
-    (
-        history_datasets, args.output_dir / "energy_components_vs_time.png",
-        args.lx, args.ly, args.dpi,
-    )
+    # energy_components_path = save_energy_components_comparison \
+    # (
+        # history_datasets, args.output_dir / "energy_components_vs_time.png",
+        # args.lx, args.ly, args.dpi,
+    # )
     endpoint_spectra_path = save_endpoint_spectrum_comparison \
     (
         datasets,
@@ -1618,33 +1597,33 @@ def main() -> None:
         args.smooth_spectrum,
         args.spectrum_cutoff_n,
     )
-    print(f"Saved {centerpoint_path}")
-    print(f"Saved {extrema_path}")
+    # print(f"Saved {centerpoint_path}")
+    # print(f"Saved {extrema_path}")
     print(f"Saved {energy_path}")
     print(f"Saved {enstrophy_path}")
     print(f"Saved {particle_flux_path}")
-    print(f"Saved {energy_components_path}")
+    # print(f"Saved {energy_components_path}")
     print(f"Saved {endpoint_spectra_path}")
     pdf_paths = save_field_pdf_comparison(datasets, args.output_dir, args.dpi)
     for pdf_path in pdf_paths:
         print(f"Saved {pdf_path}")
-    if len(datasets) >= 3:
-        vorticity_path = save_initial_vorticity_comparison \
-        (
-            datasets,
-            args.output_dir / "vorticity_t0_comparison.png",
-            args.lx,
-            args.ly,
-            args.dpi,
-        )
-        print(f"Saved {vorticity_path}")
-    if comparison_datasets is not None:
-        initial_derivatives_path = save_initial_derivative_comparison \
-        (
-            comparison_datasets, args.output_dir / "field_derivatives_t0.png",
-            args.lx, args.ly, args.dpi,
-        )
-        print(f"Saved {initial_derivatives_path}")
+    # if len(datasets) >= 3:
+        # vorticity_path = save_initial_vorticity_comparison \
+        # (
+            # datasets,
+            # args.output_dir / "vorticity_t0_comparison.png",
+            # args.lx,
+            # args.ly,
+            # args.dpi,
+        # )
+        # print(f"Saved {vorticity_path}")
+    # if comparison_datasets is not None:
+        # initial_derivatives_path = save_initial_derivative_comparison \
+        # (
+            # comparison_datasets, args.output_dir / "field_derivatives_t0.png",
+            # args.lx, args.ly, args.dpi,
+        # )
+        # print(f"Saved {initial_derivatives_path}")
     if args.animations:
         if comparison_datasets is None:
             animation_path = save_field_animation \

@@ -667,6 +667,11 @@ def main():
                 a.inverse_input, cutoff_fraction, inverse_filter_type
             ),
             a.smooth_spectrum,
+            show_inverse_input=not (
+                a.inverse_input == "unet"
+                and inverse_filter_type == "cutoff"
+                and cutoff_fraction is not None
+            ),
         )
         save_field_spectrum_comparison \
         (

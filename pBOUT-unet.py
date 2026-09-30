@@ -1220,7 +1220,7 @@ def _inverse_germano_only \
     return \
     (
         dns,
-        inverse_input,
+        _append_vorticity_for_diagnostics(inverse_input),
         reconstructed_vorticity,
     )
 

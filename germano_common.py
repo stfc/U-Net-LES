@@ -11,7 +11,7 @@ import torch
 from torch import nn
 from torch.utils.data import Dataset
 
-SPECTRUM_Y_MIN = float(os.environ.get("SPECTRUM_Y_MIN", "1e-14"))
+SPECTRUM_Y_MIN = float(os.environ.get("SPECTRUM_Y_MIN", "1e-8"))
 if not math.isfinite(SPECTRUM_Y_MIN) or SPECTRUM_Y_MIN <= 0:
     raise ValueError("SPECTRUM_Y_MIN must be finite and greater than zero")
 SPECTRUM_Y_MAX = 10.0
@@ -1489,6 +1489,7 @@ def save_spectrum_plot \
     path,
     inverse_input_label="U-Net filtered",
     smooth_spectrum=False,
+    show_inverse_input=True,
 ):
     spectra = \
     {
@@ -1515,6 +1516,8 @@ def save_spectrum_plot \
     }
     fig, ax = plt.subplots(figsize=(7.4, 5.6))
     for label, (k, p) in spectra.items():
+        if label == inverse_input_label and not show_inverse_input:
+            continue
         v = (k > 0) & (p > 0)
         if label == f"Filtered {coarse_n}":
             ax.loglog \
@@ -1535,12 +1538,8 @@ def save_spectrum_plot \
     (
         kn, linestyle=":", linewidth=1.4, label=f"{coarse_n}-grid Nyquist"
     )
-    ax.set_title \
-    (
-        r"HW energy spectrum: $E=\frac{1}{2}\int(n^2+|\nabla\phi|^2)$"
-    )
     ax.set_xlabel(r"$k$")
-    ax.set_ylabel(r"Shell energy $E(k)$")
+    ax.set_ylabel(r"$E=\frac{1}{2}\int\left(n^2+|\nabla\phi|^2\right)\,dx\,dy$")
     ax.set_ylim(bottom=SPECTRUM_Y_MIN, top=SPECTRUM_Y_MAX)
     ax.grid(True, which="both", alpha=0.3)
     ax.legend(numpoints=1)

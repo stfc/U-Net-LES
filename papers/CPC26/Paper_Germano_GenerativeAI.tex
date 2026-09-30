@@ -34,7 +34,7 @@
 \begin{abstract}
 We present a novel method which combines the invertibility of Germano's filter with generative artificial intelligence to accelerate edge plasma turbulence simulations. Rather than learning the mapping from coarse LES fields to fine DNS, the proposed method learns the mapping from coarse LES fields to Germano Differential-filtered DNS fields. We then use the inverse of Germano's filter to reconstruct the fine-scale DNS fields and hence calculate exactly the nonlinear terms in the governing equations, or the subgrid-scale terms in the LES.
 
-The method is tested on the Hasegawa--Wakatani and modified Hasegawa--Wakatani plasma turbulence models at $256^2$ and $512^2$ DNS resolutions using 2, 4 and 8 times smaller LES grids in each direction. We compare the generative model with DNS and conventional LES diagnostics, including energy, enstrophy, spectra, probability distributions, poloidal and radial fluxes and computational cost. The supplied U-Net validation results show qualitative agreement in several integral and spectral diagnostics, but also delayed transients and excess late-time enstrophy in the modified $256^2$ case. The completed HW runs show reductions in MPI task-time per unit simulated time by factors of 5-185; a wall-clock speedup of 1.45 is obtained for the $64^2$ LES referenced to the $512^2$ DNS.
+The method is tested on the Hasegawa--Wakatani and modified Hasegawa--Wakatani plasma turbulence models at $256^2$ and $512^2$ DNS resolutions using 2, 4 and 8 times smaller LES grids in each direction. We compare the generative model with DNS and conventional LES diagnostics, including energy, enstrophy, spectra, probability distributions, poloidal and radial fluxes and computational cost. The supplied U-Net validation results show qualitative agreement in several integral and spectral diagnostics, but also delayed transients and excess late-time enstrophy in the modified $256^2$ case. Ten-time-unit HW and mHW benchmarks show MPI task-time reductions of 4.74--48.84, with a maximum wall-clock speedup of 1.53.
 \end{abstract}
 
 \begin{keyword}
@@ -63,7 +63,7 @@ Deconvolution operators for LES have been proposed in the past as Approximate De
 In the following paper we improved our previous work on StylES \citep{castagna_stylegan_2024}, replacing the full StyleGAN architecture with a simpler U-Net based architecture, but moving the training target from the fully developed DNS fields to the Germano's filtered LES fields without dowsampling. 
 The idea is that the generator learns the mapping from coarse LES fields to fine LES resolution fields, and then reconstruct the DNS details using the inverse of Germano's filter. This approach allows for: a) a much faster super-resolution and hence time integration and b) simplify drastically the training process, notoriously difficult for GANs.
 
-The paper continues as follows: Sections~\ref{sec:PhysicalModel} introudce the physical model and Germano's filter in LES. Section~\ref{sec:Numerical Implementation} section explains the U-Net based architecture and the modifications needed to have a stable time integration. Moreover, details on the training and reconstruction methodology are provided. Section~\ref{sec:Results} presents the results and discussion on the performance. Finally, Section~\ref{sec:Conclusions} summarizes the findings and proposes future work, which will be mainly moving towards a full 3D implementation of the proposed methodology.
+The paper continues as follows: Sections~\ref{sec:PhysicalModel} introudce the physical model and Germano's filter in LES. Section~\ref{sec:NumericalImplementation} section explains the U-Net based architecture and the modifications needed to have a stable time integration. Moreover, details on the training and reconstruction methodology are provided. Section~\ref{sec:Results} presents the results and discussion on the performance. Finally, Section~\ref{sec:Conclusions} summarizes the findings and proposes future work, which will be mainly moving towards a full 3D implementation of the proposed methodology.
 
 The code used to generate the results is available on the U-Net-LES repositories at \url{https://github.com/stfc/U-Net-LES} and the model weights are available on Zenodo at \url{https://doi.org/10.5281/zenodo.22973917}.
 %----------------------------------------------------------------
@@ -125,6 +125,8 @@ the equations become:
 which introduces zonal modes without parallel-electron response which. Excluding their direct resistive damping permits zonal shear flows that can suppress turbulence \citep{numata_bifurcation_2007}.
 
 We use primes for non-zonal fluctuations and reserve tildes for LES-filtered fields. This distinction matters because the zonal average and the LES filter serve different purposes: the former defines the physical coupling, while the latter introduces the unresolved nonlinear terms discussed below.
+
+Both HW and mHW systems are considered fully periodic in $x$ and $y$, with domain size $L_x=L_y=50.176$. The background density gradient is adjsuted according to the test case, $\kappa=0.5 \div 1$, as well as the dissipation coefficients are set to $D_\zeta=D_n=10^{-3} \div 10^{-4}$. The parallel-electron response is $\alpha=0.5 \div 1$, which are ideal values for the weakly collisional regime. The initial conditions are Gaussian random fields with zero mean and unit variance, filtered to remove high wavenumbers. The simulations are run up to 2000 time units ($t_{HW}=\Omega_{ci}t_{physical}$, where $\Omega_{ci}=\frac{ZeB}{m_i}$ is the ion cyclotron frequency). Snapshots are saved every 1 $t_{HW}$, see \ref{sec:Results} section for more details.
 
 \subsection{Germano Differential-filtered LES formulation}\label{sec:GermanoDifferentialFilter}
 
@@ -233,40 +235,34 @@ providing the coarse solver with an approximation to the filtered fine-grid adve
 %
 %----------------------------------------------------------------
 \section{Numerical Implementation}\label{sec:NumericalImplementation}
-
-% We use the BOUT++ solver \citep{dudson_bout++_2009} for solving the HW and mHW equations.
-% The coefficients $D_\zeta$ and $D_n$ correspond to \texttt{Dvort} and \texttt{Dn} in the BOUT++ implementation. Its \texttt{Delp4} operator applies the perpendicular Laplacian twice. The code evolves the coupling and advection separately from these dissipative terms and obtains $\phi$ by Laplacian inversion. In the two-dimensional runs, the paper's poloidal coordinate $y$ corresponds to the code's $z$ coordinate; hence the density-gradient term is implemented using \texttt{DDZ(phi)}.
-% In the implementation, the \texttt{modified} flag selects this subtraction; otherwise the full fields enter the coupling. 
-
+We describe here the numerical implementation details for the full methodology. The settings below refer to the HW reconstruction from $32^2$ LES $\to$ $256^2$ DNS; they are not assumed to apply to every resolution or modified-HW case, but give very good guidance for other configurations. The BOUT++ solver \citep{dudson_bout++_2009} is used for solving the filtered HW and mHW equations. The coefficients $D_\zeta$ and $D_n$ correspond to \texttt{Dvort} and \texttt{Dn} in the BOUT++ implementation. In the two-dimensional runs, the paper's poloidal coordinate $y$ corresponds to the code's $z$ coordinate; see the Hasegawa-Wakatani example in the BOUT++ repository for details.
 
 \subsection{NN-Architecture}\label{sec:NN-Architecture}
-We use a variation of the U-Net architecture \citep{ronneberger_u-net_2015} for the generative model. However, as the input is already at the LES coarse resolution, we have an asymmetric architecture with a small encoder followed by a decoder to upsample the input to the fine DNS resolution. The reconstruction configuration described here is the HW training run with a $256^2$ DNS mesh and a $32^2$ LES mesh. The settings below refer to this run; they are not assumed to apply to every resolution or modified-HW case.
+We use a variation of the U-Net architecture \citep{ronneberger_u-net_2015} for the generative model, hereafter referenced as \textbf{DirectUNetSR}. However, as the input is already at the LES coarse resolution, we have an asymmetric architecture with a small encoder followed by a decoder to upsample the input to the fine DNS resolution. Skip connections are only used at low levels as we found that they tend to introduce artifacts during time integration which eventually degrade the reconstruction quality and lead to very strong oscillations. The reconstruction configuration described here is the HW training run with a $256^2$ DNS mesh and a $32^2$ LES mesh.
 
-The three coarse input channels are density, potential and vorticity, denoted by $\mathbf{U}=(n,\phi,\zeta)$. The network predicts two fine-grid filtered fields, $\widetilde n_\theta$ and $\widetilde\phi_\theta$, being the vorticity and Laplacian of the potential fields $\zeta=\nabla_\perp^2\phi$. With a base channel count of 24, the encoder begins with 96 feature channels on the $32^2$ input mesh and uses a 192-channel bottleneck on a $16^2$ mesh. A skip-connected decoder returns to $32^2$, followed by periodic bilinear upsampling stages reaching $64^2$, $128^2$ and $256^2$. Circular convolution padding and periodic interpolation preserve the domain topology. The model has 1,670,738 trainable parameters and no global input skip connection. Figure~\ref{fig:direct_unet_architecture} summarizes the network and its differentiable reconstruction path.
+The three coarse input channels are density, potential and vorticity, denoted by $\mathbf{U}=(n,\phi,\zeta)$. The network predicts two fine-grid filtered fields, $\widetilde n_\theta$ and $\widetilde\phi_\theta$, being the vorticity obtained from the Laplacian of the potential fields $\zeta=\nabla_\perp^2\phi$. The encoder begins with 96 feature channels on the $32^2$ input mesh and uses a 192-channel bottleneck on a $16^2$ mesh. A skip-connected decoder returns to $32^2$, followed by periodic bilinear upsampling stages reaching $64^2$, $128^2$ and $256^2$. Circular convolution padding and periodic interpolation preserve the domain topology. The model has 1,670,738 trainable parameters and no global input skip connection. Figure~\ref{fig:direct_unet_architecture} summarizes the network and its differentiable reconstruction path.
 
 \begin{figure}[htbp]
 \centering
-\includegraphics[width=\linewidth]{images/direct_unet_architecture.pdf}
-\caption{Current \texttt{DirectUNetSR} architecture for the HW $32^2$ LES $\to$ $256^2$ DNS training configuration. Tensor sizes are channels $\times$ height $\times$ width, omitting the batch dimension. The orange connection concatenates the stem features with the upsampled bottleneck features. Blue and green blocks contain learned convolutions; the spectral cutoff, van Cittert iterations and vorticity evaluation are fixed differentiable operations. The loss compares reconstructed fields with DNS targets; its vorticity terms use $s_\zeta=1.2094$, and density/potential losses average both channels.}
+\includegraphics[width=\linewidth]{images/direct_unet_architecture2.png}
+\caption{Current \texttt{DirectUNetSR} architecture for the HW $32^2$ LES $\to$ $256^2$ DNS training configuration. Tensor sizes are channels $\times$ height $\times$ width, omitting the batch dimension. The orange connection concatenates the stem features with the upsampled bottleneck features. Blue and green blocks contain learned convolutions; the spectral cutoff, van Cittert iterations and vorticity evaluation are fixed differentiable operations. The loss compares reconstructed fields with DNS targets; its vorticity terms use $\sigma_\zeta=1.2094$, and density/potential losses average both channels.}
 \label{fig:direct_unet_architecture}
 \end{figure}
 
 \subsection{Reconstruction}
-Training inputs are formed by Germano filtering and centered Fourier-mode truncation. The domain lengths are $L_x=L_y=50.176$, with DNS spacing $h=0.196$, an eightfold spatial refinement factor and filter length $\ell=1.568$. The JSON field named \texttt{alpha} records this filter length, not the physical HW adiabaticity. Input and output normalization are disabled for this run: their recorded means are zero and standard deviations are unity.
-
-Before inversion, each predicted filtered field passes through a smooth spectral cutoff with multiplier
+The output from the DirectUNetSR model is passed through a smooth spectral cutoff with multiplier to eliminate excessively high wavenumbers. The cutoff is configured to remove modes above the Nyquist frequency of the coarse LES mesh, with a smooth transition to avoid Gibbs oscillations. The cutoff multiplier is
 \begin{equation}
     Q(\mathbf{k})=\exp\left[-\left(\frac{|\mathbf{k}|}{k_c}\right)^8\right],
     \qquad k_c=0.707107\,\frac{\pi}{h}\simeq11.3339.
 \end{equation}
-The configured inverse is a truncated van Cittert reconstruction. For $g=Q\widetilde f_\theta$, implemented spectrally, it computes
+For stability purposes, the configured inverse is a truncated van Cittert reconstruction, rather than directly apply the inverse. For $g=Q\widetilde f_\theta$, implemented spectrally, it computes
 \begin{equation}
     f^{(0)}=g,\qquad
     f^{(j+1)}=f^{(j)}+\omega\left[g-\mathcal{F}_\ell f^{(j)}\right],
     \quad j=0,\ldots,4,\qquad\omega=1.
     \label{eq:training_van_cittert}
 \end{equation}
-The reconstructed field is $f^{(5)}$ with its spatial mean removed. Thus this run uses five iterations of a regularized approximate inverse, rather than the exact differential inverse in Eq.~\eqref{eq:germano_inverse}. No post-inversion filter is enabled. Reconstructed vorticity is calculated from the potential using the second-order periodic finite-difference Laplacian,
+where $\omega$ is a relaxation parameter. The iteration is differentiable, and the network can learn to compensate for the approximate inverse. The reconstructed field is $f^{(5)}$ with its spatial mean removed to satisfy the divergence-free constraint on mass and electric charge. Thus this run uses five iterations of a regularized approximate inverse, rather than the exact differential inverse in Eq.~\eqref{eq:germano_inverse}. No post-inversion filter is enabled. Reconstructed vorticity is calculated from the potential using the second-order periodic finite-difference Laplacian,
 \begin{equation}
     \zeta_\theta=\Delta_h\phi_\theta,\qquad
     (\Delta_h\phi)_{i,j}
@@ -274,82 +270,115 @@ The reconstructed field is $f^{(5)}$ with its spatial mean removed. Thus this ru
 \end{equation}
 with periodic indices. The DNS vorticity target is likewise derived from its potential.
 
-The objective compares the reconstructed fields with DNS after cutoff, inversion and vorticity evaluation; gradients propagate through this entire path. It does not directly penalize the network's intermediate filtered output. Let
+\subsection{Loss function}
+The objective function compares the reconstructed fields with DNS after cutoff, inversion and vorticity evaluation; gradients propagate through this entire path and it does not directly penalize the network's intermediate filtered output. Let:
 \begin{equation}
-    e_n=\frac{n_\theta-n_{\mathrm{DNS}}}{s_n},\qquad
-    e_\phi=\frac{\phi_\theta-\phi_{\mathrm{DNS}}}{s_\phi},\qquad
-    e_\zeta=\frac{\zeta_\theta-\zeta_{\mathrm{DNS}}}{s_\zeta},
+    \overline{n}=\frac{n_\theta-n_{\mathrm{DNS}}}{\sigma_n},\qquad
+    \overline{\phi}=\frac{\phi_\theta-\phi_{\mathrm{DNS}}}{\sigma_\phi},\qquad
+    \overline{\zeta}=\frac{\zeta_\theta-\zeta_{\mathrm{DNS}}}{\sigma_\zeta},
 \end{equation}
-where $s_n=s_\phi=1$ and $s_\zeta=1.2094048537$. The vorticity scaling remains active even though field normalization is disabled. With $\langle\cdot\rangle_{B,\Omega}$ denoting the mean over the batch and spatial grid, define
+be the normalized reconstruction errors, where $f_\theta$ denotes the reconstructed field and $f_{\mathrm{DNS}}$ its DNS target. For each quantity $f\in\{n,\phi,\zeta\}$, $\sigma_f$ is the loss normalization scale, given by the training-data standard deviation when that normalization is enabled and otherwise by a unit scale. With $\mu_{B,\Omega}[q]$ denoting the statistical mean of $q$ over the batch and spatial grid, define
 \begin{align}
     \mathcal{L}_{n\phi}^{(1)}
-    &=\tfrac12\langle|e_n|+|e_\phi|\rangle_{B,\Omega},&
+    &=\tfrac12\mu_{B,\Omega}\!\left[|\overline{n}|+|\overline{\phi}|\right],&
     \mathcal{L}_{n\phi}^{(2)}
-    &=\tfrac12\langle e_n^2+e_\phi^2\rangle_{B,\Omega},\\
+    &=\tfrac12\mu_{B,\Omega}\!\left[\overline{n}^2+\overline{\phi}^2\right],\\
     \mathcal{L}_{\zeta}^{(1)}
-    &=\langle|e_\zeta|\rangle_{B,\Omega},&
+    &=\mu_{B,\Omega}\!\left[|\overline{\zeta}|\right],&
     \mathcal{L}_{\zeta}^{(2)}
-    &=\langle e_\zeta^2\rangle_{B,\Omega}.
+    &=\mu_{B,\Omega}\!\left[\overline{\zeta}^2\right].
 \end{align}
-The implemented loss for this run is
+the implemented loss is defined as:
 \begin{align}
     \mathcal{L}
-    &=\mathcal{L}_{n\phi}^{(1)}
-      +\lambda_{\mathrm{mse}}\mathcal{L}_{n\phi}^{(2)}
-      +\lambda_{\zeta}\left(\mathcal{L}_{\zeta}^{(1)}
-      +\lambda_{\mathrm{mse}}\mathcal{L}_{\zeta}^{(2)}\right)\\
-    &=\mathcal{L}_{n\phi}^{(1)}+0.1\mathcal{L}_{n\phi}^{(2)}
-      +0.1\mathcal{L}_{\zeta}^{(1)}+0.01\mathcal{L}_{\zeta}^{(2)}.
+    &=\lambda_{n\phi}^{(1)}\mathcal{L}_{n\phi}^{(1)}
+      +\lambda_{n\phi}^{(2)}\mathcal{L}_{n\phi}^{(2)}
+      +\lambda_{\zeta}^{(1)}\mathcal{L}_{\zeta}^{(1)}
+      +\lambda_{\zeta}^{(2)}\mathcal{L}_{\zeta}^{(2)}.
     \label{eq:training_loss}
 \end{align}
-The density/potential terms average the two channels, so their unit prefactor is not a unit weight on each channel's separate loss. The squared-error contribution increases the penalty on larger residuals, while the vorticity terms constrain potential curvature through the derived field.
+where $\lambda_{n\phi}^{(1)}$, $\lambda_{n\phi}^{(2)}$, $\lambda_\zeta^{(1)}$ and $\lambda_\zeta^{(2)}$ denote the respective loss weights.
+
+The density/potential terms average the two channels, so each coefficient weights their combined mean loss. The squared-error contribution increases the penalty on larger residuals, while the vorticity terms constrain potential curvature through the derived field.
 
 \begin{table}[ht]
 \centering
-\caption{Loss settings recorded for the HW $256^2\rightarrow32^2$ training configuration. The vorticity MSE coefficient is the product $\lambda_\zeta\lambda_{\mathrm{mse}}$.}
+\caption{Loss settings recorded for the HW $256^2\rightarrow32^2$ training configuration. The four effective coefficients in Eq.~\eqref{eq:training_loss} correspond to the density/potential L1 and MSE weights and the vorticity L1 and MSE weights, respectively; the implementation forms the last coefficient as the product of its recorded vorticity and MSE weights.}
 \label{tab:training_loss_weights}
 \begin{tabular}{lll}
 \toprule
-Recorded parameter & Value & Role \\
+Coefficient & Value & Role \\
 \midrule
-\texttt{lambda\_dns} & 1.0 & Unit density/potential L1 prefactor \\
-\texttt{lambda\_mse} & 0.1 & Density/potential MSE weight \\
-\texttt{lambda\_vorticity} & 0.1 & Normalized vorticity L1 weight \\
-Effective vorticity MSE weight & 0.01 & $0.1\times0.1$ \\
-\texttt{lambda\_first\_derivative} & 0.0 & Separate derivative penalty disabled \\
-\texttt{lambda\_second\_derivative} & 0.0 & Separate derivative penalty disabled \\
-\texttt{lambda\_kl} & 0.0 & KL penalty disabled \\
+$\lambda_{n\phi}^{(1)}$ & 1.0 & Unit density/potential L1 prefactor \\
+$\lambda_{n\phi}^{(2)}$ & 0.1 & Density/potential MSE weight \\
+$\lambda_\zeta^{(1)}$ & 0.1 & Normalized vorticity L1 weight \\
+$\lambda_\zeta^{(2)}$ & 0.01 & Normalized vorticity MSE weight \\
 \bottomrule
 \end{tabular}
 \end{table}
 
-No adversarial loss, separate spectral loss or separate first-/second-derivative loss contributes to this objective. The nonzero vorticity loss nevertheless supplies a derivative-based constraint. The stored \texttt{variational=false} setting also excludes stochastic latent sampling.
+\subsection{Numerical dataset}\label{sec:Dataset}
 
-The configuration specifies 100 epochs with batch size 4, using AdamW at a constant learning rate of $10^{-4}$, weight decay $10^{-6}$, moment coefficients $(0.9,0.999)$ and $\epsilon=10^{-8}$. Gradient norms are clipped to 1.0. Computation uses float64 precision on an NVIDIA H100 80GB GPU. A random split with seed 7 assigns 4,000 snapshots to training, 500 to validation and 500 to testing. Synchronized random periodic shifts augment the training fields while preserving alignment of inputs and targets. This snapshot split does not by itself establish temporal independence of the held-out data.
+The DNS dataset were generated using the BOUT++ plasma solver, starting from the
+Hasegawa-Wakatani input file provided in the examples folder. Table \ref{tab:cases}
+and \ref{tab:dataset_effort} resumes the test case resolutions, physical parameters
+and computational efforts. Four configurations were analysed, two for the HW model and two for the mHW model, with $256^2$ and $512^2$ DNS meshes. The different dataset have a different final time $T_f$ but the same number of trajectories $N_{runs}$. We start collecting samples from $T_s$ every $\Delta T_s$ for a total $N_s$ samples. The choice of $\Delta T_s$ is such that the variation in Similarity Structural Index Metric (SSIM) is always $\geq$ 10\%. The last 2 columns of Table \ref{tab:dataset_effort} show the overall computational cost $C_{cost}$ in node per hours, where 1 node of ScafellPike supercomputer at Hartree Centre contains a 2 socket of 16-cores Intel Xeon Gold processors, and the disk space occupied by the data.
 
-During LES integration, the current coarse fields are passed through the trained network and the configured regularized inverse. The potential determines vorticity, the reconstructed fields determine the fine-grid Poisson brackets, and Germano filtering followed by Fourier downsampling supplies the nonlinear terms to the coarse solver for time advancement.
-
-\subsection{Numerical dataset and training}\label{sec:Dataset}
-
-The data were generated with the BOUT++ Hasegawa--Wakatani implementation. Four configurations were analysed:
-
-\begin{table}[ht]
+\begin{table}[htbp]
 \centering
-\caption{Simulation cases analysed in this work. Values marked TODO should be extracted from the corresponding BOUT++ output files.}
+\caption{Physical parameters for each test case.}
 \label{tab:cases}
-\begin{tabular}{llllll}
-\toprule
-Case & Model & DNS resolution & LES resolution & $\alpha$ & Samples \\
-\midrule
-HW\_N256  & HW  & $256^2$ & TODO & TODO & TODO \\
-HW\_N512  & HW  & $512^2$ & TODO & TODO & TODO \\
-mHW\_N256 & mHW & $256^2$ & TODO & TODO & TODO \\
-mHW\_N512 & mHW & $512^2$ & TODO & TODO & TODO \\
-\bottomrule
+\begin{tabular}{|c|c|c|c|c|}
+\hline
+Type & $N$ & $\alpha$ & $\kappa$ & $\nu_\zeta=\nu_n$ \\
+\hline
+HW  & $256^2$ & 1 & 0.5 & $10^{-3}$ \\
+HW  & $512^2$ & 1 & 1   & $10^{-4}$ \\
+mHW & $256^2$ & 1 & 1   & $10^{-3}$ \\
+mHW & $512^2$ & 1 & 1   & $10^{-4}$ \\
+\hline
 \end{tabular}
 \end{table}
 
-All simulations used periodic boundary conditions. For the HW $256^2\rightarrow32^2$ training run documented in Section~\ref{sec:NumericalImplementation}, the recorded split is random over snapshots, with 80\% used for training and 10\% each for validation and testing. This does not demonstrate temporal separation between those subsets; split protocols for other runs require their corresponding training records.
+\begin{table}[htbp]
+\centering
+\caption{Computational cost and memory usage for each test case.}
+\label{tab:dataset_effort}
+\begin{tabular}{|c|c|c|c|c|c|c|c|c|}
+\hline
+Type & $N$ & $T_s$ & $T_f$ & $\Delta T_s$ & $N_{\mathrm{runs}}$ & $N_s$ & $C_{\mathrm{cost}}$ & disk [GB] \\
+\hline
+HW  & $256^2$ & 501 & 1000 & 10 & 100 & 5000 & 5.8 & 7.4 \\
+HW  & $512^2$ & 201 & 1000 & 10 & 100 & 8000 & 111 & 47 \\
+mHW & $256^2$ & 201 & 400  & 4  & 100 & 5000 & 5.8 & 7.4 \\
+mHW & $512^2$ & 201 & 400  & 4  & 100 & 5000 & 111 & 30 \\
+\hline
+\end{tabular}
+\end{table}
+
+
+
+
+
+
+
+
+\subsection{Training}\label{sec:Training}
+We split the dataset into 80\% for training, 10\% for validation and the rest 10\% for testing.
+The run for 100 epochs with batch size 4, using AdamW at a constant learning rate of $10^{-4}$, weight decay $10^{-6}$, moment coefficients $(0.9,0.999)$ and $\epsilon=10^{-8}$. Gradient norms are clipped to 1.0. Computation uses float64 precision on an NVIDIA H100 80GB GPU. Synchronized random periodic shifts augment the training fields while preserving alignment of inputs and targets.
+
+Figure~\ref{fig:training_objective} shows the loss as function of number of epochs for the 
+$32^2$ LES $\to$ $256^2$ DNS configuration. A rapid decrease in the total objective during the first 20 epochs, followed by a slower reduction throughout the remaining training. At epoch 100, the training and validation objectives are approximately $5.2\times10^{-2}$ and $5.6\times10^{-2}$, respectively. The validation curve closely follows the training curve initially and develops a small gap at later epochs, while continuing to decrease overall. This behaviour indicates diminishing gains from further optimization without a sustained increase in validation loss over the recorded interval.
+
+\begin{figure}[htbp]
+\centering
+% Show only the Total Training Objective panel of the original 180-dpi summary.
+\includegraphics[width=0.75\linewidth,trim=736bp 688bp 372bp 42bp,clip]{images/HW_dns256_les32_tensorboard_summary.png}
+\caption{Total training and validation objective, Eq.~\eqref{eq:training_loss}, for the HW configuration with $256^2$ DNS and $32^2$ LES grids over 100 epochs.}
+\label{fig:training_objective}
+\end{figure}
+
+
 %----------------------------------------------------------------
 %
 %
@@ -361,40 +390,8 @@ All simulations used periodic boundary conditions. For the HW $256^2\rightarrow3
 %----------------------------------------------------------------
 \section{Results}\label{sec:Results}
 
-The diagnostics below use the supplied U-Net validation plots for the four configurations. The numeric legend entries identify the coarse-grid sizes: 128 and 64 for the $256^2$ DNS cases, and 256, 128 and 64 for the $512^2$ DNS cases. DNS is the reference. These figures do not include a separately identified conventional LES closure or establish a comparison between adversarial and non-adversarial training. Accordingly, the plotted learned solutions are referred to as U-Net reconstructions in this section.
-
-The $256^2$ histories extend to $t=1000$, whereas the $512^2$ histories cover approximately $t=100$. Thus, differences between these cases cannot be attributed to spatial resolution alone. The following comparisons are qualitative assessments of the archived figures; pointwise error metrics, time-averaged transport errors and timing measurements require the underlying numerical records.
-
-
-\subsection{Reconstruction accuracy}
-
-The reconstruction accuracy was evaluated using the normalized mean-square error,
-\begin{equation}
-    \mathrm{NMSE}(f)
-    =
-    \frac{\|f^{\mathrm{GAN}}-f^{\mathrm{DNS}}\|_2^2}
-    {\|f^{\mathrm{DNS}}\|_2^2},
-\end{equation}
-the structural similarity index, and the correlation coefficient.
-
-\begin{table}[ht]
-\centering
-\caption{Reconstruction metrics for the four test cases.}
-\label{tab:reconstruction}
-\begin{tabular}{lcccccc}
-\toprule
-Case & NMSE$(n)$ & NMSE$(\phi)$ & NMSE$(\zeta)$ &
-SSIM$(n)$ & SSIM$(\phi)$ & SSIM$(\zeta)$ \\
-\midrule
-HW\_N256  & TODO & TODO & TODO & TODO & TODO & TODO \\
-HW\_N512  & TODO & TODO & TODO & TODO & TODO & TODO \\
-mHW\_N256 & TODO & TODO & TODO & TODO & TODO & TODO \\
-mHW\_N512 & TODO & TODO & TODO & TODO & TODO & TODO \\
-\bottomrule
-\end{tabular}
-\end{table}
-
-The supplied diagnostic images do not determine NMSE, SSIM or fieldwise correlations; these entries remain to be evaluated from matched numerical snapshots. Statistical comparisons are presented below.
+We present the results of the LES for the four test cases using three different downsampling: 2, 4, and 8, for a total of twelve configurations. We looked at the energy and enstrophy evolution, the energy spectra, the poloidal and radial fluxes. The results are compared with the DNS reference solution. Each LES run is started from the DNS solution after 500 time units and evolved for 1500 time units, which corresponds $\approx 300k$ time steps. This is well beyond the 72 time units
+presented in the paper of \cite{van_de_wetering_neural_2026}.
 
 \subsection{Energy and enstrophy}
 
@@ -645,7 +642,7 @@ Figure~\ref{fig:particle-flux} shows positive radial flux throughout the plotted
 \end{figure}
 \subsection{Computational performance}
 
-Wall-clock runtimes and MPI task counts were extracted from the final \texttt{Run time} entry and the \texttt{Processor number} entry, respectively, in each \texttt{BOUT\_runs/HW\_*/data/BOUT.log.0} file. Each LES run is compared with the DNS run at its corresponding reference resolution. The completed DNS runs cover $\Delta t_{\mathrm{DNS}}=2000$ simulation time units, whereas the completed LES runs cover $\Delta t_{\mathrm{LES}}=1500$. We therefore report both the raw runtime ratio and a speedup normalized by simulated duration:
+Wall-clock runtimes and MPI task counts were extracted from the final \texttt{Run time} entry and the \texttt{Processor number} entry, respectively, in the HW and mHW \texttt{BOUT.log.0} files under \texttt{BOUT\_runs/*/data}. Each LES run is compared with the DNS run for the same model and reference resolution. The current logs, recorded on 29 September 2026, cover ten simulation time units for all 16 completed runs. DNS uses 32 MPI tasks and LES uses one. Raw and duration-normalized wall-clock speedups therefore coincide. We define:
 \begin{equation}
     S_{\mathrm{raw}}=\frac{T_{\mathrm{DNS}}}{T_{\mathrm{LES}}},
     \qquad
@@ -661,26 +658,36 @@ where $T$ is wall-clock runtime and $P$ is the number of MPI tasks. Here $S_{\ma
 \begin{table}[ht]
 \centering
 \small
-\caption{HW runtime comparison extracted from \texttt{BOUT.log.0}. Run names correspond to directories under \texttt{BOUT\_runs}. Each DNS row is the baseline for its LES rows. $S_{\mathrm{wall}}$ and $S_{\mathrm{MPI}}$ account for the different simulated durations. The incomplete run has no final runtime entry in the extracted log, which reached simulation time 54.}
+\caption{Current HW and mHW runtimes extracted from \texttt{BOUT.log.0}. All runs cover ten simulation time units. Each DNS row is the baseline for its LES rows. Times are the integer-second values reported by BOUT++; $S_{\mathrm{raw}}=S_{\mathrm{wall}}$ for these equal durations.}
 \label{tab:performance}
-\begin{tabular}{lr l rrr}
+\begin{tabular}{lrrrr}
 \toprule
-Run & MPI tasks & Runtime & $S_{\mathrm{raw}}$ & $S_{\mathrm{wall}}$ & $S_{\mathrm{MPI}}$ \\
+Run & MPI tasks & Runtime [s] & $S_{\mathrm{wall}}$ & $S_{\mathrm{MPI}}$ \\
 \midrule
-HW\_DNS256        & 32  & 8m 38s      & 1.00 & 1.00 & 1.00 \\
-HW\_DNS256\_LES32  & 1   & 10m 31s     & 0.82 & 0.62 & 19.70 \\
-HW\_DNS256\_LES64  & 1   & 18m 36s     & 0.46 & 0.35 & 11.14 \\
-HW\_DNS256\_LES128 & 1   & 41m 14s     & 0.21 & 0.16 & 5.03 \\
+HW\_DNS256 & 32 & 3 & 1.00 & 1.00 \\
+HW\_DNS256\_LES32 & 1 & 6 & 0.50 & 16.00 \\
+HW\_DNS256\_LES64 & 1 & 7 & 0.43 & 13.71 \\
+HW\_DNS256\_LES128 & 1 & 20 & 0.15 & 4.80 \\
 \midrule
-HW\_DNS512        & 128 & 2h 5m 19s   & 1.00 & 1.00 & 1.00 \\
-HW\_DNS512\_LES64  & 1   & 1h 4m 54s   & 1.93 & 1.45 & 185.37 \\
-HW\_DNS512\_LES128 & 1   & 2h 18m 57s  & 0.90 & 0.68 & 86.58 \\
-HW\_DNS512\_LES256 & 1   & Incomplete  & --- & --- & --- \\
+HW\_DNS512 & 32 & 32 & 1.00 & 1.00 \\
+HW\_DNS512\_LES64 & 1 & 26 & 1.23 & 39.38 \\
+HW\_DNS512\_LES128 & 1 & 61 & 0.52 & 16.79 \\
+HW\_DNS512\_LES256 & 1 & 216 & 0.15 & 4.74 \\
+\midrule
+mHW\_DNS256 & 32 & 5 & 1.00 & 1.00 \\
+mHW\_DNS256\_LES32 & 1 & 8 & 0.62 & 20.00 \\
+mHW\_DNS256\_LES64 & 1 & 12 & 0.42 & 13.33 \\
+mHW\_DNS256\_LES128 & 1 & 28 & 0.18 & 5.71 \\
+\midrule
+mHW\_DNS512 & 32 & 29 & 1.00 & 1.00 \\
+mHW\_DNS512\_LES64 & 1 & 19 & 1.53 & 48.84 \\
+mHW\_DNS512\_LES128 & 1 & 37 & 0.78 & 25.08 \\
+mHW\_DNS512\_LES256 & 1 & 126 & 0.23 & 7.37 \\
 \bottomrule
 \end{tabular}
 \end{table}
 
-Table~\ref{tab:performance} shows that the completed LES runs reduce MPI task-time per unit simulated time by factors of 5.03--185.37 relative to their respective DNS baselines. Only HW\_DNS512\_LES64 achieves a duration-normalized wall-clock speedup, with $S_{\mathrm{wall}}=1.45$; the other completed LES runs have $S_{\mathrm{wall}}<1$ despite their lower MPI task-time costs. These measurements cover the HW runs only and do not quantify training cost, memory consumption, accelerator utilization or the relative cost of generator inference.
+Table~\ref{tab:performance} shows MPI task-time reductions of 4.74--48.84 for the LES runs. HW\_DNS512\_LES64 and mHW\_DNS512\_LES64 achieve wall-clock speedups of 1.23 and 1.53, respectively. All other LES runs have $S_{\mathrm{wall}}<1$. These short measurements use integer-second runtimes, so rounding is significant for the fastest runs. MPI task-time does not include accelerator resource costs, and these measurements do not quantify training cost or memory usage.
 %----------------------------------------------------------------
 %
 %
@@ -720,7 +727,7 @@ The method was tested with the HW\_N256, HW\_N512, mHW\_N256 and mHW\_N512 confi
     \item the generative model reconstructs the dominant spatial structures of the DNS fields;
     \item the learned fields retain several large-scale statistical features, while high-wavenumber spectral tails and late-time mHW\_N256 enstrophy show discrepancies;
     \item radial-flux trends are reproduced in several intervals, but burst timing and poloidal-flux fluctuations differ from DNS;
-    \item the completed HW runs reduce MPI task-time per unit simulated time by factors of 5.03--185.37, with a duration-normalized wall-clock speedup of 1.45 for HW\_DNS512\_LES64;
+    \item the ten-time-unit HW and mHW benchmarks show MPI task-time reductions of 4.74--48.84, with a maximum wall-clock speedup of 1.53 for mHW\_DNS512\_LES64;
     \item the mHW\_N256 trajectory exhibits pronounced late-time discrepancies; unequal observation windows preclude a controlled resolution ranking.
 \end{itemize}
 
