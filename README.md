@@ -155,7 +155,8 @@ reproduce the full plotted time interval.
 
 `[unet] dns_init` alone controls the Python nonlinear-term callback: modes
 `0`, `1`, and `3` run it from startup; mode `2` uses native BOUT++ brackets
-without the callback or its runtime field diagnostics.
+without the callback or its runtime field diagnostics. Modes `4`–`7` also
+use native brackets with the LES closures described below.
 
 #### Launch the HW and modified HW DNS/LES sweep
 
@@ -556,7 +557,7 @@ diagnostic snapshots.
 
 ### Initialization modes and required BOUT++ grid
 
-`dns_init` accepts `0`, `1`, `2`, or `3`.
+`dns_init` accepts `0` through `7` (and native fresh DNS uses `-1`).
 Any other value causes pBOUT to stop with a configuration error.
 
 | `dns_init` | Initialization and runtime behavior | BOUT++ active grid |
@@ -565,6 +566,29 @@ Any other value causes pBOUT to stop with a configuration error.
 | `1` with reconstruction channels | Germano-filter and downsample the initial DNS. Reconstruct only the selected `U,V` channels; unselected channels use the spectrally resized incoming fields. Apply inverse Germano reconstruction, calculate fine-grid Arakawa terms, filter them when `ALPHA > 0`, and downsample the terms. | `coarse_n` |
 | `1` with `none` | Keep the Germano-filtered initial fields on the fine grid. No U-Net is used, but inverse Germano reconstruction and its configured cutoffs are still applied before the Arakawa calculation. The resulting terms are Germano-filtered when `ALPHA > 0`. | `fine_n` |
 | `2` | Use and evolve the original DNS snapshot directly. No U-Net, inverse Germano reconstruction, or Germano filtering of the Arakawa terms is used. | `fine_n` |
+
+Modes `4`–`7` initialize from the same centered, Germano-filtered and
+spectrally downsampled `[unet] dns_path` snapshot as mode `0`. They use a
+checkpoint-free NumPy initializer and native BOUT++ brackets throughout evolution.
+Use a square coarse grid on one MPI rank. No U-Net checkpoint is needed;
+`implicit` does not affect these modes. Fields are saved in BOUT++ dumps;
+Python runtime diagnostics and `write_arakawa_terms` are unavailable.
+
+| Mode | Added LES dissipation for both density and vorticity |
+| --- | --- |
+| `4` | Hyperviscosity: `(-1)^(p/2-1) Cd Delta^p (Delp2)^(p/2) f`; `[hw] hyper_order=6`, `les_cd=1.96e-3` by default. |
+| `5` | Smagorinsky: `div(nu grad(f))`, `nu=(Cd Delta)^2 S`, using `vx=-DDZ(phi)`, `vz=DDX(phi)` and the thesis strain norm; default `les_cd=5.35e-2`. |
+| `6` | CENTORI: `Cd * ((alpha*(phi-n))^2 + vort^2) * Delp2(f)`; default `les_cd=1.10e-4`. Here `alpha` is `[hw] alpha`. |
+| `7` | Pure implicit LES: no explicit dissipation, including no `Dn` or `Dvort` term. |
+
+`Delta=sqrt(dx*dz)`. Modes `4`–`6` retain the existing background
+`-Dn*Delp4(n)` and `-Dvort*Delp4(vort)` terms. Set those coefficients to zero
+if only the selected closure is wanted. The existing fourth-order background
+diffusion differs from the thesis's second-order background viscosity.
+The formulas follow equations 4.6, 4.8–4.9 and 4.11 in
+[Leddy's thesis](https://etheses.whiterose.ac.uk/id/eprint/13207/7/Thesis_JLeddy.pdf).
+Defaults follow table 4.1; those coefficients were fitted for its specific
+64-by-64 HW case and can be changed with `[hw] les_cd`.
 
 Mode `3` uses `coarse_n` active points, like mode `0`, and ignores reconstruction-channel selection.
 
@@ -688,7 +712,7 @@ selected checkpoint takes precedence over the final fallback shown here.
 | `checkpoint` | **Default:** `<repository>/results/germano_training_output_v10/checkpoints/best.pt`.<br>**Options:** path to a compatible `.pt` checkpoint. |
 | `device` | **Default:** `cuda` when available; otherwise `cpu`.<br>**Options:** a valid PyTorch device, normally `cpu`, `cuda`, or `cuda:N`. |
 | `dns_field_dir` | **Default:** `results_U-Net_DNS/fields`.<br>**Options:** directory containing mode-3 DNS replay `.npz` snapshots. |
-| `dns_init` | **Default:** `0`.<br>**Options:**<br>`0` = initialize with Germano-filtered, downsampled LES fields from `dns_path`.<br>`1` = initialize with filtered DNS and reconstruct according to `reconstruct_channels`.<br>`2` = initialize and run with unfiltered DNS fields and terms.<br>`3` = initialize like mode `0`, then replay snapshots from `dns_field_dir`. |
+| `dns_init` | **Default:** `0`.<br>**Options:**<br>`0` = initialize with Germano-filtered, downsampled LES fields from `dns_path`.<br>`1` = initialize with filtered DNS and reconstruct according to `reconstruct_channels`.<br>`2` = initialize and run with unfiltered DNS fields and terms.<br>`3` = initialize like mode `0`, then replay snapshots from `dns_field_dir`.<br>`4` = hyperviscosity; `5` = Smagorinsky; `6` = CENTORI; `7` = pure implicit LES. |
 | `dns_path` | **Default:** unset (`None`).<br>**Options:** path to the initial DNS `.npz` snapshot. |
 | `implicit` | **Default:** `true`.<br>**Options:** `false` = return DNS brackets; `true` = return incoming BOUT++ brackets minus DNS brackets. |
 | `inverse_cutoff_fraction` | **Default:** checkpoint value; otherwise `None`.<br>**Options:** float in `(0, 1]`; `none`, `off`, `disable`, or `disabled` disables it. |

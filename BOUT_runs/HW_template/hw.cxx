@@ -5,6 +5,7 @@
 #include <numpy/arrayobject.h>
 #include <tuple>
 #include <string>
+#include <cmath>
 
 #include <bout/derivs.hxx>
 #include <bout/invert_laplace.hxx>
@@ -84,7 +85,7 @@ void configureUnetOptions(bool implicit) {
 
 void initPythonModule(PyObject **pModule, PyObject **pInitFlow,
                       PyObject **pFindLESTerms, PyObject **pSaveArakawaTerms,
-                      bool implicit) {
+                      bool implicit, bool nativeLES = false) {
 
 
   // Initialize Python interpreter
@@ -115,10 +116,11 @@ void initPythonModule(PyObject **pModule, PyObject **pInitFlow,
   Py_XDECREF(repr);
 
   // Import Python module
-  *pModule = PyImport_ImportModule("pBOUT-unet");
+  *pModule = PyImport_ImportModule(nativeLES ? "les_init" : "pBOUT-unet");
   if(*pModule == NULL) {
     PyErr_Print();
-    throw BoutException("Could not import pBOUT-unet.py");
+    throw BoutException(nativeLES ? "Could not import les_init.py"
+                                  : "Could not import pBOUT-unet.py");
   }
 
   // The callback first adds [unet] site_packages to the embedded
@@ -136,6 +138,12 @@ void initPythonModule(PyObject **pModule, PyObject **pInitFlow,
     throw BoutException("Python initFlow function not found or not callable");
   }
 
+
+  if (nativeLES) {
+    *pFindLESTerms = nullptr;
+    *pSaveArakawaTerms = nullptr;
+    return;
+  }
 
   // Load Python functions and execute it
   *pFindLESTerms = PyObject_GetAttrString(*pModule, "findLESTerms");
@@ -286,7 +294,7 @@ double* initFlow(double dx, double dy, Field3D n, Field3D phi, Field3D vort, PyO
         Py_DECREF(pInitFlow);
         Py_DECREF(pModule);
         PyErr_Print();
-        fprintf(stderr, "Call to Python function failed!\n");
+        throw BoutException("Call to Python initFlow failed");
       }
     
     } else {
@@ -405,7 +413,7 @@ double* findLESTerms(const int pStep, const double dx, const double simtime, con
         Py_DECREF(pFindLESTerms);
         Py_DECREF(pModule);
         PyErr_Print();
-        fprintf(stderr, "Call to Python function failed!\n");
+        throw BoutException("Call to Python initFlow failed");
       }
     
     } else {
@@ -493,6 +501,8 @@ private:
   BoutReal alpha;     // Adiabaticity (~conductivity)
   BoutReal kappa;     // Density gradient drive
   BoutReal Dvort, Dn; // Diffusion
+  BoutReal lesCd;
+  int hyperOrder;
   bool modified;      // Modified H-W equations?
 
   // Poisson brackets: b0 x Grad(f) dot Grad(g) / B = [f, g]
@@ -512,6 +522,22 @@ private:
     //return Delp2(var);
   }
 
+  Field3D hyperLaplacian(const Field3D& field) {
+    Field3D result = field;
+    for (int order = 0; order < hyperOrder / 2; ++order) {
+      mesh->communicate(result);
+      result = Delp2(result);
+    }
+    return result;
+  }
+
+  Field3D strainDiffusion(const Field3D& viscosity, const Field3D& field) {
+    Field3D fluxX = viscosity * DDX(field);
+    Field3D fluxZ = viscosity * DDZ(field);
+    mesh->communicate(fluxX, fluxZ);
+    return DDX(fluxX) + DDZ(fluxZ);
+  }
+
 protected:
   int init(bool UNUSED(restart)) {
 
@@ -524,8 +550,12 @@ protected:
     modified = options["modified"].withDefault(false);
     auto& unet = Options::root()["unet"];
     dns_init = unet["dns_init"].withDefault(0);
-    if (dns_init < -1 || dns_init > 3) {
-      throw BoutException("dns_init must be -1, 0, 1, 2, or 3");
+    if (dns_init < -1 || dns_init > 7) {
+      throw BoutException("dns_init must be between -1 and 7");
+    }
+    if (dns_init >= 4) {
+      // Classical LES needs only snapshot initialization, no checkpoint or inference.
+      unet.setConditionallyUsed();
     }
     if (dns_init == -1) {
       // Python-only settings may remain in a shared input file for fresh DNS.
@@ -534,6 +564,18 @@ protected:
     writeArakawaTerms = unet["write_arakawa_terms"].isSet()
         ? unet["write_arakawa_terms"].as<bool>()
         : options["write_arakawa_terms"].withDefault(false);
+    if (dns_init >= 4 && writeArakawaTerms) {
+      throw BoutException("write_arakawa_terms requires dns_init 0-3");
+    }
+    lesCd = options["les_cd"].withDefault(
+        dns_init == 4 ? 1.96e-3 : dns_init == 5 ? 5.35e-2 : 1.10e-4);
+    hyperOrder = options["hyper_order"].withDefault(6);
+    if (!std::isfinite(lesCd) || lesCd < 0.) {
+      throw BoutException("hw:les_cd must be finite and nonnegative");
+    }
+    if (hyperOrder < 4 || hyperOrder % 2 != 0) {
+      throw BoutException("hw:hyper_order must be an even integer >= 4");
+    }
     implicitStylES = unet["implicit"].withDefault(true);
     profile_StylES = unet["profile"].withDefault(false);
 
@@ -556,7 +598,7 @@ protected:
 
     if (dns_init != -1) {
       initPythonModule(&pModule, &pInitFlow, &pFindLESTerms,
-                       &pSaveArakawaTerms, implicitStylES);
+                       &pSaveArakawaTerms, implicitStylES, dns_init >= 4);
     }
 
     CELL_LOC outloc = n.getLocation();
@@ -568,6 +610,9 @@ protected:
     // Native DNS starts at t=0 with BOUT.inp initial conditions.
     // Mode 2 and LES/filter/replay modes still import fields through Python.
     if (dns_init != -1) {
+      if (mesh->getNXPE() != 1 || mesh->getNYPE() != 1 || mesh->LocalNx - 4 != n.getNz()) {
+        throw BoutException("Snapshot initialization requires a square grid on one MPI rank");
+      }
       double* npv = initFlow(deltax, deltaz, n, phi, vort, pModule, pInitFlow);
       const int N_LES = n.getNz();
       int cont = 0;
@@ -649,7 +694,7 @@ protected:
     }
 
     // find brackets term (for explicit) or subgrid scale terms (for implicit) via StylES
-    if (dns_init != -1 && dns_init != 2)
+    if (dns_init >= 0 && dns_init <= 3 && dns_init != 2)
     {
       if (implicitStylES){
         pPhiVort = bracket(phi, vort, bm);
@@ -728,13 +773,46 @@ protected:
     // Diffusive terms
     mesh->communicate(n, vort);
 
-    if (implicitStylES){
-      ddt(vort) = - Dvort*Delp4(vort) + tPhiVort;
-      ddt(n)    = - Dn*Delp4(n)       + tPhiN;
-    }
-    else{
-      ddt(vort) = - Dvort*Delp4(vort);
-      ddt(n)    = - Dn*Delp4(n);
+    if (dns_init == 7) {
+      // Pure implicit LES: numerical discretization supplies all dissipation.
+      ddt(vort) = 0.;
+      ddt(n) = 0.;
+    } else if (dns_init >= 4) {
+      ddt(vort) = -Dvort * Delp4(vort);
+      ddt(n) = -Dn * Delp4(n);
+      if (dns_init == 4) {
+        const BoutReal delta = std::sqrt(deltax * deltaz);
+        const BoutReal coefficient = (hyperOrder / 2 % 2 == 0 ? -1. : 1.)
+                                    * lesCd * std::pow(delta, hyperOrder);
+        ddt(vort) += coefficient * hyperLaplacian(vort);
+        ddt(n) += coefficient * hyperLaplacian(n);
+      } else {
+        phi = phiSolver->solve(vort, phi);
+        mesh->communicate(phi);
+        if (dns_init == 5) {
+          Field3D vx = -DDZ(phi), vz = DDX(phi);
+          mesh->communicate(vx, vz);
+          Field3D sxx = DDX(vx), szz = DDZ(vz);
+          Field3D sxz = DDZ(vx) + DDX(vz);
+          Field3D viscosity = lesCd * lesCd * deltax * deltaz
+              * sqrt(sxx*sxx + szz*szz + 0.5*sxz*sxz);
+          ddt(vort) += strainDiffusion(viscosity, vort);
+          ddt(n) += strainDiffusion(viscosity, n);
+        } else {
+          // Thesis equation 4.11: coefficient times Laplacian, not divergence.
+          Field3D current = alpha * (phi - n);
+          Field3D viscosity = lesCd * (current*current + vort*vort);
+          ddt(vort) += viscosity * Delp2(vort);
+          ddt(n) += viscosity * Delp2(n);
+        }
+      }
+    } else {
+      ddt(vort) = -Dvort * Delp4(vort);
+      ddt(n) = -Dn * Delp4(n);
+      if (implicitStylES) {
+        ddt(vort) += tPhiVort;
+        ddt(n) += tPhiN;
+      }
     }
 
 
