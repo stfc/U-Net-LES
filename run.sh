@@ -27,7 +27,7 @@ ALPHA="${ALPHA:-$(awk -v lx="${LX}" -v n="${LES_N}" 'BEGIN {print lx / n}')}"
 CHECKPOINT_EVERY="${CHECKPOINT_EVERY:-25}"
 DIAGNOSTIC_EVERY="${DIAGNOSTIC_EVERY:-5}"
 DATASET="${DATASET:-../../data/BOUT_runs/HW_2D/Papers/PoP23/HW_N${DNS_N}/fields/}"
-OUTPUT_DIR="${OUTPUT_DIR:-training_dns${DNS_N}_les${LES_N}}"
+OUTPUT_DIR="${OUTPUT_DIR:-training_HW_dns${DNS_N}_les${LES_N}}"
 
 # Select the pre-inversion filter, for example:
 #   INVERSE_FILTER=cutoff sbatch run.sh
@@ -54,7 +54,7 @@ python train_germano_unet.py \
   --inverse-filter "${INVERSE_FILTER}" \
   --inverse-cutoff-fraction 0.707107  \
   --inverse-min-wavenumber 1.0 \
-  --no-variational --lambda-kl 0.0 \
+  --variational --lambda-kl 1.0 \
   --inverse-method van_cittert \
   --van-cittert-iterations 5 \
   --van-cittert-relaxation 1.0
