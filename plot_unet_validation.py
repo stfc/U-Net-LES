@@ -74,6 +74,11 @@ def parse_args() -> argparse.Namespace:
         "dataset3_fields", type=Path, nargs="?",
         help="Optional third model dataset directory"
     )
+    parser.add_argument(
+        "--labels", nargs="+", metavar="LABEL",
+        help="Custom dataset labels in positional input order; provide one per "
+             "dataset (default: labels inferred from input paths)",
+    )
     parser.add_argument \
     (
         "--output-dir", type=Path, default=Path("validation_U-Net/comparison"),
@@ -161,7 +166,13 @@ def parse_args() -> argparse.Namespace:
         "--batch", type=int, default=0,
         help="Batch index for batched snapshots (default: 0)",
     )
-    return parser.parse_args()
+    args = parser.parse_args()
+    dataset_count = sum(path is not None for path in (
+        args.unet_fields, args.dns_fields, args.dataset2_fields, args.dataset3_fields,
+    ))
+    if args.labels is not None and len(args.labels) != dataset_count:
+        parser.error(f"--labels requires one label per dataset ({dataset_count} labels)")
+    return args
 
 
 def _select_field(values: np.ndarray, batch: int, source: Path) -> np.ndarray:
@@ -1349,7 +1360,7 @@ def save_endpoint_spectrum_comparison \
         selected_times = []
         for dataset_index, (label, times, fields) in enumerate(datasets):
             time_index = int(np.argmin(np.abs(times))) if stage == "Initial" else -1
-            selected_times.append(f"{label}: t={times[time_index]:g}")
+            selected_times.append(f"t={times[time_index]:g}")
             k, energy = _hw_energy_spectrum(fields[time_index], lx, ly, smooth)
             positive = (k > 0) & (energy > 0)
             axis.loglog(
@@ -1363,7 +1374,10 @@ def save_endpoint_spectrum_comparison \
                 cutoff, color="black", linestyle=":", linewidth=1.4,
                 label=f"{cutoff_n}-grid Nyquist",
             )
-        axis.set_title(f"{stage} HW energy spectrum\n" + "; ".join(selected_times))
+        axis.set_title(
+            f"{stage} HW energy spectrum, "
+            + "; ".join(dict.fromkeys(selected_times))
+        )
         axis.set_xlabel(r"$k$")
         axis.set_ylabel(r"Shell energy $E(k)$")
         axis.set_ylim(SPECTRUM_Y_MIN, SPECTRUM_Y_MAX)
@@ -1525,11 +1539,14 @@ def main() -> None:
         for path in requested_paths
     )
     datasets = []
-    for dataset_path in input_paths:
+    for dataset_index, dataset_path in enumerate(input_paths):
         times, _, fields = read_history(
             dataset_path, args.batch, args.input_format, args.bout_y_index
         )
-        label = dataset_label(dataset_path)
+        label = (
+            args.labels[dataset_index] if args.labels is not None
+            else dataset_label(dataset_path)
+        )
         datasets.append((label, times, fields))
     reference_hints = tuple(path.resolve() for path in input_paths)
     datasets = order_datasets_with_reference_first \
