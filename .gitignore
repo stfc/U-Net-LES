@@ -23,6 +23,9 @@ papers/JCP26/Paper_Germano_GenerativeAI.blg
 papers/JCP26/Paper_Germano_GenerativeAI.synctex.gz
 results/
 tests/__pycache__/
-training/
+germano_inference_output*
+training*/
 validation_U-Net/
 .DS_Store
+rubbish
+validation*
