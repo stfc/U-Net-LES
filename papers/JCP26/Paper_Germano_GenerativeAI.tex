@@ -41,7 +41,7 @@ We then use the inverse of Germano's filter to reconstruct the fine-scale detail
 
 The method is tested on the 2D Hasegawa-Wakatani (HW) and modified Hasegawa-Wakatani (mHW) plasma turbulence models at $256^2$ and $512^2$ DNS resolutions using 2, 4 and 8 times smaller LES grids in each direction. We compare the model with DNS results on energy, enstrophy, spectra, probability distributions, poloidal and radial fluxes and computational cost. Validation extends to 1000 simulation time units for HW and 100 for mHW, whose faster dynamics lead toward laminarization. 
 
-For the $256^2$ cases, the finer LES meshes preserve several integral and spectral features, whereas the coarsest mesh yields unphysical behavior. In contrast, for the $512^2$ cases, even the coarsest LES mesh preserves the turbulent character of the flow and maintains acceptable statistics for both the HW and mHW models. Thousand-time-unit HW and mHW benchmarks MPI task-time reductions of 4.82--49.45, with a maximum wall-clock speedup of 1.5x when compared to full CPU socket.
+For the $256^2$ cases, the finer LES meshes preserve several integral and spectral features, whereas the coarsest mesh yields unphysical behavior. In contrast, for the $512^2$ cases, even the coarsest LES mesh preserves the turbulent character of the flow and maintains acceptable statistics for both the HW and mHW models. Thousand-time-unit HW and mHW benchmarks MPI task-time reductions of 4.82--49.45, with a maximum wall-clock speedup of 1.55x when compared to full CPU socket.
 \end{abstract}
 
 \begin{keyword}
