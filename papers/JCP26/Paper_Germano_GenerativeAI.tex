@@ -455,7 +455,7 @@ Together, these diagnostics support the use of an explicit closure for this $64^
 \begin{figure}[htbp]
 \centering
 \includegraphics[width=\linewidth]{images/validation_current/LES_MODELS/P_pdf_vs_time.png}
-\caption{Initial ($t=0$, left) and final ($t=1000$, right) spatial vorticity PDFs for the $256^2$ DNS and three $64^2$ LES configurations. Vorticity $\zeta$ is labelled $\omega$ in the plots.}
+\caption{Initial ($t=0$, left) and final ($t=1000$, right) spatial vorticity PDFs for the $256^2$ DNS and three $64^2$ LES configurations.}
 \label{fig:les-models-vorticity}
 \end{figure}
 
@@ -524,18 +524,12 @@ Figures~\ref{fig:fields-HW_N256}--\ref{fig:fields-mHW_N512} compare the initial 
 
 \subsection{Energy and enstrophy}
 
-The diagnostics are the spatially integrated HW energy and generalized enstrophy,
+The diagnostics are the spatially integrated HW energy ($E$) and generalized enstrophy ($Z$),
 \begin{align}
- E &= \frac12\int_\Omega\left(n^2+|\nabla_x\phi|^2 + |\nabla_y\phi|^2\right)\,d\mathbf{\omega},\\
- W &= \frac12\int_\Omega(n-\zeta)^2\,d\mathbf{\omega}.
+ E &= \frac12\int_\Omega\left(n^2+\nabla_x\phi^2 + \nabla_y\phi^2\right)\,d\mathbf{\Omega},\\
+ Z &= \frac12\int_\Omega(n-\zeta)^2\,d\mathbf{\Omega}.
 \end{align}
-The current plotting routine evaluates both with cell-area quadrature:
-\begin{align}
- E_h &= \frac{\Delta x\Delta y}{2}\sum_{i,j}
- \left[n_{ij}^2+(D_x\phi)_{ij}^2+(D_y\phi)_{ij}^2\right],\\
- W_h &= \frac{\Delta x\Delta y}{2}\sum_{i,j}(n_{ij}-\zeta_{ij})^2,
-\end{align}
-where $D_x$ and $D_y$ are fourth-order periodic finite-difference derivatives. The plots label generalized enstrophy as $Z$ and vorticity as $\omega$; these correspond to $W$ and $\zeta$ here.
+where $\nabla \phi$ is computed with fourth-order finite-difference derivatives. 
 
 Figures~\ref{fig:energy} and~\ref{fig:enstrophy} reveal a strong resolution dependence over the longer HW interval. In HW\_N256, DNS energy fluctuates around $4.1$--$5.4\times10^3$. The $128^2$ and $64^2$ LES meshes retain comparable energy levels, although their fluctuations do not remain synchronized with DNS. The $32^2$ LES instead decays rapidly to approximately $1.0$--$1.3\times10^3$ after $t\simeq150$. Its generalized enstrophy falls to roughly $2.5$--$3.0\times10^3$, compared with DNS levels of approximately $7.5$--$9.5\times10^3$. Thus the coarse reconstruction loses both diagnostics over the longer interval.
 
