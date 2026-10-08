@@ -354,12 +354,11 @@ $\lambda_\zeta^{(2)}$ & 0.01 & Normalized vorticity MSE weight \\
 \end{tabular}
 \end{table}
 
-\subsection{Numerical dataset}\label{sec:Dataset}
+\subsection{Dataset}\label{sec:Dataset}
 
-The DNS dataset were generated using the BOUT++ plasma solver, starting from the
-Hasegawa-Wakatani input file provided in the examples folder. 
+The DNS dataset were generated using the BOUT++ plasma solver. 
 Table \ref{tab:cases}
-and \ref{tab:dataset_effort} resumes the test case resolutions, physical parameters
+and \ref{tab:dataset_effort} summarises the test case resolutions, physical parameters
 and computational efforts from \citet{castagna_stylegan_2024}. Four configurations were analysed, two for the HW model and two for the mHW model, with $256^2$ and $512^2$ DNS meshes. The different dataset have a different final time $T_f$ but the same number of trajectories $N_{runs}$. We start collecting samples from $T_s$ every $\Delta T_s$ for a total $N_s$ samples. The choice of $\Delta T_s$ is such that the variation in Similarity Structural Index Metric (SSIM) is always $\geq$ 10\%. The last 2 columns of Table \ref{tab:dataset_effort} show the overall computational cost $C_{cost}$ in node per hours, where 1 node of ScafellPike supercomputer at Hartree Centre contains a 2 socket of 16-cores Intel Xeon Gold processors, and the disk space occupied by the data.
 
 \begin{table}[htbp]
@@ -430,8 +429,8 @@ We compare HW and mHW at DNS resolutions of $256^2$ and $512^2$, each with three
 
 The statistical figures show energy, enstrophy and particle-flux histories, final-time spectra and three final-time PDFs. The mHW\_N256 plots are regenerated from the DNS dumps and saved U-Net reconstructed fields for the $128^2$, $64^2$ and $32^2$ LES meshes, using the same $0\leq t\leq100$ window. The comparisons are against DNS; no separate conventional-closure curve is present. However, before diving into into our approach results, we will show why traditional LES models fail to capture the correct nature of the turbulence.
 
-\subsection{Comparison with conventional LES models}\label{sec:les-models}
-We compare three conventional LES configurations for the HW system on a $64^2$ mesh against the $256^2$ DNS: Smagorinsky, CENTORI and implicit LES. All use $\alpha=1$, $\kappa=0.5$, a periodic domain of size $50.176\times50.176$ and the Arakawa bracket, and are initialized from the same DNS snapshot. No neural reconstruction is used in these runs. Smagorinsky applies strain-dependent diffusion to density and vorticity, with input coefficient $C_s=5.35\times10^{-2}$. CENTORI instead uses a local diffusivity $\nu_C=C_C\{[\alpha(\phi-n)]^2+\zeta^2\}$, with $C_C=1.10\times10^{-4}$, multiplying the Laplacian of each field (see \cite{leddy2016thesis} for more details). Both explicit closures retain background fourth-order diffusion with $D_n=D_\zeta=10^{-3}$. The implicit configuration omits both the explicit closure and background diffusion, leaving its small-scale behaviour controlled by the numerical discretization.
+\subsection{Comparison with algebraic LES models}\label{sec:les-models}
+We compare three algebraic LES models for the HW system on a $64^2$ mesh against the $256^2$ DNS: Smagorinsky, CENTORI and implicit LES. All use $\alpha=1$, $\kappa=0.5$, a periodic domain of size $50.176\times50.176$ and the Arakawa bracket, and are initialized from the same DNS snapshot. No neural reconstruction is used in these runs. Smagorinsky applies strain-dependent diffusion to density and vorticity, with input coefficient $C_s=5.35\times10^{-2}$. CENTORI instead uses a local diffusivity $\nu_C=C_C\{[\alpha(\phi-n)]^2+\zeta^2\}$, with $C_C=1.10\times10^{-4}$, multiplying the Laplacian of each field (see \cite{leddy2016thesis} for more details). Both explicit closures retain background fourth-order diffusion with $D_n=D_\zeta=10^{-3}$. The implicit configuration omits both the explicit closure and background diffusion, leaving its small-scale behaviour controlled by the numerical discretization.
 
 Figure~\ref{fig:les-models-spectra} compares the initial and final shell energy spectra. Initially, the three LES spectra nearly coincide and follow DNS through the energy-containing range, with a faster decay near the coarse-grid cutoff. At $t=1000$, Smagorinsky and CENTORI retain the main DNS spectral peak around $k\simeq0.5$--$0.8$. CENTORI is closer to DNS at the lowest plotted wavenumbers, whereas Smagorinsky shows a larger energy deficit there. Both closures exceed the DNS spectrum over part of the range above $k\simeq2$, before falling sharply near the coarse-grid cutoff. Agreement at the main peak therefore does not extend uniformly across the spectrum. In contrast, implicit LES has a substantial deficit at low and intermediate wavenumbers and a pronounced accumulation near the grid scale, with a peak just beyond the marked $64^2$-grid Nyquist wavenumber. It does not preserve the DNS spectral distribution over this interval.
 
@@ -447,21 +446,28 @@ Together, these diagnostics support the use of an explicit closure for this $64^
 
 \begin{figure}[htbp]
 \centering
-\includegraphics[width=\linewidth]{images/validation_current/LES_MODELS/hw_energy_spectra_initial_final.png}
+\includegraphics{images/validation_current/LES_MODELS/hw_energy_spectra_initial_final.pdf}
 \caption{Initial ($t=0$, left) and final ($t=1000$, right) HW shell energy spectra for the $256^2$ DNS and Smagorinsky, CENTORI and implicit LES on a $64^2$ mesh. The dotted vertical line marks the $64^2$-grid Nyquist wavenumber.}
 \label{fig:les-models-spectra}
 \end{figure}
 
 \begin{figure}[htbp]
 \centering
-\includegraphics[width=\linewidth]{images/validation_current/LES_MODELS/P_pdf_vs_time.png}
+\includegraphics{images/validation_current/LES_MODELS/P_pdf_vs_time.pdf}
 \caption{Initial ($t=0$, left) and final ($t=1000$, right) spatial vorticity PDFs for the $256^2$ DNS and three $64^2$ LES configurations.}
 \label{fig:les-models-vorticity}
 \end{figure}
 
 \begin{figure}[htbp]
 \centering
-\includegraphics[width=\linewidth]{images/validation_current/LES_MODELS/particle_flux_vs_time.png}
+\begin{subfigure}[t]{0.48\textwidth}
+\includegraphics{images/validation_current/LES_MODELS/particle_flux_vs_time.pdf}
+\caption{Fluxes at LES resolution}
+\end{subfigure}
+\begin{subfigure}[t]{0.48\textwidth}
+\includegraphics{images/validation_current/LES_MODELS_DNS/particle_flux_vs_time.pdf}
+\caption{Fluxes at DNS resolution}
+\end{subfigure}
 \caption{Domain-averaged radial (upper panel) and poloidal (lower panel) turbulent particle fluxes for the $256^2$ HW DNS and Smagorinsky, CENTORI and implicit LES on a $64^2$ mesh over $0\leq t\leq1000$. Density fluctuations are defined relative to the poloidal mean.}
 \label{fig:les-models-particle-flux}
 \end{figure}
