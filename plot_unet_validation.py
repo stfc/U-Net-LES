@@ -2,8 +2,9 @@
 """Compare up to four field-snapshot histories.
 
 Read ``fields_*.npz`` snapshots or BOUT NetCDF dumps, then plot
-domain-center values, total/component HW-energy, enstrophy, and particle-flux
-histories. The dataset whose
+domain-center values, total/component HW-energy, enstrophy, particle-flux,
+histories, plus endpoint velocity kurtosis and longitudinal increment flatness.
+The dataset whose
 directory name contains ``DNS`` is used as the reference; if none does, the
 first dataset is the reference. Animations and the initial-derivative plot
 compare the first non-reference dataset with it.
@@ -16,6 +17,7 @@ import os
 import re
 from pathlib import Path
 import shutil
+from scipy import signal
 
 # Set before third-party imports can initialize HDF5 on the shared filesystem.
 # Preserve an explicit user override (for example HDF5_USE_FILE_LOCKING=TRUE).
@@ -37,6 +39,7 @@ from germano_common import \
     SPECTRUM_Y_MIN,
     SPECTRUM_Y_MAX,
     isotropic_hw_energy_spectrum,
+    filter_snapshot
 )
 
 
@@ -74,6 +77,16 @@ def parse_args() -> argparse.Namespace:
         "dataset3_fields", type=Path, nargs="?",
         help="Optional third model dataset directory"
     )
+    parser.add_argument \
+    (
+        "dataset4_fields", type=Path, nargs="?",
+        help="Optional third model dataset directory"
+    )
+    parser.add_argument \
+    (
+        "dataset5_fields", type=Path, nargs="?",
+        help="Optional third model dataset directory"
+    )
     parser.add_argument(
         "--labels", nargs="+", metavar="LABEL",
         help="Custom dataset labels in positional input order; provide one per "
@@ -83,6 +96,10 @@ def parse_args() -> argparse.Namespace:
     (
         "--output-dir", type=Path, default=Path("validation_U-Net/comparison"),
         help="Output directory (default: validation_U-Net/comparison)",
+    )
+    parser.add_argument \
+    (
+        "--ysize", type=float, default=8,
     )
     parser.add_argument \
     (
@@ -106,7 +123,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--lx", type=float, default=50.176)
     parser.add_argument("--ly", type=float, default=50.176)
-    parser.add_argument("--dpi", type=int, default=180)
+    parser.add_argument("--dpi", type=int, default=300)
     parser.add_argument(
         "--final-time", type=float, default=None,
         help="Inclusive upper simulation-time limit for all plots and animations "
@@ -143,15 +160,17 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument \
     (
+        "-cutoff",
         "--spectrum-cutoff-n",
         type=int,
-        default=64,
+        default=None,
         help= \
         (
             "Grid size whose Nyquist wavenumber is marked on the static "
             "initial/final HW-spectrum comparison; 0 disables the marker (default: 64)"
         ),
     )
+    parser.add_argument("--filter-dns", type=int, default=None)
     parser.add_argument \
     (
         "--overall-animation-limits", action="store_true",
@@ -168,7 +187,7 @@ def parse_args() -> argparse.Namespace:
     )
     args = parser.parse_args()
     dataset_count = sum(path is not None for path in (
-        args.unet_fields, args.dns_fields, args.dataset2_fields, args.dataset3_fields,
+        args.unet_fields, args.dns_fields, args.dataset2_fields, args.dataset3_fields, args.dataset4_fields, args.dataset5_fields
     ))
     if args.labels is not None and len(args.labels) != dataset_count:
         parser.error(f"--labels requires one label per dataset ({dataset_count} labels)")
@@ -558,8 +577,8 @@ def save_centerpoint_history(datasets, output_path: Path, dpi: int) -> Path:
     )
     styles = \
     (
-        ("black", "-"), ("tab:blue", "-"), ("tab:orange", "--"),
-        ("tab:green", "-.")
+        ("black", "-"), ("tab:blue", "-"), ("orangered", "--"),
+        ("limegreen", "-.", ("darkgray", "--"))
     )
     for channel, name in enumerate(FIELD_NAMES):
         axis = axes[channel, 0]
@@ -595,7 +614,7 @@ def save_field_extrema_history(datasets, output_path: Path, dpi: int) -> Path:
     (
         len(FIELD_NAMES), 1, figsize=(9, 10), sharex=True, squeeze=False
     )
-    colors = ("black", "tab:blue", "tab:orange", "tab:green")
+    colors = ("black", "tab:blue", "orangered", "limegreen", "darkgray")
     for channel, name in enumerate(FIELD_NAMES):
         axis = axes[channel, 0]
         for (label, times, fields), color in zip(datasets, colors):
@@ -635,8 +654,8 @@ def save_field_pdf_comparison \
     target_times = np.array([0.0, final_time])
     styles = \
     (
-        ("black", "-"), ("tab:blue", "-"), ("tab:orange", "--"),
-        ("tab:green", "-.")
+        ("black", "-"), ("tab:blue", "-"), ("orangered", "-"),
+        ("limegreen", "-"), ("darkgray", "--")
     )
     selected_indices = \
     [
@@ -665,42 +684,46 @@ def save_field_pdf_comparison \
         bins = np.linspace(minimum, maximum, 65)
         figure, axes = plt.subplots \
         (
-            1, 2, figsize=(12, 5), sharex=True, sharey=True,
+            1, 1, figsize=(8/2.54,args.ysize/2.54), sharex=True, sharey=True,
         )
         field_label = HW_FIELD_LABELS.get(name, name)
         maximum_density = 0.0
-        for time_index, (axis, target_time) in enumerate \
+        # for time_index, (axis, target_time) in enumerate \
+        # (
+        #     zip(axes.ravel(), target_times)
+        # ):
+        time_index = -1
+        target_time = target_times[time_index]
+        axis = axes
+        for dataset, indices, values, (color, linestyle) in zip \
         (
-            zip(axes.ravel(), target_times)
+            datasets, selected_indices, selected_values, styles
         ):
-            for dataset, indices, values, (color, linestyle) in zip \
+            label, times, _ = dataset
+            pdf, _ = np.histogram \
             (
-                datasets, selected_indices, selected_values, styles
-            ):
-                label, times, _ = dataset
-                pdf, _ = np.histogram \
-                (
-                    values[time_index].ravel(), bins=bins, density=True
-                )
-                maximum_density = max(maximum_density, float(pdf.max()))
-                axis.stairs \
-                (
-                    pdf, bins, color=color, linestyle=linestyle,
-                    linewidth=1.6,
-                    label=f"{label} (t={times[indices[time_index]]:g})",
-                )
-            stage = "Initial" if time_index == 0 else "Final"
-            axis.set_title(f"{stage}: target t={target_time:g}")
-            axis.set_xlabel(field_label)
-            axis.set_ylabel("Probability density")
-            axis.grid(True, alpha=0.3)
-            axis.legend(fontsize="small")
+                values[time_index].ravel(), bins=bins, density=True
+            )
+            maximum_density = max(maximum_density, float(pdf.max()))
+            axis.stairs \
+            (
+                pdf, bins, color=color, linestyle=linestyle,
+                linewidth=1.6,
+                label=f"{label}",
+            )
+        stage = "Initial" if time_index == 0 else "Final"
+        axis.set_title(f"t={target_time:g}")
+        axis.set_xlabel(field_label)
+        axis.set_ylabel("Probability density")
+        axis.grid(True, alpha=0.3)
+        axis.legend(fontsize="small", handletextpad=0.4, handlelength=1., columnspacing=0.8)
         # Set the shared scale after both panels so a taller final peak is visible.
-        axes[0].set_ylim(0.0, 1.1 * maximum_density if maximum_density else 1.0)
-        figure.suptitle(f"{field_label} initial and final spatial PDFs")
+        # axes[0].set_ylim(0.0, 1.1 * maximum_density if maximum_density else 1.0)
+        # figure.suptitle(f"{field_label} initial and final spatial PDFs")
         figure.tight_layout()
         output_path = output_dir / f"{name}_pdf_vs_time.png"
         figure.savefig(output_path, dpi=dpi, bbox_inches="tight")
+        figure.savefig(str(output_path).replace(".png", ".pdf"), dpi=dpi, bbox_inches="tight")
         plt.close(figure)
         output_paths.append(output_path)
     return tuple(output_paths)
@@ -711,11 +734,11 @@ def save_energy_comparison \
     datasets, output_path: Path, lx: float, ly: float, dpi: int
 ) -> Path:
     """Plot overlaid HW energy histories."""
-    figure, axis = plt.subplots(figsize=(7.4, 5.2))
+    figure, axis = plt.subplots(figsize=(8/2.54, args.ysize/2.54))
     styles = \
     (
-        ("black", "-"), ("tab:blue", "-"), ("tab:orange", "--"),
-        ("tab:green", "-.")
+        ("black", "-"), ("tab:blue", "-"), ("orangered", "--"),
+        ("limegreen", "-."), ("darkgray", "--")
     )
     for (label, times, fields), (color, linestyle) in zip(datasets, styles):
         axis.plot \
@@ -725,13 +748,21 @@ def save_energy_comparison \
         )
     axis.set_xlabel(r"$\omega_{ci}t$")
     axis.set_xlim(left=0.0)
-    axis.set_ylabel(r"$E=\frac{1}{2}\int\left(n^2+|\nabla\phi|^2\right)\,dx\,dy$")
-    axis.set_ylim(bottom=0.0)
-    axis.set_title("Hasegawa–Wakatani energy versus time")
+    # axis.set_ylabel(r"$E=\frac{1}{2}\int\left(n^2+\nabla\phi^2\right)\,dx\,dy$")
+    axis.set_ylabel(r"$E$")
+    # axis.set_ylim(bottom=0.0)
+    # axis.set_title("Hasegawa–Wakatani energy versus time")
     axis.grid(True, alpha=0.3)
-    axis.legend()
+    # axis.legend()
+    numcol = len(datasets)
+    yanchor = -0.3
+    if numcol > 4:
+        numcol = 3
+        yanchor = -0.4
+    axis.legend(loc="center", fontsize="small", bbox_to_anchor=(0.5, yanchor), ncols=numcol, handletextpad=0.4, handlelength=1., columnspacing=0.8)
     figure.tight_layout()
     figure.savefig(output_path, dpi=dpi, bbox_inches="tight")
+    figure.savefig(str(output_path).replace(".png", ".pdf"), dpi=dpi, bbox_inches="tight")
     plt.close(figure)
     return output_path
 
@@ -741,11 +772,11 @@ def save_enstrophy_comparison \
     datasets, output_path: Path, lx: float, ly: float, dpi: int
 ) -> Path:
     """Plot overlaid HW enstrophy histories using the StylES convention."""
-    figure, axis = plt.subplots(figsize=(7.4, 5.2))
+    figure, axis = plt.subplots(figsize=(8/2.54, args.ysize/2.54))
     styles = \
     (
-        ("black", "-"), ("tab:blue", "-"), ("tab:orange", "--"),
-        ("tab:green", "-.")
+        ("black", "-"), ("tab:blue", "-"), ("orangered", "--"),
+        ("limegreen", "-."), ("darkgray", "--")
     )
     for (label, times, fields), (color, linestyle) in zip(datasets, styles):
         axis.plot \
@@ -755,13 +786,21 @@ def save_enstrophy_comparison \
         )
     axis.set_xlabel(r"$\omega_{ci}t$")
     axis.set_xlim(left=0.0)
-    axis.set_ylabel(r"$Z=\frac{1}{2}\int(n-\omega)^2\,dx\,dy$")
-    axis.set_ylim(bottom=0.0)
-    axis.set_title("Hasegawa–Wakatani enstrophy versus time")
+    axis.set_ylabel(r"$Z$")
+    # axis.set_ylim(bottom=0.0)
+    # axis.set_title("Hasegawa–Wakatani enstrophy versus time")
     axis.grid(True, alpha=0.3)
-    axis.legend()
+    # axis.legend()
+
+    numcol = len(datasets)
+    yanchor = -0.3
+    if numcol > 4:
+        numcol = 3
+        yanchor = -0.4
+    axis.legend(loc="center", fontsize="small", bbox_to_anchor=(0.5, yanchor), ncols=numcol, handletextpad=0.4, handlelength=1., columnspacing=0.8)
     figure.tight_layout()
     figure.savefig(output_path, dpi=dpi, bbox_inches="tight")
+    figure.savefig(str(output_path).replace(".png", ".pdf"), dpi=dpi, bbox_inches="tight")
     plt.close(figure)
     return output_path
 
@@ -771,33 +810,46 @@ def save_particle_flux_comparison \
     datasets, output_path: Path, lx: float, ly: float, dpi: int
 ) -> Path:
     """Compare radial averages of the poloidally averaged particle fluxes."""
-    figure, axes = plt.subplots(2, 1, figsize=(8.2, 7.5), sharex=True)
+    figure, axes = plt.subplots(2, 1, figsize=(8/2.54,args.ysize/2.54), sharex=True)
     styles = (
-        ("black", "-"), ("tab:blue", "-"), ("tab:orange", "--"),
-        ("tab:green", "-.")
+        ("black", "-"), ("tab:blue", "-"), ("orangered", "--"),
+        ("limegreen", "-."), ("darkgray", "--")
     )
     for (label, times, fields), (color, linestyle) in zip(datasets, styles):
         for axis, profile in zip(axes, hw_particle_fluxes(fields, lx, ly)):
             axis.plot(
-                times, np.mean(profile, axis=-1), color=color,
+                times[:200], signal.savgol_filter(np.mean(profile, axis=-1), 20, polyorder=3)[:200], color=color,
                 linestyle=linestyle, linewidth=1.6, label=label,
             )
     labels = (
-        r"$\langle\Gamma_x\rangle_x=-\langle\widetilde{n}\,\partial_y\phi\rangle_{x,y}$",
-        r"$\langle\Gamma_y\rangle_x=\langle\widetilde{n}\,\partial_x\phi\rangle_{x,y}$",
+        # r"$\langle\Gamma_x\rangle_x=-\langle\widetilde{n}\,\partial_y\phi\rangle_{x,y}$",
+        # r"$\langle\Gamma_y\rangle_x=\langle\widetilde{n}\,\partial_x\phi\rangle_{x,y}$",
+        r"$\langle\Gamma_x\rangle_x$",
+        r"$\langle\Gamma_y\rangle_x$",
     )
-    for axis, title, ylabel in zip(
+    for i, (axis, title, ylabel) in enumerate(zip(
         axes, ("Radial particle flux", "Poloidal particle flux"), labels
-    ):
-        axis.set_title(title)
+    )):
+        # axis.set_title(title)#, fontsize="small")
         axis.set_ylabel(ylabel)
         axis.axhline(0.0, color="gray", linewidth=0.8, linestyle=":")
         axis.grid(True, alpha=0.3)
-        axis.legend()
+        if "Poloidal" in title:
+            ylim = abs(np.array(axis.get_ylim())).max()
+            axis.set_ylim(-ylim, ylim)
+        #     axis.legend(fontsize="small")
     axes[-1].set_xlabel(r"$\omega_{ci}t$")
     axes[-1].set_xlim(left=0.0)
     figure.tight_layout()
+
+    numcol = len(datasets)
+    yanchor = -0.5
+    if numcol > 4:
+        numcol = 3
+        yanchor = -0.6
+    axes[-1].legend(loc="center", fontsize="small", bbox_to_anchor=(0.5, yanchor), ncols=numcol, handletextpad=0.4, handlelength=1., columnspacing=0.8)
     figure.savefig(output_path, dpi=dpi, bbox_inches="tight")
+    figure.savefig(str(output_path).replace(".png", ".pdf"), dpi=dpi, bbox_inches="tight")
     plt.close(figure)
     return output_path
 
@@ -820,8 +872,8 @@ def save_energy_components_comparison \
     )
     styles = \
     (
-        ("black", "-"), ("tab:blue", "-"), ("tab:orange", "--"),
-        ("tab:green", "-.")
+        ("black", "-"), ("tab:blue", "-"), ("orangered", "--"),
+        ("limegreen", "-."), ("darkgray", "--")
     )
     for (label, times, fields), (color, linestyle) in zip(datasets, styles):
         components = hw_energy_components(fields, lx, ly)
@@ -842,6 +894,7 @@ def save_energy_components_comparison \
     figure.suptitle("Hasegawa–Wakatani energy components versus time")
     figure.tight_layout()
     figure.savefig(output_path, dpi=dpi, bbox_inches="tight")
+    figure.savefig(str(output_path).replace(".png", ".pdf"), dpi=dpi, bbox_inches="tight")
     plt.close(figure)
     return output_path
 
@@ -924,6 +977,7 @@ def save_initial_derivative_comparison \
     )
     figure.tight_layout()
     figure.savefig(output_path, dpi=dpi, bbox_inches="tight")
+    figure.savefig(str(output_path).replace(".png", ".pdf"), dpi=dpi, bbox_inches="tight")
     plt.close(figure)
     return output_path
 
@@ -1348,42 +1402,49 @@ def _hw_energy_spectrum \
 def save_endpoint_spectrum_comparison \
 (
     datasets, path: Path, lx: float, ly: float, dpi: int,
-    smooth: bool = False, cutoff_n: int = 64,
+    smooth: bool = False, cutoff_n: int = 64, stage = "Final"
 ) -> Path:
     """Compare HW energy spectra nearest t=0 and at each retained final time."""
     figure, axes = plt.subplots(
-        1, 2, figsize=(13, 5.5), sharex=True, sharey=True,
+        1, 1, figsize=(8/2.54, args.ysize/2.54), sharex=True, sharey=True,
         constrained_layout=True,
     )
-    line_styles = ("-", "--", "-.", ":")
-    for axis, stage in zip(axes, ("Initial", "Final")):
-        selected_times = []
-        for dataset_index, (label, times, fields) in enumerate(datasets):
-            time_index = int(np.argmin(np.abs(times))) if stage == "Initial" else -1
-            selected_times.append(f"t={times[time_index]:g}")
-            k, energy = _hw_energy_spectrum(fields[time_index], lx, ly, smooth)
-            positive = (k > 0) & (energy > 0)
-            axis.loglog(
-                k[positive], energy[positive],
-                line_styles[dataset_index % len(line_styles)],
-                linewidth=2, label=label,
-            )
-        if cutoff_n > 0:
-            cutoff = min(np.pi / (lx / cutoff_n), np.pi / (ly / cutoff_n))
-            axis.axvline(
-                cutoff, color="black", linestyle=":", linewidth=1.4,
-                label=f"{cutoff_n}-grid Nyquist",
-            )
-        axis.set_title(
-            f"{stage} HW energy spectrum, "
-            + "; ".join(dict.fromkeys(selected_times))
+    line_styles = ("-", "-", "--", "-.", "--")
+    styles = (("black", "-"), ("tab:blue", "-"),
+              ("orangered", "--"), ("limegreen", "-."), ("darkgray", "--"))
+    # for i, (axis, stage) in enumerate(zip(axes, ("Initial", "Final"))):
+    #     if i == 0:
+    #         continue
+    # stage = "Final"
+    axis = axes
+    selected_times = []
+    for dataset_index, (label, times, fields) in enumerate(datasets):
+        time_index = int(np.argmin(np.abs(times))) if stage == "Initial" else -1
+        selected_times.append(f"t={times[time_index]:g}")
+        k, energy = _hw_energy_spectrum(fields[time_index], lx, ly, smooth)
+        positive = (k > 0) & (energy > 0)
+        axis.loglog(
+            k[positive], energy[positive],
+            ls=styles[dataset_index % len(line_styles)][1],
+            c=styles[dataset_index % len(line_styles)][0],
+            linewidth=2, label=label,
         )
-        axis.set_xlabel(r"$k$")
-        axis.set_ylabel(r"Shell energy $E(k)$")
-        axis.set_ylim(SPECTRUM_Y_MIN, SPECTRUM_Y_MAX)
-        axis.grid(True, which="both", alpha=0.25)
-        axis.legend()
+    if cutoff_n is not None:
+        cutoff = min(np.pi / (lx / cutoff_n), np.pi / (ly / cutoff_n))
+        axis.axvline(
+            cutoff, color="black", linestyle=":", linewidth=1.4,
+            # label=f"Nyquist",
+        )
+    axis.set_title(
+        f"t={times[time_index]:g}"
+    )
+    axis.set_xlabel(r"$k$")
+    axis.set_ylabel(r"Shell energy $E(k)$")
+    axis.set_ylim(SPECTRUM_Y_MIN, SPECTRUM_Y_MAX)
+    axis.grid(True, which="both", alpha=0.25)
+    axis.legend(handletextpad=0.4, handlelength=1., columnspacing=0.8, fontsize="small")
     figure.savefig(path, dpi=dpi)
+    figure.savefig(str(path).replace(".png", ".pdf"), dpi=dpi, bbox_inches="tight")
     plt.close(figure)
     return path
 
@@ -1522,15 +1583,15 @@ def main() -> None:
         raise ValueError("lx and ly must be positive")
     if args.batch < 0:
         raise ValueError("batch must be non-negative")
-    if args.spectrum_cutoff_n < 0:
-        raise ValueError("spectrum-cutoff-n must be non-negative")
+    # if args.spectrum_cutoff_n < 0:
+    #     raise ValueError("spectrum-cutoff-n must be non-negative")
     if args.animations and args.fps <= 0:
         raise ValueError("fps must be positive")
 
     if args.animation_step <= 0:
         raise ValueError("animation-step must be positive")
 
-    optional_paths = (args.dataset2_fields, args.dataset3_fields)
+    optional_paths = (args.dataset2_fields, args.dataset3_fields, args.dataset4_fields, args.dataset5_fields)
     dataset_paths = (args.unet_fields, args.dns_fields, *optional_paths)
     requested_paths = tuple(path for path in dataset_paths if path is not None)
     input_paths = tuple \
@@ -1543,6 +1604,18 @@ def main() -> None:
         times, _, fields = read_history(
             dataset_path, args.batch, args.input_format, args.bout_y_index
         )
+        if dataset_index == args.filter_dns:
+            n_les = 64
+            lx = 50.176
+            print(fields.shape)
+            fields = np.asarray([filter_snapshot(
+                f,
+                alpha=lx/n_les,
+                lx=lx,
+                ly=lx,
+                coarse_n=n_les, # TODO: don't hard-code LES resolution
+            )[1] for f in fields])
+            print(fields.shape)
         label = (
             args.labels[dataset_index] if args.labels is not None
             else dataset_label(dataset_path)
@@ -1619,12 +1692,23 @@ def main() -> None:
     endpoint_spectra_path = save_endpoint_spectrum_comparison \
     (
         datasets,
-        args.output_dir / "hw_energy_spectra_initial_final.png",
+        args.output_dir / "hw_energy_spectra_final.png",
         args.lx,
         args.ly,
         args.dpi,
         args.smooth_spectrum,
         args.spectrum_cutoff_n,
+    )
+    endpoint_spectra_path = save_endpoint_spectrum_comparison \
+    (
+        datasets,
+        args.output_dir / "hw_energy_spectra_initial.png",
+        args.lx,
+        args.ly,
+        args.dpi,
+        args.smooth_spectrum,
+        args.spectrum_cutoff_n,
+        "Initial",
     )
     # print(f"Saved {centerpoint_path}")
     # print(f"Saved {extrema_path}")
@@ -1700,4 +1784,5 @@ def main() -> None:
 
 
 if __name__ == "__main__":
+    args = parse_args()
     main()
