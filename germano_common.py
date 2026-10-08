@@ -21,7 +21,7 @@ HW_FIELD_LABELS = \
 {
     "U": r"electron density $n_e$",
     "V": r"electrostatic potential $\phi$",
-    "P": r"vorticity $\omega$",
+    "P": r"vorticity $\zeta$",
 }
 
 
