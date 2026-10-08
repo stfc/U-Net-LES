@@ -284,7 +284,7 @@ The output from the DirectUNetSR model is passed through a smooth spectral cutof
     Q(\mathbf{k})=\exp\left[-\left(\frac{|\mathbf{k}|}{k_c}\right)^8\right],
     \qquad k_c=0.707\,\frac{\pi}{h}\simeq11.3339.
 \end{equation}
-The value of $K_c=0.707$ is chose to much the Nyquist frequency of the DNS energy spectra (considered null at $10^{-10}$). For stability purposes, the configured inverse is a truncated van Cittert reconstruction \citep{vancittert1931}, rather than directly apply the inverse. For $g=Q\widetilde f_\theta$, implemented spectrally, it computes
+The value of $k_c=0.707$ is chose to much the Nyquist frequency of the DNS energy spectra (considered null at $10^{-10}$). For stability purposes, the configured inverse is a truncated van Cittert reconstruction \citep{vancittert1931}, rather than directly apply the inverse. For $g=Q\widetilde f_\theta$, implemented spectrally, it computes
 \begin{equation}
     f^{(0)}=g,\qquad
     f^{(j+1)}=f^{(j)}+\omega\left[g-\mathcal{F}_\ell f^{(j)}\right],
