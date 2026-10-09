@@ -430,24 +430,25 @@ We compare HW and mHW at DNS resolutions of $256^2$ and $512^2$, each with three
 The statistical figures show energy, enstrophy and particle-flux histories, final-time spectra and three final-time PDFs. The mHW\_N256 plots are regenerated from the DNS dumps and saved U-Net reconstructed fields for the $128^2$, $64^2$ and $32^2$ LES meshes, using the same $0\leq t\leq100$ window. The comparisons are against DNS; no separate conventional-closure curve is present. However, before diving into into our approach results, we will show why traditional LES models fail to capture the correct nature of the turbulence.
 
 \subsection{Comparison with algebraic LES models}\label{sec:les-models}
-We compare three algebraic LES models for the HW system on a $64^2$ mesh against the $256^2$ DNS: Smagorinsky, CENTORI and implicit LES. All use $\alpha=1$, $\kappa=0.5$, a periodic domain of size $50.176\times50.176$ and the Arakawa bracket, and are initialized from the same DNS snapshot. No neural reconstruction is used in these runs. Smagorinsky applies strain-dependent diffusion to density and vorticity, with input coefficient $C_s=5.35\times10^{-2}$. CENTORI instead uses a local diffusivity $\nu_C=C_C\{[\alpha(\phi-n)]^2+\zeta^2\}$, with $C_C=1.10\times10^{-4}$, multiplying the Laplacian of each field (see \cite{leddy2016thesis} for more details). Both explicit closures retain background fourth-order diffusion with $D_n=D_\zeta=10^{-3}$. The implicit configuration omits both the explicit closure and background diffusion, leaving its small-scale behaviour controlled by the numerical discretization.
+We compare three algebraic LES models for the HW system on a $64^2$ mesh against the $256^2$ DNS: Smagorinsky, CENTORI and implicit LES (no subgrid model). All use $\alpha=1$, $\kappa=0.5$, a periodic domain of size $50.176\times50.176$ and the Arakawa bracket, and are initialized from the same filtered DNS snapshot. No neural reconstruction is used in these runs. Smagorinsky applies strain-dependent diffusion to density and vorticity, with input coefficient $C_s=0.3$. CENTORI instead uses a local diffusivity $\nu_C=C_C\{[\alpha(\phi-n)]^2+\zeta^2\}$, with $C_C=0.08$, multiplying the Laplacian of each field (see \cite{leddy2016thesis} for more details). Both explicit closures retain background fourth-order diffusion with $D_n=D_\zeta=10^{-3}$. The implicit configuration omits both the explicit closure and background diffusion, leaving its small-scale behaviour controlled by the numerical discretization.
 
-Figure~\ref{fig:les-models-spectra} compares the initial and final shell energy spectra. Initially, the three LES spectra nearly coincide and follow DNS through the energy-containing range, with a faster decay near the coarse-grid cutoff. At $t=1000$, Smagorinsky and CENTORI retain the main DNS spectral peak around $k\simeq0.5$--$0.8$. CENTORI is closer to DNS at the lowest plotted wavenumbers, whereas Smagorinsky shows a larger energy deficit there. Both closures exceed the DNS spectrum over part of the range above $k\simeq2$, before falling sharply near the coarse-grid cutoff. Agreement at the main peak therefore does not extend uniformly across the spectrum. In contrast, implicit LES has a substantial deficit at low and intermediate wavenumbers and a pronounced accumulation near the grid scale, with a peak just beyond the marked $64^2$-grid Nyquist wavenumber. It does not preserve the DNS spectral distribution over this interval.
+Figure~\ref{fig:les-models-spectra} shows the energy time-evolution and the final shell energy spectra. Our DirectUNetSR model (at LES resolution) matches the filtered DNS spectrum perfectly, demonstrating excellent stability. Among the algebraic subgrid models, CENTORI matches the filtered DNS well at large scales until around $k=2$ where energy begins to accumulate towards the Nyquist cutoff wavenumber. The Smagorinsky model mistmatches the energy mostly, and implicit LES shows significant disagreement at low wavenumbers and a pronounced accumulation near the grid scale, with a peak just beyond the marked $64^2$-grid Nyquist wavenumber. It does not preserve the DNS spectral distribution over this interval. Observing the time evolution (Figure~\ref{fig:les-models-spectra} right), the implicit LES decays quickly to zero energy, showing the flow has laminarised due to lack of dissipation to sustain the turbulence. Smagorinsky and CENTORI models sustain a similar level of energy, but show less frequency in fluctuations compared to the filtered DNS. The DirectUNetSR matches fluctuating behaviour of the DNS well throughout the simulation.
 
 The vorticity PDFs in Figure~\ref{fig:les-models-vorticity} provide a complementary comparison. Initially, the LES distributions nearly coincide and have a slightly higher central peak than DNS. At $t=1000$, Smagorinsky and CENTORI remain close to the DNS distribution, reproducing its narrow central region with modest differences in the peak and shoulders. Implicit LES instead develops a much broader distribution and a markedly lower central probability density, consistent with the excessive small-scale content visible in its spectrum. 
 
-Finally, and mostly importantly from an engineerign desing, the transport properties fail to be captured by the implicit LES model. Figure~\ref{fig:les-models-particle-flux} compares the domain-averaged particle fluxes for the same conventional LES configurations over $0\leq t\leq1000$, using the diagnostic defined in the subsection \ref{sec:TransportDiagnostics}.
-
-The radial flux remains positive in all four runs. After the initial transient, DNS fluctuates mainly between approximately $0.11$ and $0.15$, whereas Smagorinsky and CENTORI typically remain around $0.08$--$0.10$. Both explicit closures therefore sustain radial transport but systematically underpredict its magnitude; their similar flux levels do not indicate a clear overall ranking. Implicit LES initially reaches approximately $0.15$, then exhibits a sustained decline to about $0.045$ at $t=1000$, compared with approximately $0.12$ for DNS. Its final radial flux is thus only about $40\%$ of the DNS value. 
-
-The poloidal flux changes sign and fluctuates around zero, with smaller amplitudes than the radial flux. DNS exhibits intermittent excursions reaching approximately $\pm0.03$. Smagorinsky and CENTORI retain appreciable fluctuations, generally of order $0.01$ and occasionally approaching $0.02$, but differ from DNS in the timing, amplitude and sign of individual events. The implicit solution progressively suppresses these fluctuations and stays close to zero at late times. These transport diagnostics complement the spectra and vorticity PDFs: explicit closures preserve sustained transport more effectively than implicit LES in this case, but agreement in the spectral peak or central PDF does not ensure accurate radial-flux levels or instantaneous poloidal fluxes.
-
-Together, these diagnostics support the use of an explicit closure for this $64^2$ HW case. In \citep{leddy2016thesis}, the authors also show that the implicit LES model fails to capture the correct nature of the turbulence across all cases aboves, and that the Smagorinsky and CENTORI models are not able to reproduce the correct dynamics.
+Figure~\ref{fig:les-models-particle-flux} shows the particle flux statistics. Such transport statistics are the most important quantity for engineering design, and are clearly mispredicted by LES with no model. The CENTORI and Smagorinsky models again do not reproduce the correct fluctuating behaviour found in the filtered DNS and our DirectUNetSR model. The Smagorinsky radial flux is dissipated to around 40\% of the DNS value. Similarly, the poloidal fluxes differ from DNS in the timing, amplitude and sign of individual events. The implicit solution progressively suppresses these fluctuations and stays close to zero at late times. These transport diagnostics complement the spectra and vorticity PDFs: explicit closures preserve sustained transport more effectively than implicit LES in this case, but agreement in the spectral peak or central PDF does not ensure accurate radial-flux levels or instantaneous poloidal fluxes. The reference algebraic models are not able to reproduce the correct dynamics, compared to the DirectUNetSR model which shows excellent agreement with the filtered DNS.
 
 \begin{figure}[htbp]
 \centering
-\includegraphics{images/validation_current/LES_MODELS/hw_energy_spectra_initial_final.pdf}
-\caption{Initial ($t=0$, left) and final ($t=1000$, right) HW shell energy spectra for the $256^2$ DNS and Smagorinsky, CENTORI and implicit LES on a $64^2$ mesh. The dotted vertical line marks the $64^2$-grid Nyquist wavenumber.}
+\begin{subfigure}[t]{0.48\textwidth}
+\includegraphics{images/validation_current/LES_MODELS/hw_energy_spectra_final.pdf}
+\end{subfigure}
+\begin{subfigure}[t]{0.48\textwidth}
+\includegraphics{images/validation_current/LES_MODELS/energy_vs_time.pdf}
+\end{subfigure}
+\caption{
+Energy statistics at LES level for all reference models. Panels show the final shell energy spectrum (left) and domain-averaged energy with time (right) for $256^2$ filtered DNS (fDNS) to $64^2$ LES resolution. The dotted vertical line marks the $64^2$-grid Nyquist wavenumber.
+}
 \label{fig:les-models-spectra}
 \end{figure}
 
@@ -460,14 +461,7 @@ Together, these diagnostics support the use of an explicit closure for this $64^
 
 \begin{figure}[htbp]
 \centering
-\begin{subfigure}[t]{0.48\textwidth}
 \includegraphics{images/validation_current/LES_MODELS/particle_flux_vs_time.pdf}
-\caption{Fluxes at LES resolution}
-\end{subfigure}
-\begin{subfigure}[t]{0.48\textwidth}
-\includegraphics{images/validation_current/LES_MODELS_DNS/particle_flux_vs_time.pdf}
-\caption{Fluxes at DNS resolution}
-\end{subfigure}
 \caption{Domain-averaged radial (upper panel) and poloidal (lower panel) turbulent particle fluxes for the $256^2$ HW DNS and Smagorinsky, CENTORI and implicit LES on a $64^2$ mesh over $0\leq t\leq1000$. Density fluctuations are defined relative to the poloidal mean.}
 \label{fig:les-models-particle-flux}
 \end{figure}
