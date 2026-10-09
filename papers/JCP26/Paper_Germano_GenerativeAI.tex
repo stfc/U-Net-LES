@@ -472,7 +472,7 @@ Figure~\ref{fig:les-models-particle-flux} shows the particle flux statistics. Su
 
 \subsection{Spatial reconstruction}
 
-Figures~\ref{fig:fields-HW_N256}--\ref{fig:fields-mHW_N512} compare the initial density, potential and vorticity fields at $t=0$ for DNS and the two finer LES meshes. These comparisons assess the spatial fidelity of the initial reconstruction. The HW panels resolve vortex structures, while the mHW potential panels show bands extended in the poloidal direction. The signed difference panels, defined as DNS minus LES, identify local reconstruction errors in each field.
+Figures~\ref{fig:fields-HW_N256}--\ref{fig:fields-mHW_N512} compare the initial density, potential and vorticity fields at $t=0$ for DNS and the two finer LES meshes. These comparisons assess the spatial fidelity of the initial reconstruction. The HW panels resolve vortex structures, while the mHW potential panels show bands extended in the poloidal direction. The signed difference panels, defined as DNS minus LES, identify local reconstruction errors in each field. In all cases, the highest pointwise error is in the vorticity field due to (1) the finer spatial structures being more difficult to capture, and (2) the field is not explicitly learned, it is instead reconstructed from the consistency relation $\zeta=\nabla^2\phi$.
 
 % Only the initial spatial comparisons are shown here. They provide a qualitative assessment of reconstruction fidelity but do not establish dynamical accuracy or an integrated error norm. The subsequent evolution is assessed through the statistical diagnostics below. The coarsest LES meshes are included in those diagnostics, but are absent from the archived spatial comparison panels.
 
@@ -533,9 +533,9 @@ The diagnostics are the spatially integrated HW energy ($E$) and generalized ens
 \end{align}
 where $\nabla \phi$ is computed with fourth-order finite-difference derivatives. 
 
-Figures~\ref{fig:energy} and~\ref{fig:enstrophy} reveal a strong resolution dependence over the longer HW interval. In HW\_N256, DNS energy fluctuates around $4.1$--$5.4\times10^3$. The $128^2$ and $64^2$ LES meshes retain comparable energy levels, although their fluctuations do not remain synchronized with DNS. The $32^2$ LES instead decays rapidly to approximately $1.0$--$1.3\times10^3$ after $t\simeq150$. Its generalized enstrophy falls to roughly $2.5$--$3.0\times10^3$, compared with DNS levels of approximately $7.5$--$9.5\times10^3$. Thus the coarse reconstruction loses both diagnostics over the longer interval.
+Figures~\ref{fig:energy} and~\ref{fig:enstrophy} reveal a strong resolution dependence over the longer HW interval. In HW\_N256, DNS energy fluctuates around $4.1$--$5.4\times10^3$. The $128^2$ and $64^2$ LES meshes retain comparable energy levels, although their fluctuations do not remain synchronized with DNS due to the chaotic nature of the flow. The $32^2$ LES instead decays rapidly to approximately $1.0$--$1.3\times10^3$ after $t\simeq150$. Its generalized enstrophy falls to roughly $2.5$--$3.0\times10^3$, compared with DNS levels of approximately $7.5$--$9.5\times10^3$. Thus the coarse reconstruction loses consistency in both metrics over the longer interval.
 
-For HW\_N512, DNS energy is typically $1.4$--$1.7\times10^4$, with intermittent larger excursions. The $256^2$ LES retains this range, while $128^2$ generally lies lower and $64^2$ remains near $1.1$--$1.4\times10^4$. Enstrophy shows a similar ordering: the coarsest curve is mostly around $2.3$--$2.9\times10^4$, below the DNS range of roughly $2.9$--$3.8\times10^4$. Agreement here concerns fluctuation levels and statistical behaviour rather than pointwise tracking of the turbulent trajectory.
+For HW\_N512, DNS energy is typically $1.4$--$1.7\times10^4$, with intermittent larger fluctuations. The $256^2$ LES retains this range, while $128^2$ generally lies lower and $64^2$ remains near $1.1$--$1.4\times10^4$. Enstrophy shows a similar ordering: the coarsest curve is mostly around $2.3$--$2.9\times10^4$, below the DNS range of roughly $2.9$--$3.8\times10^4$. Agreement here concerns fluctuation levels and statistical behaviour rather than pointwise tracking of the turbulent trajectory.
 
 For mHW\_N256, DNS energy rises from approximately $3.55\times10^3$ to $4.33\times10^3$ near $t=30$, before declining to $3.86\times10^3$ at $t=100$. The $128^2$ and $64^2$ reconstructions end near $3.86\times10^3$ and $3.90\times10^3$, respectively. The $32^2$ reconstruction instead continues growing to $5.23\times10^3$. Its generalized enstrophy reaches $8.81\times10^3$, compared with $3.51\times10^3$ for DNS and $3.54\times10^3$ and $3.76\times10^3$ for the two finer meshes. Thus the coarsest reconstruction fails to reproduce the decay and develops excess enstrophy well before the end of the mHW validation window.
 
@@ -602,6 +602,7 @@ In mHW\_N512, DNS energy initially rises from approximately $3.3\times10^3$ to $
 \subsection{Spectral statistics}
 
 The radial shell spectra include density and potential-gradient energy,
+\todo[inline=true]{is this equation right? In physical space it is not mag(grad(phi)), but x/y gradients summed independently. I don't know how to write that in fourier space}
 \begin{equation}
  E(k_s)=\frac12\sum_{\mathbf{k}\in\mathcal{S}_s}
  \left(|\widehat n_{\mathbf{k}}|^2+|\mathbf{k}|^2|\widehat\phi_{\mathbf{k}}|^2\right),
@@ -612,7 +613,7 @@ Figure~\ref{fig:spectra} compares the final spectra. At $t=1000$, HW\_N256 with 
 
 For mHW\_N256, the two finer LES meshes retain the final DNS spectral shape closely. The $32^2$ reconstruction has excess energy at intermediate and high wavenumbers, particularly for $k\gtrsim1$, consistent with its growing generalized enstrophy. Agreement near the principal spectral peak therefore does not imply correct small-scale behaviour.
 
-Spectral agreement on logarithmic axes should be assessed together with the integrated diagnostics: similar shapes can coexist with energy deficits. The dotted line marks the $64^2$-grid Nyquist wavenumber in all panels; it is a fixed reference, not the cutoff of every LES mesh or a measured accuracy threshold.
+% Spectral agreement on logarithmic axes should be assessed together with the integrated diagnostics: similar shapes can coexist with energy deficits. The dotted line marks the $64^2$-grid Nyquist wavenumber in all panels; it is a fixed reference, not the cutoff of every LES mesh or a measured accuracy threshold.
 
 \begin{figure}[p]
 \centering
