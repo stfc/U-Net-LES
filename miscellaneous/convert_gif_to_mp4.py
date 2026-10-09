@@ -27,8 +27,9 @@ def convert_gif_to_mp4(gif_path):
         clip.write_videofile(
             mp4_path,
             codec="libx264",
-            audio=False,  # GIFs do not have audio
-            logger="bar",  # Displays a progress bar
+            audio=True,  # Turn audio back on
+            audio_codec="aac",  # Force the standard AAC audio format
+            logger="bar",
         )
 
         clip.close()
