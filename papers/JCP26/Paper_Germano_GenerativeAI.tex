@@ -434,10 +434,6 @@ We compare three algebraic LES models for the HW system on a $64^2$ mesh against
 
 Figure~\ref{fig:les-models-spectra} shows the energy time-evolution and the final shell energy spectra. Our DirectUNetSR model (at LES resolution) matches the filtered DNS spectrum perfectly, demonstrating excellent stability. Among the algebraic subgrid models, CENTORI matches the filtered DNS well at large scales until around $k=2$ where energy begins to accumulate towards the Nyquist cutoff wavenumber. The Smagorinsky model mistmatches the energy mostly, and implicit LES shows significant disagreement at low wavenumbers and a pronounced accumulation near the grid scale, with a peak just beyond the marked $64^2$-grid Nyquist wavenumber. It does not preserve the DNS spectral distribution over this interval. Observing the time evolution (Figure~\ref{fig:les-models-spectra} right), the implicit LES decays quickly to zero energy, showing the flow has laminarised due to lack of dissipation to sustain the turbulence. Smagorinsky and CENTORI models sustain a similar level of energy, but show less frequency in fluctuations compared to the filtered DNS. The DirectUNetSR matches fluctuating behaviour of the DNS well throughout the simulation.
 
-The vorticity PDFs in Figure~\ref{fig:les-models-vorticity} provide a complementary comparison. Initially, the LES distributions nearly coincide and have a slightly higher central peak than DNS. At $t=1000$, Smagorinsky and CENTORI remain close to the DNS distribution, reproducing its narrow central region with modest differences in the peak and shoulders. Implicit LES instead develops a much broader distribution and a markedly lower central probability density, consistent with the excessive small-scale content visible in its spectrum. 
-
-Figure~\ref{fig:les-models-particle-flux} shows the particle flux statistics. Such transport statistics are the most important quantity for engineering design, and are clearly mispredicted by LES with no model. The CENTORI and Smagorinsky models again do not reproduce the correct fluctuating behaviour found in the filtered DNS and our DirectUNetSR model. The Smagorinsky radial flux is dissipated to around 40\% of the DNS value. Similarly, the poloidal fluxes differ from DNS in the timing, amplitude and sign of individual events. The implicit solution progressively suppresses these fluctuations and stays close to zero at late times. These transport diagnostics complement the spectra and vorticity PDFs: explicit closures preserve sustained transport more effectively than implicit LES in this case, but agreement in the spectral peak or central PDF does not ensure accurate radial-flux levels or instantaneous poloidal fluxes. The reference algebraic models are not able to reproduce the correct dynamics, compared to the DirectUNetSR model which shows excellent agreement with the filtered DNS.
-
 \begin{figure}[htbp]
 \centering
 \begin{subfigure}[t]{0.48\textwidth}
@@ -451,6 +447,12 @@ Energy statistics at LES level for all reference models. Panels show the final s
 }
 \label{fig:les-models-spectra}
 \end{figure}
+
+
+The vorticity PDFs in Figure~\ref{fig:les-models-vorticity} provide a complementary comparison. Initially, the LES distributions nearly coincide and have a slightly higher central peak than DNS. At $t=1000$, Smagorinsky and CENTORI remain close to the DNS distribution, reproducing its narrow central region with modest differences in the peak and shoulders. Implicit LES instead develops a much broader distribution and a markedly lower central probability density, consistent with the excessive small-scale content visible in its spectrum. 
+
+Figure~\ref{fig:les-models-particle-flux} shows the particle flux statistics. Such transport statistics are the most important quantity for engineering design, and are clearly mispredicted by LES with no model. The CENTORI and Smagorinsky models again do not reproduce the correct fluctuating behaviour found in the filtered DNS and our DirectUNetSR model. The Smagorinsky radial flux is dissipated to around 40\% of the DNS value. Similarly, the poloidal fluxes differ from DNS in the timing, amplitude and sign of individual events. The implicit solution progressively suppresses these fluctuations and stays close to zero at late times. These transport diagnostics complement the spectra and vorticity PDFs: explicit closures preserve sustained transport more effectively than implicit LES in this case, but agreement in the spectral peak or central PDF does not ensure accurate radial-flux levels or instantaneous poloidal fluxes. The reference algebraic models are not able to reproduce the correct dynamics, compared to the DirectUNetSR model which shows excellent agreement with the filtered DNS.
+
 
 \begin{figure}[htbp]
 \centering
@@ -880,7 +882,7 @@ The extension to 3D is straightforward, and we expect even larger performance im
 %----------------------------------------------------------------
 \section*{Acknowledgements}
 
-Simulations reported in this study were performed on the Mary Coombs Hartree supercomputer platform, funded by Fusion Computing Lab collaboration between the Hartree Centre and UKAEA. The authors acknowledge funding from X and UK-USA AI Partnership Programme (ISPF-240).
+Simulations reported in this study were performed on the Mary Coombs Hartree supercomputer platform, funded by Fusion Computing Lab collaboration between the Hartree Centre and UKAEA. JW acknowledges funding from the UK-USA AI Partnership Programme (ISPF-240).
 
 \bibliographystyle{elsarticle-harv}
 \bibliography{references}
