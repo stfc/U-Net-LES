@@ -854,13 +854,11 @@ Table~\ref{tab:performance} shows MPI task-time reductions of \textbf{4.82--49.4
 %----------------------------------------------------------------
 \section{Conclusions}\label{sec:Conclusions}
 
-A hybrid AI-classical algorithm for edge-plasma LES closure has been developed by learning DNS fields filtered with a differential filter. We use the AI model to enhance the LES field towards a filtered DNS by adding details lost during the subsampling from DNS to LES resolutions. The DNS fields are then reconstructed by inverting the differential filter of \citet{germano_differential_1986}. The reconstructed fields are used to evaluate the nonlinear Poisson-bracket terms, while the vorticity is obtained directly from the generated electrostatic potential.
-
-% The method was tested with the HW\_N256, HW\_N512, mHW\_N256 and mHW\_N512 configurations. The main conclusions are:
+A hybrid AI-classical algorithm for edge-plasma LES closure has been developed by learning DNS fields filtered with a differential filter. We use the AI model to enhance the LES field towards a filtered DNS by adding details lost during the subsampling from DNS to LES resolutions. The DNS fields are then reconstructed by inverting the differential filter of \citet{germano_differential_1986}. The reconstructed fields are used to evaluate the nonlinear Poisson-bracket terms, while the vorticity is obtained directly from the generated electrostatic potential. The method is also applicable to other solvers in edge plasma physics and general purpose fluid dynamics solvers.
 
 We benchmarked on the 2D Hasegawa-Wakatani and modified Hasegawa-Wakatani equations at two resolutions obtained via BOUT++. Reconstructing from $32^2$ to $256^2$ resulted in poor prediction of the dynamics, as too much of the inertial subrange had been removed at this LES resolution, making the AI enhancement and differential filter inversion problematic. In all other cases, the time evolution statistics agreed well with the DNS for long time rollouts, showing enhanced stability compared to our previous study. This gave reasonable speedups of up to $1.5 \times$ on a single GPU (with LES on a single CPU), compared to DNS on 32 CPU cores. 
-
-The extension to 3D is straightforward, and we expect even larger performance improvements. The method is also applicable to other edge-plasma models such as Hermes-3, which is a 3D model that includes electromagnetic effects and multiple species, as well as to other CFD solvers like OpenFOAM. This will allow for accelerating not only edge plasma physics simulations for integration in powerplant design systems, but also several other applications in fluid dynamics.
+We expect a more significant speedup on larger 2D and future 3D studies.
+This will allow for accelerating not only edge plasma physics simulations for integration in powerplant design systems, but also several other applications in fluid dynamics.
 
 % \begin{itemize}
 %     \item the generative model reconstructs the dominant spatial structures of the DNS fields;
@@ -882,7 +880,7 @@ The extension to 3D is straightforward, and we expect even larger performance im
 %----------------------------------------------------------------
 \section*{Acknowledgements}
 
-Simulations reported in this study were performed on the Mary Coombs Hartree supercomputer platform, funded by Fusion Computing Lab collaboration between the Hartree Centre and UKAEA. JW acknowledges funding from the UK-USA AI Partnership Programme (ISPF-240).
+Simulations reported in this study were performed on the Mary Coombs Hartree supercomputer platform, funded by Fusion Computing Lab collaboration between the Hartree Centre and UKAEA. The authors acknowledge funding from X and UK-USA AI Partnership Programme (ISPF-240).
 
 \bibliographystyle{elsarticle-harv}
 \bibliography{references}
