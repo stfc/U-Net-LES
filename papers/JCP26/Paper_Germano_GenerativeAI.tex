@@ -20,7 +20,7 @@
 \begin{frontmatter}
 
 \title{Learning to reconstruct Germano Differential Filtered Fields with
-Convolutional Networks  for Large Eddy Simulation of Plasma Turbulence
+Convolutional Neural Networks for Large Eddy Simulation of Plasma Turbulence
 }
 
 \author{Jony Castagna}
@@ -35,17 +35,18 @@ Convolutional Networks  for Large Eddy Simulation of Plasma Turbulence
 }
 
 \begin{abstract}
-We present a novel method which combines the invertibility of Germano's differential filter with convolutional networks to accelerate plasma turbulence simulations.
-Rather than learning the mapping from coarse LES fields to fine DNS, the proposed method learns the mapping from coarse LES fields to the differential-filtered DNS fields. 
+We present a novel method which combines the invertibility of the differential filter of \citet{germano_differential_1986}, with convolutional networks to accelerate plasma turbulence simulations.
+Rather than learning the mapping from coarse-grid LES fields to fine-grid DNS, the proposed method learns the mapping from coarse LES fields to the differential-filtered DNS fields. 
 We then use the inverse of Germano's filter to reconstruct the fine-scale details and hence calculate exactly the nonlinear terms in the governing equations and subgrid-scale terms in the LES equations.
 
-The method is tested on the 2D Hasegawa-Wakatani (HW) and modified Hasegawa-Wakatani (mHW) plasma turbulence models at $256^2$ and $512^2$ DNS resolutions using 2, 4 and 8 times smaller LES grids in each direction. We compare the model with DNS results on energy, enstrophy, spectra, probability distributions, poloidal and radial fluxes and computational cost. Validation extends to 1000 simulation time units for HW and 100 for mHW, whose faster dynamics lead toward laminarization. 
+The method is tested on the 2D Hasegawa-Wakatani (HW) and modified Hasegawa-Wakatani (mHW) plasma turbulence models at $256^2$ and $512^2$ DNS resolutions using 2, 4 and 8 times smaller LES grids in each direction. We compare the model with DNS results on energy, enstrophy, spectra, probability distributions, poloidal and radial fluxes and computational cost. Validation extends to 1000 simulation time units for HW and 100 for mHW, whose faster dynamics lead toward laminarization.
 
-For the $256^2$ cases, the finer LES meshes preserve several integral and spectral features, whereas the coarsest mesh yields unphysical behavior. In contrast, for the $512^2$ cases, even the coarsest LES mesh preserves the turbulent character of the flow and maintains acceptable statistics for both the HW and mHW models. Thousand-time-unit HW and mHW benchmarks MPI task-time reductions of 4.82--49.45, with a maximum wall-clock speedup of 1.55x when compared to full CPU socket.
+For the $256^2$ cases, the finer LES meshes preserve several integral and spectral features, whereas the coarsest mesh yields unphysical behavior. In contrast, for the $512^2$ cases, even the coarsest LES mesh preserves the turbulent character of the flow and maintains acceptable statistics for both the HW and mHW models. Moreover, we show how our methodology is superior to traditional algebraic numerical LES models, which traditionally fail to capture important design features.
+Finally, benchmarks show an MPI task-time reductions of 4.82--49.45, with a maximum wall-clock speedup of $1.55\times$ when compared to full CPU socket.
 \end{abstract}
 
 \begin{keyword}
-Large Eddy Simulation \sep convolutional networks \sep 
+Large Eddy Simulation \sep convolutional neural networks \sep 
 Hasegawa-Wakatani model \sep plasma turbulence \sep differential filters
 \end{keyword}
 
@@ -61,25 +62,25 @@ Hasegawa-Wakatani model \sep plasma turbulence \sep differential filters
 %----------------------------------------------------------------
 \section{Introduction}\label{sec:Introduction}
 The dynamics of plasma turbulence in the edge region of nuclear fusion reactors are best studied through Direct Numerical Simulation (DNS). However, this approach is highly prohibitive, and restricts simulations to small systems far below the resolution required for future tokamaks such as ITER, even on modern exascale hardware. Alternatively, simpler models are used in 1D or 2D with diffusion profiles taken from experiments.
-One faster alternative for studying edge plasmas without resolving all scales of the turbulence is using Large Eddy Simulations (LES) on coarse grids, but an ad-hoc modelling of the sub-grid scales is required. In strongly magnetized plasma it is notoriously very challenging to find correct models \citep{leddy2016thesis}, as the energy injected at small length and, via inverse cascade, propagated to large scales, as described on the work on 2D turbulence by \citet{kraichnan_inertial_1967}, while traditional LES models tend to be mostly dissipivative towards small scales. 
+One alternative for studying edge plasmas without resolving all scales of the turbulence is using Large Eddy Simulations (LES) on coarse grids, but an ad-hoc modelling of the sub-grid scales is required. In strongly magnetized plasma it is notoriously very challenging to find correct models \citep{leddy2016thesis}, as the energy injected at small length scales and propagated to large scales through an inverse cascase, as described on the work on 2D turbulence by \citet{kraichnan_inertial_1967}. This makes plasma turbulence modelling with traditional LES models unsuitable, since they tend to be mostly dissipivative towards small scales. 
 
 One standard problem studied in plasma edge turbulence is the 2D Hasegawa-Wakatani model \citep{hasegawa_self-organization_1987}, which couples plasma-density and electrostatic-potential fluctuations to describe resistive drift-wave turbulence. To account for zonal-flow dynamics,
 the modified Hasegawa-Wakatani model excludes the zonal components from the resistive coupling \citep{numata_bifurcation_2007}. This reflects the absence of a parallel-electron response for zonal modes, which are constant on a flux surface. Removing their direct resistive damping allows zonal shear flows to develop and, depending on the parameters, suppress drift-wave turbulence. 
-Turbulence modelling of the HW system through models such as Smagorinsky has been studied by \citet{leddy2016thesis}. Recently, fully data-driven models of this problem have also been studied \citep{gahr2024scientific, artigues2025accelerating, greif2023physics}, but despite the encouraging results, long time integrations are still prohibitive due to the high non linearity of the problem which can lead easily to unstable results \citep{van_de_wetering_neural_2026}.
+Turbulence modelling of the HW system through eddy-viscosity models such as Smagorinsky has been studied by \citet{leddy2016thesis}. Recently, fully data-driven models of this problem have also been studied \citep{gahr2024scientific, artigues2025accelerating, greif2023physics}, but despite the encouraging results, long time integrations are still prohibitive due to the high non linearity of the problem which can lead easily to unstable results \citep{van_de_wetering_neural_2026}. Our work focuses on integrating data-driven methods within existing LES solvers to provide numerical stability.
 
-Deconvolution operators for LES have been proposed in the past as Approximate Deconvolution Methods (ADM) by \citet{stolz_approximate_1999}. ADM reconstructs unfiltered flow variables based on the filtered variables, but this fails in capturing small turbulent details not present in the original simulation leading to a energy "pile-up" \citep{amani2025novel}.
-However, recent interest in deep neural networks for computational fluid dynamics \citep{wang_recent_2024} has presented approaches for generating subgrid flow structures through (i) Generative Adversarial Networks (GANs) \citep{goodfellow_generative_2014,bode_using_2021,nista2024influence,castagna_stylegan_2024}, (ii) diffusion models \citep{ho_denoising_2020,sardar2024spectrally,shu2023physicsDM} and other methods \citep{kim_unsupervised_2021, ling2016reynolds}. Each of these methodologies has pros and cons, mainly on training robustness, accuracy and speed. In our previous work \citep{castagna_stylegan_2024} we used StyleGAN \citep{karras_style-based_2019}, a model developed by NVIDIA for face synthesis, as a deconvolution operator for 2D turbulent flows. The algorithm used, named Style Eddy Simulation (StylES), showed a factor $10\times$ speedup vs single core DNS for $1024^2$ resolution. GANs such as StyleGAN often suffer from the need for a large quantity of training data to achieve valid training. Even then, reconstructing DNS fields from LES on very coarse meshes remains challenging. This is particularly true for lossy filters such as Gaussian or top-hat kernels. 
+Deconvolution operators for LES have been proposed in the past as Approximate Deconvolution Methods (ADM) by \citet{stolz_approximate_1999}. ADM reconstructs unfiltered flow variables based on the filtered variables, but this fails in capturing small turbulent details not present in the original simulation leading to a energy `pile-up' \citep{amani2025novel}.
+However, recent interest in deep neural networks for computational fluid dynamics \citep{wang_recent_2024} has presented approaches for generating subgrid flow structures through (i) Generative Adversarial Networks (GANs) \citep{goodfellow_generative_2014,bode_using_2021,nista2024influence,castagna_stylegan_2024}, (ii) diffusion models \citep{ho_denoising_2020,sardar2024spectrally,shu2023physicsDM} and other methods \citep{kim_unsupervised_2021, ling2016reynolds}. Each of these methodologies has pros and cons, mainly on training robustness, accuracy and speed. In our previous work \citep{castagna_stylegan_2024}, we used StyleGAN \citep{karras_style-based_2019}, a model developed by NVIDIA for face synthesis, as a deconvolution operator for 2D turbulent flows. The algorithm used, named Style Eddy Simulation (StylES), showed a factor $10\times$ speedup vs single core DNS for $1024^2$ resolution. However, GANs such as StyleGAN often suffer from the need for a large quantity of training data to achieve valid training. Even then, reconstructing DNS fields from LES on very coarse meshes remains challenging due to the spectral bias of neural network training \citep{rahaman2019spectralbias}. This is particularly true for lossy filters such as Gaussian or top-hat kernels. 
 
 One class of filters for LES proposed by \citet{germano_differential_1986} are known as differential filters which are invertible at a fixed resolution. This corresponds to inverting the Helmholtz equation of a filtered variable, and has been used in particle-laden flows to reconstruct the unfiltered fluid velocity in particle drag calculations \citep{park2017particle}.
-However, the invertibility should be seen more as a change of of variables, rather than a reduction of dimensionality. As the LES variable will be still solved on a coarse grid, the loss of information is unavoidable and the invertibility is limited \citep{sagaut_large_2006}.
+However, the invertibility should be seen more as a change of variables, rather than a reduction of dimensionality. As the LES variable will be still solved on a coarse grid, the loss of information is unavoidable and the invertibility is limited \citep{sagaut_large_2006}.
 
 In the present paper we improved our previous work on StylES \citep{castagna_stylegan_2024}, replacing the full StyleGAN architecture with a simpler U-Net based architecture, but moving the training target from the fully developed DNS fields to the Germano's filtered DNS fields (at the DNS resolution). 
-The idea is that the super-resolution task is split into two parts: (i) reconstructing the missing information from the coarse LES to the fine LES, and (ii) reconstruction of the final DNS field from the fine LES using the inverse of Germano's differential filter.
-This approach allows for: a) a much faster super-resolution and hence time integration and b) simplify drastically the training process, notoriously difficult for GANs.
+The idea is that the super-resolution task is split into two parts: (i) reconstructing the missing information from the coarse-grid LES to the fine-grid LES, and (ii) reconstruction of the final DNS field from the fine-grid LES using the inverse of Germano's differential filter.
+This approach allows for: a) faster super-resolution and hence time integration and b) a simplified training process.
 
 The paper continues as follows: Sections~\ref{sec:PhysicalModel} introduce the physical model and the LES filtering approach. Section~\ref{sec:NumericalImplementation} explains the U-Net based architecture and the modifications needed to have a stable time integration. Moreover, details on the training and reconstruction methodology are provided. Section~\ref{sec:Results} presents the results and discussion on the performance. Finally, Section~\ref{sec:Conclusions} summarizes the findings and proposes future work, which will be mainly moving towards a full 3D implementation of the proposed methodology.
 
-The code used to generate the results is available on the U-Net-LES repositories at \url{https://github.com/stfc/U-Net-LES} and the model weights are available on Zenodo at \url{https://doi.org/10.5281/zenodo.22973917}.
+The code used to generate the results is available on github at \url{https://github.com/stfc/U-Net-LES} and the model weights are available on Zenodo at \url{https://doi.org/10.5281/zenodo.22973917}.
 %----------------------------------------------------------------
 %
 %
@@ -92,7 +93,7 @@ The code used to generate the results is available on the U-Net-LES repositories
 \section{Physical model}\label{sec:PhysicalModel}
 
 \subsection{Hasegawa-Wakatani model}
-In a tokamak device, one of the first simplified model which describes the transport of turbulence in the scrape-off layer is described by Hasegawa-Wakatani equations \citep{hasegawa_self-organization_1987}. This consists of a perpendicular slab to the toroidal magnetic field, with radial coordinate $x$ and poloidal coordinate $y$. The time evolution of the normalized density perturbation $n$, electrostatic potential $\phi$ and vorticity $\zeta$ are given by the two phase fluid magnetohydrodynamic equations:
+In a tokamak device, one of the first simplified model which describes the transport of turbulence in the scrape-off layer is described by Hasegawa-Wakatani equations \citep{hasegawa_self-organization_1987}. This consists of a perpendicular slab to the toroidal magnetic field, with radial coordinate $x$ and poloidal coordinate $y$. The time evolution of the normalized density perturbation $n$, electrostatic potential $\phi$ and vorticity $\zeta$ are given by
 \begin{align}
     \frac{\partial\zeta}{\partial t}+\{\phi,\zeta\}
     &=\alpha(\phi-n)-D_\zeta\nabla_\perp^4\zeta,
@@ -102,23 +103,16 @@ In a tokamak device, one of the first simplified model which describes the trans
       -D_n\nabla_\perp^4 n.
     \label{eq:hw_density}
 \end{align}
-The potential follows from:
+where $\{a,b\}$ is a Poisson bracket term, $\alpha$ is a constant representing the conductivity, $\kappa=-\partial_x\ln n_0$ specifies the background density-gradient drive, $D$ is a viscous dissipation coefficient for each field (we use $D_n=D_\zeta$ throughout). Fourth-order dissipation (known as hyperviscosity) removes small-scale fluctuations. 
+
+The Poisson bracket describing the $\mathbf{E}\times\mathbf{B}$ advection is
 \begin{equation}
-    \nabla_\perp^2\phi=\zeta,
-\end{equation}
-and the Poisson bracket describing the $\mathbf{E}\times\mathbf{B}$ advection is
-\begin{equation}
-    \{a,b\}=\partial_xa\,\partial_yb-\partial_ya\,\partial_xb.
+    \{a,b\}=\partial_xa\,\partial_yb-\partial_ya\,\partial_xb,
     \label{eq:hw_poisson}
 \end{equation}
-The constant $\alpha$ represents the conductivity, while $\kappa=-\partial_x\ln n_0$ specifies the background density-gradient drive. Fourth-order dissipation (known as hyperviscosity) removes small-scale fluctuations. The hyperviscosity term can be rewritten in different forms, according to the numerical scheme used and the need of a higher or lowerwavenumber cut-off.
-
-For $\alpha=0$, vorticity evolves independently and the incompressible hydrodynamic equations are recovered. For large $\alpha$, the standard HW model approaches $n=\phi$. Neglecting dissipation, subtraction of the density equation gives the Hasegawa--Mima limit:
+and the potential is solved by
 \begin{equation}
-    q=\nabla_\perp^2\phi-\phi,
-    \qquad
-    \partial_tq+\{\phi,q\}=\kappa\partial_y\phi.
-    \label{eq:hm_limit}
+    \nabla_\perp^2\phi=\zeta.
 \end{equation}
 
 The modified HW model removes zonal components from the coupling \citep{numata_bifurcation_2007}.
@@ -140,14 +134,25 @@ the equations become:
 \end{align}
 which introduces zonal modes without parallel-electron response which. Excluding their direct resistive damping permits zonal shear flows that can suppress turbulence \citep{numata_bifurcation_2007}. We use primes for non-zonal fluctuations and reserve tildes for LES-filtered fields. This distinction matters because the zonal average and the LES filter serve different purposes: the former defines the physical coupling, while the latter introduces the unresolved nonlinear terms discussed below.
 
-Both HW and mHW systems are considered fully periodic in $x$ and $y$, with domain size $L_x=L_y=50.176$. The background density gradient is adjusted according to the test case, $\kappa=0.5 - 1$, while the dissipation coefficients are set to $D_\zeta=D_n=10^{-3}$. The parallel-electron response is $\alpha=0.5 - 1$, which are ideal values for the weakly collisional regime. 
-The initial conditions are a combination (mixture) of Fourier modes. 
-The simulations are run up to 1000 time units ($t_{HW}=\Omega_{ci}t_{physical}$, where $\Omega_{ci}=\frac{ZeB}{m_i}$ is the ion cyclotron frequency) for HW for all cases, however, we observe for the mHW laminarization after 100 time units due to the faster dynamic. Snapshots are saved every 1 time unit.
-
 \subsection{LES formulation with differential filtering}
 \label{sec:GermanoDifferentialFilter}
 
-\citet{germano_differential_1986} introduced spatial filters whose inverse is a differential operator. For the isotropic case, define:
+In the LES approach, we solve for a filtered field such as
+\begin{equation}
+    \widetilde{f}(\boldsymbol{x},t) 
+    = 
+    \int_{\mathbb{R}^3} G(\boldsymbol{x}-\boldsymbol{r}; \ell) f (\boldsymbol{r}, t) d\boldsymbol{r},
+\end{equation}
+where $G$ is the filter kernel with characteristic width $\ell$, which satisfies $\int_{\mathbb{R}^3} G(\mathbf{r};\ell)d\mathbf{{r}}=1$.
+
+\citet{germano_differential_1986} introduced the differential filter
+\begin{equation}
+    G(\boldsymbol{x}-\boldsymbol{r};\ell) 
+    = 
+    \frac{1}{4\pi\ell^2} 
+    \frac{\exp(-|\boldsymbol{x}-\boldsymbol{r}|/\ell)}{|\boldsymbol{x}-\boldsymbol{r}|}
+\end{equation}
+where the singularity is removed by integration and the inverse of the integrated filter is a differential operator \citep{germano_elliptic_1986}. For the isotropic case, we define:
 \begin{equation}
     \mathcal{H}_\ell=I-\ell^2\nabla_\perp^2,
     \qquad \mathcal{F}_\ell=\mathcal{H}_\ell^{-1},
@@ -160,9 +165,9 @@ Thus filtering amounts to solving a Helmholtz problem, whereas its formal invers
     \qquad f=\widetilde f-\ell^2\nabla_\perp^2\widetilde f.
     \label{eq:germano_inverse}
 \end{equation}
-Here $\ell$ (usually indicated with $\alpha$ or $a$ elsewhere), is the filter width in physical space. The inverse requires boundary conditions consistent with the forward filter, where our implementation uses periodic Fourier transforms.
+The inverse requires boundary conditions consistent with the forward filter, where our implementation uses periodic Fourier transforms.
 
-In Germano's unbounded three-dimensional construction, the corresponding normalized convolution kernel is $G_\ell(r)=\exp(-r/\ell)/(4\pi\ell^2r)$. For our two-dimensional periodic domain, the filter is instead specified by its Fourier multiplier:
+For our two-dimensional periodic domain, the filter is therefore specified by its Fourier multiplier:
 \begin{equation}
     \widehat{\widetilde{f}}(\mathbf{k})
     =\frac{\widehat f(\mathbf{k})}{1+\ell^2|\mathbf{k}|^2},
@@ -180,7 +185,7 @@ The zero mode is preserved, and short wavelengths are attenuated algebraically w
 
 % \begin{figure}[htbp]
 % \centering
-% \includegraphics[width=0.85\linewidth]{images/fields_HW_run0_time501_N256_filter_spectra.png}
+% \includegraphics[width=0.85\linewidth]{images/fields_HW_run0_time501_N256_filter_spectra.pdf}
 % \caption{Energy spectra for the HW run-0 snapshot at $t=501$ on a $256^2$ mesh, comparing the unfiltered field with Gaussian and Germano filtering. Both filters attenuate the high-wavenumber spectrum; the Gaussian-filtered spectrum falls more steeply than the Germano-filtered spectrum in the plotted comparison.}
 % \label{fig:hw_filter_spectra}
 % \end{figure}
@@ -209,8 +214,7 @@ where the exact nonlinear residual is
     \qquad f\in\{n,\zeta\}.
     \label{eq:sgs_bracket}
 \end{equation}
-where the first term is calculated with our learned reconstruction. Traditional LES models,
-like the Smagorinsky and CENTORI \citep{leddy2016thesis}, are not able to reproduce the correct dynamic. See section \ref{sec:LESmodels} for more details on the traditional LES models results.
+where the first term is calculated with our learned reconstruction. Note that in Section \ref{sec:les-models}, we benchmark this method against algebraic LES models for the turbulent (eddy) viscosity, including Smagorinsky and CENTORI \citep{smagorinsky1963general, knight2012centori, leddy2016thesis}.
 
 A central result of \citet{germano_differential_1986} is that the differential inverse gives exact expressions for filtered correlations. For two smooth scalar fields $a$ and $b$, define $C_\ell(a,b)=\mathcal{F}_\ell(ab)-\widetilde a\widetilde b$. The product rule and Eq.~\eqref{eq:germano_inverse} gives:
 \begin{equation}
@@ -234,10 +238,10 @@ Equivalently, the nonlinear term can be evaluated by reconstructing both fields:
     \label{eq:germano_bracket_inverse}
 \end{equation}
 where $a=\phi$ and $b$ is $n$ or $\zeta$.
+These are continuous identities, not a closure assumption or a guarantee of exact reconstruction from coarse samples. As Germano emphasizes, an exactly inverted filtered system is formally a change of dependent variables; numerical resolution still limits the information retained. 
+In particular, the physical filter and the downsampling to the LES mesh are separate operations. 
 
-These are continuous identities, not a closure assumption or a guarantee of exact reconstruction from coarse samples. As Germano emphasizes, an exactly inverted filtered system is formally a change of dependent variables; numerical resolution still limits the information retained.
-
-In particular, the physical filter and the downsampling to the LES mesh are separate operations. Writing $\mathcal{R}_h$ for Fourier downsampling to that mesh, the network input is $(n,\phi)_{\mathrm{LES}}=\mathcal{R}_h\mathcal{F}_\ell(n,\phi)_{\mathrm{DNS}}$. Downsampling discards modes that the differential inverse alone cannot restore. Our learned reconstruction supplies an estimate of the filtered field on the fine mesh before inversion:
+Writing $\mathcal{R}_h$ for Fourier downsampling to that mesh, the network input is $(n,\phi)_{\mathrm{LES}}=\mathcal{R}_h\mathcal{F}_\ell(n,\phi)_{\mathrm{DNS}}$. Downsampling discards modes that the differential inverse alone cannot restore. Our learned reconstruction supplies an estimate of the filtered field on the fine mesh before inversion:
 \begin{equation}
     (\widetilde{n},\widetilde{\phi})_{\mathrm{LES}}
     \xrightarrow{\mathcal{N}_\theta}
@@ -264,12 +268,13 @@ providing the LES solver with an approximation to the filtered fine-grid advecti
 %
 %----------------------------------------------------------------
 \section{Numerical Implementation}\label{sec:NumericalImplementation}
-We describe here the numerical implementation details for the full methodology. The settings below refer to the HW reconstruction from $32^2$ LES $\to$ $256^2$ DNS; they are not assumed to apply to every resolution or modified-HW case, but give very good guidance for other configurations. The BOUT++ solver \citep{dudson_bout++_2009} is used for solving the filtered HW and mHW equations. In the two-dimensional runs, the paper's poloidal coordinate $y$ corresponds to the code's $z$ coordinate. For further details, see the Hasegawa-Wakatani example in the BOUT++ repository.
+We describe here the numerical implementation details for the full methodology. The settings below refer to the HW reconstruction from $32^2$ LES $\to$ $256^2$ DNS; they are not assumed to apply to every resolution or modified-HW case, but give very good guidance for other configurations. We used BOUT++ solver \citep{dudson_bout++_2009} for solving the filtered HW and mHW equations. In the two-dimensional runs, the paper's poloidal coordinate $y$ corresponds to the code's $z$ coordinate. For further details, see the Hasegawa-Wakatani example in the BOUT++ repository.
 
 \subsection{NN-Architecture}\label{sec:NN-Architecture}
-We use a modification of the variational U-Net architecture \citep{ronneberger_u-net_2015, esser2018variational} for the reconstruction model, hereafter referenced as \textbf{DirectUNetSR}. While in U-Net encoder and decoder are very similar in structure, the DirectUNetSR is more asymmetric. Being the input at LES coarse resolution, we only use a small encoder followed by a decoder to upsample the input to the fine DNS resolution. Skip connections are only used at low levels as we found that they tend to introduce artifacts during time integration which eventually degrade the reconstruction quality and lead to very strong oscillations. Despite these skip connections prevent from true generative capabilities, they are essential for a good reconstruction as they carry important information of the input LES configuration. The reconstruction configuration described here is the HW training run with a $256^2$ DNS mesh and a $32^2$ LES mesh.
+We use a modification of the variational U-Net architecture \citep{ronneberger_u-net_2015, esser2018variational} for the reconstruction model, hereafter referenced as \textbf{DirectUNetSR}. While in U-Net encoder and decoder are very similar in structure, the DirectUNetSR is more asymmetric. Being the input at LES coarse resolution, we only use a small encoder followed by a decoder to upsample the input to the fine DNS resolution. Skip connections are only used at low levels as we found that they tend to introduce artifacts during time integration which eventually degrade the reconstruction quality and lead to very strong oscillations. Despite skip connections prevent generative behaviour, they are essential for a good reconstruction as they carry important information of the input LES configuration.
 
-The three coarse input channels are density, potential and vorticity, denoted by $\mathbf{U}=(n,\phi,\zeta)$. The network predicts two fine-grid filtered fields, $\widetilde n$ and $\widetilde\phi$, being the vorticity obtained from the Laplacian of the potential fields $\zeta=\nabla_\perp^2\phi$. The encoder begins with 96 feature channels on the $32^2$ input mesh and uses a 192-channel bottleneck on a $16^2$ mesh. A skip-connected decoder returns to $32^2$, followed by periodic bilinear upsampling stages reaching $64^2$, $128^2$ and $256^2$. Circular convolution padding and periodic interpolation preserve the domain topology. The model has 1,670,738 trainable parameters and no global input skip connection. Figure~\ref{fig:direct_unet_architecture} summarizes the network and its differentiable reconstruction path.
+The three coarse input channels are density, potential and vorticity, denoted by $\mathbf{U}=(n,\phi,\zeta)$. The network predicts two fine-grid filtered fields, $\widetilde n$ and $\widetilde\phi$, being the vorticity obtained from the Laplacian of the potential fields $\zeta=\nabla_\perp^2\phi$. The encoder begins with 96 feature channels on the $32^2$ input mesh and uses a 192-channel bottleneck on a $16^2$ mesh. A skip-connected decoder returns to $32^2$, followed by periodic bilinear upsampling stages reaching $64^2$, $128^2$ and $256^2$. Periodic padding was applied prior to convolution and interpolation operations to the domain topology. The model has 1,670,738 trainable parameters. 
+Figure~\ref{fig:direct_unet_architecture} summarizes the network and its differentiable reconstruction path.
 
 \begin{figure}[htbp]
 \centering
@@ -284,7 +289,7 @@ The output from the DirectUNetSR model is passed through a smooth spectral cutof
     Q(\mathbf{k})=\exp\left[-\left(\frac{|\mathbf{k}|}{k_c}\right)^8\right],
     \qquad k_c=0.707\,\frac{\pi}{h}\simeq11.3339.
 \end{equation}
-The value of $K_c=0.707$ is chose to much the Nyquist frequency of the DNS energy spectra (considered null at $10^{-10}$). For stability purposes, the configured inverse is a truncated van Cittert reconstruction \citep{vancittert1931}, rather than directly apply the inverse. For $g=Q\widetilde f_\theta$, implemented spectrally, it computes
+The value of $k_c=0.707$ is chosen to match the Nyquist frequency of the DNS energy spectra (considered null at $10^{-10}$). For stability purposes, the configured inverse is a truncated van Cittert reconstruction \citep{vancittert1931}, rather than directly apply the inverse. For $g=Q\widetilde f_\theta$, implemented spectrally, it computes
 \begin{equation}
     f^{(0)}=g,\qquad
     f^{(j+1)}=f^{(j)}+\omega\left[g-\mathcal{F}_\ell f^{(j)}\right],
@@ -297,7 +302,7 @@ where $\omega$ is a relaxation parameter. The iteration is differentiable, and t
     (\Delta_h\phi)_{i,j}
     =\frac{\phi_{i+1,j}+\phi_{i-1,j}+\phi_{i,j+1}+\phi_{i,j-1}-4\phi_{i,j}}{h^2},
 \end{equation}
-with periodic indices. The DNS vorticity target is likewise derived from its potential.
+with periodic indices. The DNS vorticity target is likewise derived from its potential. We use this hard constraint to strongly enforce physical consistency of the learned vorticity and potential fields.
 
 Figure~\ref{fig:reconstruction_energy_spectrum} shows the methodology applied to the vorticity field for the HW test case at $512^2$ resolution from $64^2$ LES input resolution, comparing the DNS, LES input, filtered and reconstructed energy spectra.
 \begin{figure}[htbp]
@@ -314,7 +319,7 @@ The objective function compares the reconstructed fields with DNS after cutoff, 
     \overline{\phi}=\frac{\phi_\theta-\phi_{\mathrm{DNS}}}{\sigma_\phi},\qquad
     \overline{\zeta}=\frac{\zeta_\theta-\zeta_{\mathrm{DNS}}}{\sigma_\zeta},
 \end{equation}
-be the normalized reconstruction errors, where $f_\theta$ denotes the reconstructed field and $f_{\mathrm{DNS}}$ its DNS target. For each quantity $f\in\{n,\phi,\zeta\}$, $\sigma_f$ is the loss normalization scale, given by the training-data standard deviation when that normalization is enabled and otherwise by a unit scale. With $\mu_{B,\Omega}[q]$ denoting the statistical mean of $q$ over the batch and spatial grid, define
+be the normalized reconstruction errors, where $f_\theta$ denotes the reconstructed field and $f_{\mathrm{DNS}}$ its DNS target for each quantity $f\in\{n,\phi,\zeta\}$. $\sigma_f$ is the loss normalization scale, given by the training-data standard deviation when that normalization is enabled and otherwise by a unit scale. With $\mu_{B,\Omega}[q]$ denoting the statistical mean of $q$ over the batch and spatial grid, define
 \begin{align}
     \mathcal{L}_{n\phi}^{(1)}
     &=\tfrac12\mu_{B,\Omega}\!\left[|\overline{n}|+|\overline{\phi}|\right],&
@@ -354,13 +359,16 @@ $\lambda_\zeta^{(2)}$ & 0.01 & Normalized vorticity MSE weight \\
 \end{tabular}
 \end{table}
 
-\subsection{Numerical dataset}\label{sec:Dataset}
+\subsection{Dataset}\label{sec:Dataset}
 
-The DNS dataset were generated using the BOUT++ plasma solver, starting from the
-Hasegawa-Wakatani input file provided in the examples folder. 
+The DNS dataset were generated using the BOUT++ plasma solver. 
 Table \ref{tab:cases}
-and \ref{tab:dataset_effort} resumes the test case resolutions, physical parameters
-and computational efforts from \citet{castagna_stylegan_2024}. Four configurations were analysed, two for the HW model and two for the mHW model, with $256^2$ and $512^2$ DNS meshes. The different dataset have a different final time $T_f$ but the same number of trajectories $N_{runs}$. We start collecting samples from $T_s$ every $\Delta T_s$ for a total $N_s$ samples. The choice of $\Delta T_s$ is such that the variation in Similarity Structural Index Metric (SSIM) is always $\geq$ 10\%. The last 2 columns of Table \ref{tab:dataset_effort} show the overall computational cost $C_{cost}$ in node per hours, where 1 node of ScafellPike supercomputer at Hartree Centre contains a 2 socket of 16-cores Intel Xeon Gold processors, and the disk space occupied by the data.
+and \ref{tab:dataset_effort} summarises the test case resolutions, physical parameters
+and computational efforts from \citet{castagna_stylegan_2024}. Four configurations were analysed, two for the HW model and two for the mHW model, with $256^2$ and $512^2$ DNS meshes. 
+Both HW and mHW systems are considered fully periodic in $x$ and $y$, with domain size $L_x=L_y=50.176$. The background density gradient is adjusted according to the test case, $\kappa=0.5 - 1$, while the dissipation coefficients are set to $D_\zeta=D_n=10^{-3}$. The parallel-electron response is $\alpha=0.5 - 1$, which are ideal values for the weakly collisional regime. 
+The initial conditions are a combination (mixture) of Fourier modes. 
+
+The different dataset have a different final time $T_f$ but the same number of trajectories $N_{runs}$. We start collecting samples from $T_s$ every $\Delta T_s$ for a total $N_s$ samples. The choice of $\Delta T_s$ is such that the variation in Similarity Structural Index Metric (SSIM) is always $\geq$ 10\%. The last 2 columns of Table \ref{tab:dataset_effort} show the overall computational cost $C_{cost}$ in node per hours, where 1 node of ScafellPike supercomputer at Hartree Centre contains a 2 socket of 16-cores Intel Xeon Gold processors, and the disk space occupied by the data.
 
 \begin{table}[htbp]
 \centering
@@ -426,43 +434,50 @@ $32^2$ LES $\to$ $256^2$ DNS configuration. A rapid decrease in the total object
 %----------------------------------------------------------------
 \section{Results}\label{sec:Results}
 
-We compare HW and mHW at DNS resolutions of $256^2$ and $512^2$, each with three LES resolutions. The $256^2$ cases use $128^2$, $64^2$ and $32^2$ LES meshes; the $512^2$ cases use $256^2$, $128^2$ and $64^2$ meshes. These correspond to reductions by factors of two, four and eight in each direction. Both time integrations cover $0\leq t\leq1000$ time units, however for the mHW diagnostics cover only the first $0\leq t\leq100$ due to its faster dynamics and the tendency of the flow to laminarize beyond this interval. Spectra and probability-density functions are evaluated at the final time of each model; spatial comparisons remain at $t=0$.
+We compare HW and mHW at DNS resolutions of $256^2$ and $512^2$, each with three LES resolutions. The $256^2$ cases use $128^2$, $64^2$ and $32^2$ LES meshes; the $512^2$ cases use $256^2$, $128^2$ and $64^2$ meshes. These correspond to reductions by factors of two, four and eight in each direction, respectively. The simulations are run up to 1000 time units ($t_{HW}=\Omega_{ci}t_{physical}$, where $\Omega_{ci}=\frac{ZeB}{m_i}$ is the ion cyclotron frequency) for all HW cases and 100 time units for mHW due to the faster dynamics leading to laminarisation. 
+Snapshots are saved every 1 time unit.
 
 The statistical figures show energy, enstrophy and particle-flux histories, final-time spectra and three final-time PDFs. The mHW\_N256 plots are regenerated from the DNS dumps and saved U-Net reconstructed fields for the $128^2$, $64^2$ and $32^2$ LES meshes, using the same $0\leq t\leq100$ window. The comparisons are against DNS; no separate conventional-closure curve is present. However, before diving into into our approach results, we will show why traditional LES models fail to capture the correct nature of the turbulence.
 
-\subsection{Comparison with conventional LES models}\label{sec:les-models}
-We compare three conventional LES configurations for the HW system on a $64^2$ mesh against the $256^2$ DNS: Smagorinsky, CENTORI and implicit LES. All use $\alpha=1$, $\kappa=0.5$, a periodic domain of size $50.176\times50.176$ and the Arakawa bracket, and are initialized from the same DNS snapshot. No neural reconstruction is used in these runs. Smagorinsky applies strain-dependent diffusion to density and vorticity, with input coefficient $C_s=5.35\times10^{-2}$. CENTORI instead uses a local diffusivity $\nu_C=C_C\{[\alpha(\phi-n)]^2+\zeta^2\}$, with $C_C=1.10\times10^{-4}$, multiplying the Laplacian of each field (see \cite{leddy2016thesis} for more details). Both explicit closures retain background fourth-order diffusion with $D_n=D_\zeta=10^{-3}$. The implicit configuration omits both the explicit closure and background diffusion, leaving its small-scale behaviour controlled by the numerical discretization.
+\subsection{Comparison with algebraic LES models}\label{sec:les-models}
+We compare three algebraic LES models for the HW system on a $64^2$ mesh against the $256^2$ DNS: Smagorinsky, CENTORI and implicit LES (no subgrid model). All use $\alpha=1$, $\kappa=0.5$, a periodic domain of size $50.176\times50.176$ and are initialized from the same filtered DNS snapshot. No neural reconstruction is used in these runs. The Smagorinsky model applies strain-dependent diffusion to density and vorticity, with model coefficient $C_s=0.3$. CENTORI instead uses a local diffusivity $\nu_C=C_C\{[\alpha(\phi-n)]^2+\zeta^2\}$, with $C_C=0.08$, multiplying the Laplacian of each field (see \cite{leddy2016thesis} for more details). Both explicit closures retain background fourth-order diffusion with $D_n=D_\zeta=10^{-3}$. The implicit configuration omits both the explicit closure and background diffusion, leaving its small-scale behaviour controlled by the numerical discretization.
 
-Figure~\ref{fig:les-models-spectra} compares the initial and final shell energy spectra. Initially, the three LES spectra nearly coincide and follow DNS through the energy-containing range, with a faster decay near the coarse-grid cutoff. At $t=1000$, Smagorinsky and CENTORI retain the main DNS spectral peak around $k\simeq0.5$--$0.8$. CENTORI is closer to DNS at the lowest plotted wavenumbers, whereas Smagorinsky shows a larger energy deficit there. Both closures exceed the DNS spectrum over part of the range above $k\simeq2$, before falling sharply near the coarse-grid cutoff. Agreement at the main peak therefore does not extend uniformly across the spectrum. In contrast, implicit LES has a substantial deficit at low and intermediate wavenumbers and a pronounced accumulation near the grid scale, with a peak just beyond the marked $64^2$-grid Nyquist wavenumber. It does not preserve the DNS spectral distribution over this interval.
-
-The vorticity PDFs in Figure~\ref{fig:les-models-vorticity} provide a complementary comparison. Initially, the LES distributions nearly coincide and have a slightly higher central peak than DNS. At $t=1000$, Smagorinsky and CENTORI remain close to the DNS distribution, reproducing its narrow central region with modest differences in the peak and shoulders. Implicit LES instead develops a much broader distribution and a markedly lower central probability density, consistent with the excessive small-scale content visible in its spectrum. 
-
-Finally, and mostly importantly from an engineerign desing, the transport properties fail to be captured by the implicit LES model. Figure~\ref{fig:les-models-particle-flux} compares the domain-averaged particle fluxes for the same conventional LES configurations over $0\leq t\leq1000$, using the diagnostic defined in the subsection \ref{sec:TransportDiagnostics}.
-
-The radial flux remains positive in all four runs. After the initial transient, DNS fluctuates mainly between approximately $0.11$ and $0.15$, whereas Smagorinsky and CENTORI typically remain around $0.08$--$0.10$. Both explicit closures therefore sustain radial transport but systematically underpredict its magnitude; their similar flux levels do not indicate a clear overall ranking. Implicit LES initially reaches approximately $0.15$, then exhibits a sustained decline to about $0.045$ at $t=1000$, compared with approximately $0.12$ for DNS. Its final radial flux is thus only about $40\%$ of the DNS value. 
-
-The poloidal flux changes sign and fluctuates around zero, with smaller amplitudes than the radial flux. DNS exhibits intermittent excursions reaching approximately $\pm0.03$. Smagorinsky and CENTORI retain appreciable fluctuations, generally of order $0.01$ and occasionally approaching $0.02$, but differ from DNS in the timing, amplitude and sign of individual events. The implicit solution progressively suppresses these fluctuations and stays close to zero at late times. These transport diagnostics complement the spectra and vorticity PDFs: explicit closures preserve sustained transport more effectively than implicit LES in this case, but agreement in the spectral peak or central PDF does not ensure accurate radial-flux levels or instantaneous poloidal fluxes.
-
-Together, these diagnostics support the use of an explicit closure for this $64^2$ HW case. In \citep{leddy2016thesis}, the authors also show that the implicit LES model fails to capture the correct nature of the turbulence across all cases aboves, and that the Smagorinsky and CENTORI models are not able to reproduce the correct dynamics.
+Figure~\ref{fig:les-models-spectra} shows the energy time-evolution and the final shell energy spectra. Our DirectUNetSR model (at LES resolution) matches the filtered DNS spectrum perfectly, demonstrating excellent stability for long time integrations. Among the algebraic subgrid models, CENTORI matches the filtered DNS well at large scales until around $k=2$ where energy begins to accumulate towards the Nyquist cutoff wavenumber. The Smagorinsky model mistmatches the energy mostly, and implicit LES shows significant disagreement at low wavenumbers and a pronounced accumulation near the grid scale, with a peak just beyond the marked $64^2$-grid Nyquist wavenumber. It does not preserve the DNS spectral distribution over this interval. Observing the time evolution (Figure~\ref{fig:les-models-spectra} right), the implicit LES decays quickly to zero energy, showing the flow has laminarised due to lack of correct dissipation to sustain the turbulence. Smagorinsky and CENTORI models sustain a similar level of energy, but show less frequency in fluctuations compared to the filtered DNS. The DirectUNetSR matches fluctuating behaviour of the DNS well throughout the simulation.
 
 \begin{figure}[htbp]
 \centering
-\includegraphics[width=\linewidth]{images/validation_current/LES_MODELS/hw_energy_spectra_initial_final.png}
-\caption{Initial ($t=0$, left) and final ($t=1000$, right) HW shell energy spectra for the $256^2$ DNS and Smagorinsky, CENTORI and implicit LES on a $64^2$ mesh. The dotted vertical line marks the $64^2$-grid Nyquist wavenumber.}
+\begin{subfigure}[t]{0.48\textwidth}
+\includegraphics{images/validation_current/LES_MODELS/hw_energy_spectra_final.pdf}
+\end{subfigure}
+\begin{subfigure}[t]{0.48\textwidth}
+\includegraphics{images/validation_current/LES_MODELS/energy_vs_time.pdf}
+\end{subfigure}
+\caption{
+Energy statistics at LES level for all reference models. Panels show the final shell energy spectrum (left) and domain-averaged energy with time (right) for $256^2$ filtered DNS (fDNS) to $64^2$ LES resolution. The dotted vertical line marks the $64^2$-grid Nyquist wavenumber.
+}
 \label{fig:les-models-spectra}
 \end{figure}
 
+
+The vorticity PDFs in Figure~\ref{fig:les-models-vorticity} provide a complementary comparison. Initially, the LES distributions nearly coincide and have a slightly higher central peak than DNS. At $t=1000$, Smagorinsky and CENTORI remain close to the DNS distribution, reproducing its narrow central region with modest differences in the peak and shoulders. Implicit LES instead develops a much broader distribution and a markedly lower central probability density, consistent with the excessive small-scale content visible in its spectrum. 
+
+Figure~\ref{fig:les-models-particle-flux} shows the particle flux statistics. Such transport statistics are the most important quantity for engineering design. To improve visualisation of the overlapping and chaotic timeseries, we (i) zoomed into the first 200 time units for HW cases, and (ii) follow the procedure of \citet{leddy2016thesis} by applying a Savitzky-Golay filter \citep{savitzky1964smoothing} with a window of 20 steps and polynomial order 3 for smoothing for all cases. 
+
+The fluxes are clearly mispredicted by LES with no model. The CENTORI and Smagorinsky models again do not reproduce the correct fluctuating behaviour found in the filtered DNS and our DirectUNetSR model. The Smagorinsky radial flux is dissipated to around 40\% of the DNS value. Similarly, the poloidal fluxes differ from DNS in the timing, amplitude and sign of individual events. The implicit solution progressively suppresses these fluctuations and stays close to zero at late times. These transport diagnostics complement the spectra and vorticity PDFs: explicit closures preserve sustained transport more effectively than implicit LES in this case, but agreement in the spectral peak or central PDF does not ensure accurate radial-flux levels or instantaneous poloidal fluxes. The reference algebraic models are not able to reproduce the correct dynamics, compared to the DirectUNetSR model which shows excellent agreement with the filtered DNS.
+
+
+
 \begin{figure}[htbp]
 \centering
-\includegraphics[width=\linewidth]{images/validation_current/LES_MODELS/P_pdf_vs_time.png}
-\caption{Initial ($t=0$, left) and final ($t=1000$, right) spatial vorticity PDFs for the $256^2$ DNS and three $64^2$ LES configurations. Vorticity $\zeta$ is labelled $\omega$ in the plots.}
+\includegraphics{images/validation_current/LES_MODELS/P_pdf_vs_time.pdf}
+\caption{Initial ($t=0$, left) and final ($t=1000$, right) spatial vorticity PDFs for the $256^2$ DNS and three $64^2$ LES configurations.}
 \label{fig:les-models-vorticity}
 \end{figure}
 
 \begin{figure}[htbp]
 \centering
-\includegraphics[width=\linewidth]{images/validation_current/LES_MODELS/particle_flux_vs_time.png}
-\caption{Domain-averaged radial (upper panel) and poloidal (lower panel) turbulent particle fluxes for the $256^2$ HW DNS and Smagorinsky, CENTORI and implicit LES on a $64^2$ mesh over $0\leq t\leq1000$. Density fluctuations are defined relative to the poloidal mean.}
+\includegraphics{images/validation_current/LES_MODELS/particle_flux_vs_time.pdf}
+\caption{Domain-averaged radial (upper panel) and poloidal (lower panel) turbulent particle fluxes for the $256^2$ HW filtered DNS, our UNet model, Smagorinsky, CENTORI and implicit LES on a $64^2$ mesh over $0\leq t\leq1000$. Density fluctuations are defined relative to the poloidal mean.}
 \label{fig:les-models-particle-flux}
 \end{figure}
 
@@ -470,7 +485,7 @@ Together, these diagnostics support the use of an explicit closure for this $64^
 
 \subsection{Spatial reconstruction}
 
-Figures~\ref{fig:fields-HW_N256}--\ref{fig:fields-mHW_N512} compare the initial density, potential and vorticity fields at $t=0$ for DNS and the two finer LES meshes. These comparisons assess the spatial fidelity of the initial reconstruction. The HW panels resolve vortex structures, while the mHW potential panels show bands extended in the poloidal direction. The signed difference panels, defined as DNS minus LES, identify local reconstruction errors in each field.
+Figures~\ref{fig:fields-HW_N256}--\ref{fig:fields-mHW_N512} compare the initial density, potential and vorticity fields at $t=0$ for DNS and the two finer LES meshes. These comparisons assess the spatial fidelity of the initial reconstruction. The HW panels resolve vortex structures, while the mHW potential panels show bands extended in the poloidal direction. The signed difference panels, defined as DNS minus LES, identify local reconstruction errors in each field. In all cases, the highest pointwise error is in the vorticity field due to (1) the finer spatial structures being more difficult to capture, and (2) the field is not explicitly learned, it is instead reconstructed from the consistency relation $\zeta=\nabla^2\phi$.
 
 % Only the initial spatial comparisons are shown here. They provide a qualitative assessment of reconstruction fidelity but do not establish dynamical accuracy or an integrated error norm. The subsequent evolution is assessed through the statistical diagnostics below. The coarsest LES meshes are included in those diagnostics, but are absent from the archived spatial comparison panels.
 
@@ -524,22 +539,16 @@ Figures~\ref{fig:fields-HW_N256}--\ref{fig:fields-mHW_N512} compare the initial 
 
 \subsection{Energy and enstrophy}
 
-The diagnostics are the spatially integrated HW energy and generalized enstrophy,
+The diagnostics are the spatially integrated HW energy ($E$) and generalized enstrophy ($Z$),
 \begin{align}
- E &= \frac12\int_\Omega\left(n^2+|\nabla_x\phi|^2 + |\nabla_y\phi|^2\right)\,d\mathbf{\omega},\\
- W &= \frac12\int_\Omega(n-\zeta)^2\,d\mathbf{\omega}.
+ E &= \frac12\int_\Omega\left(n^2+\nabla_x\phi^2 + \nabla_y\phi^2\right)\,d\mathbf{\Omega},\\
+ Z &= \frac12\int_\Omega(n-\zeta)^2\,d\mathbf{\Omega}.
 \end{align}
-The current plotting routine evaluates both with cell-area quadrature:
-\begin{align}
- E_h &= \frac{\Delta x\Delta y}{2}\sum_{i,j}
- \left[n_{ij}^2+(D_x\phi)_{ij}^2+(D_y\phi)_{ij}^2\right],\\
- W_h &= \frac{\Delta x\Delta y}{2}\sum_{i,j}(n_{ij}-\zeta_{ij})^2,
-\end{align}
-where $D_x$ and $D_y$ are fourth-order periodic finite-difference derivatives. The plots label generalized enstrophy as $Z$ and vorticity as $\omega$; these correspond to $W$ and $\zeta$ here.
+where $\nabla \phi$ is computed with fourth-order finite-difference derivatives. 
 
-Figures~\ref{fig:energy} and~\ref{fig:enstrophy} reveal a strong resolution dependence over the longer HW interval. In HW\_N256, DNS energy fluctuates around $4.1$--$5.4\times10^3$. The $128^2$ and $64^2$ LES meshes retain comparable energy levels, although their fluctuations do not remain synchronized with DNS. The $32^2$ LES instead decays rapidly to approximately $1.0$--$1.3\times10^3$ after $t\simeq150$. Its generalized enstrophy falls to roughly $2.5$--$3.0\times10^3$, compared with DNS levels of approximately $7.5$--$9.5\times10^3$. Thus the coarse reconstruction loses both diagnostics over the longer interval.
+Figures~\ref{fig:energy} and~\ref{fig:enstrophy} reveal a strong resolution dependence over the longer HW interval. In HW\_N256, DNS energy fluctuates around $4.1$--$5.4\times10^3$. The $128^2$ and $64^2$ LES meshes retain comparable energy levels, although their fluctuations do not remain synchronized with DNS due to the chaotic nature of the flow. The $32^2$ LES instead decays rapidly to approximately $1.0$--$1.3\times10^3$ after $t\simeq150$. Its generalized enstrophy falls to roughly $2.5$--$3.0\times10^3$, compared with DNS levels of approximately $7.5$--$9.5\times10^3$. Thus the coarse reconstruction loses consistency in both metrics over the longer interval.
 
-For HW\_N512, DNS energy is typically $1.4$--$1.7\times10^4$, with intermittent larger excursions. The $256^2$ LES retains this range, while $128^2$ generally lies lower and $64^2$ remains near $1.1$--$1.4\times10^4$. Enstrophy shows a similar ordering: the coarsest curve is mostly around $2.3$--$2.9\times10^4$, below the DNS range of roughly $2.9$--$3.8\times10^4$. Agreement here concerns fluctuation levels and statistical behaviour rather than pointwise tracking of the turbulent trajectory.
+For HW\_N512, DNS energy is typically $1.4$--$1.7\times10^4$, with intermittent larger fluctuations. The $256^2$ LES retains this range, while $128^2$ generally lies lower and $64^2$ remains near $1.1$--$1.4\times10^4$. Enstrophy shows a similar ordering: the coarsest curve is mostly around $2.3$--$2.9\times10^4$, below the DNS range of roughly $2.9$--$3.8\times10^4$. We observe good agreement in the fluctuation levels and statistical behaviour, rather than pointwise comparison the turbulent trajectory.
 
 For mHW\_N256, DNS energy rises from approximately $3.55\times10^3$ to $4.33\times10^3$ near $t=30$, before declining to $3.86\times10^3$ at $t=100$. The $128^2$ and $64^2$ reconstructions end near $3.86\times10^3$ and $3.90\times10^3$, respectively. The $32^2$ reconstruction instead continues growing to $5.23\times10^3$. Its generalized enstrophy reaches $8.81\times10^3$, compared with $3.51\times10^3$ for DNS and $3.54\times10^3$ and $3.76\times10^3$ for the two finer meshes. Thus the coarsest reconstruction fails to reproduce the decay and develops excess enstrophy well before the end of the mHW validation window.
 
@@ -549,25 +558,25 @@ In mHW\_N512, DNS energy initially rises from approximately $3.3\times10^3$ to $
 \centering
 \begin{subfigure}[t]{0.48\textwidth}
 \centering
-\includegraphics[width=\linewidth]{images/validation_current/HW_N256/energy_vs_time.png}
+\includegraphics[width=\linewidth]{images/validation_current/HW_N256/energy_vs_time.pdf}
 \caption{HW\_N256}
 \end{subfigure}
 \hfill
 \begin{subfigure}[t]{0.48\textwidth}
 \centering
-\includegraphics[width=\linewidth]{images/validation_current/HW_N512/energy_vs_time.png}
+\includegraphics[width=\linewidth]{images/validation_current/HW_N512/energy_vs_time.pdf}
 \caption{HW\_N512}
 \end{subfigure}
 \par\smallskip
 \begin{subfigure}[t]{0.48\textwidth}
 \centering
-\includegraphics[width=\linewidth]{images/validation_current/mHW_N256/energy_vs_time.png}
+\includegraphics[width=\linewidth]{images/validation_current/mHW_N256/energy_vs_time.pdf}
 \caption{mHW\_N256}
 \end{subfigure}
 \hfill
 \begin{subfigure}[t]{0.48\textwidth}
 \centering
-\includegraphics[width=\linewidth]{images/validation_current/mHW_N512/energy_vs_time.png}
+\includegraphics[width=\linewidth]{images/validation_current/mHW_N512/energy_vs_time.pdf}
 \caption{mHW\_N512}
 \end{subfigure}
 \caption{Spatially integrated HW energy over $0\leq t\leq1000$ for HW and $0\leq t\leq100$ for mHW. Each available panel includes DNS and all three LES resolutions; energy uses cell-area quadrature on the diagnostic grid.}
@@ -578,25 +587,25 @@ In mHW\_N512, DNS energy initially rises from approximately $3.3\times10^3$ to $
 \centering
 \begin{subfigure}[t]{0.48\textwidth}
 \centering
-\includegraphics[width=\linewidth]{images/validation_current/HW_N256/enstrophy_vs_time.png}
+\includegraphics[width=\linewidth]{images/validation_current/HW_N256/enstrophy_vs_time.pdf}
 \caption{HW\_N256}
 \end{subfigure}
 \hfill
 \begin{subfigure}[t]{0.48\textwidth}
 \centering
-\includegraphics[width=\linewidth]{images/validation_current/HW_N512/enstrophy_vs_time.png}
+\includegraphics[width=\linewidth]{images/validation_current/HW_N512/enstrophy_vs_time.pdf}
 \caption{HW\_N512}
 \end{subfigure}
 \par\smallskip
 \begin{subfigure}[t]{0.48\textwidth}
 \centering
-\includegraphics[width=\linewidth]{images/validation_current/mHW_N256/enstrophy_vs_time.png}
+\includegraphics[width=\linewidth]{images/validation_current/mHW_N256/enstrophy_vs_time.pdf}
 \caption{mHW\_N256}
 \end{subfigure}
 \hfill
 \begin{subfigure}[t]{0.48\textwidth}
 \centering
-\includegraphics[width=\linewidth]{images/validation_current/mHW_N512/enstrophy_vs_time.png}
+\includegraphics[width=\linewidth]{images/validation_current/mHW_N512/enstrophy_vs_time.pdf}
 \caption{mHW\_N512}
 \end{subfigure}
 \caption{Generalized enstrophy over $0\leq t\leq1000$ for HW and $0\leq t\leq100$ for mHW. The coarse HW reconstructions have reduced enstrophy; the $32^2$ mHW\_N256 reconstruction instead develops excess enstrophy, while mHW\_N512 shows decay after an initial peak.}
@@ -614,36 +623,36 @@ where Fourier coefficients are normalized by the number of grid points and $\mat
 
 Figure~\ref{fig:spectra} compares the final spectra. At $t=1000$, HW\_N256 with a $32^2$ LES mesh has a pronounced deficit across low and intermediate wavenumbers, consistent with its reduced integrated energy. A weak high-wavenumber tail remains, but does not compensate for the loss of energetic scales. The $128^2$ and $64^2$ LES spectra retain the main peak and broad decay more closely. HW\_N512 preserves the broad spectral shape across all three LES meshes, with differences at low wavenumbers, around the peak and in the weak dissipative tail. At $t=100$, the mHW\_N512 spectra remain close through the principal energy-containing range, with smaller differences toward the tail.
 
-For mHW\_N256, the two finer LES meshes retain the final DNS spectral shape closely. The $32^2$ reconstruction has excess energy at intermediate and high wavenumbers, particularly for $k\gtrsim1$, consistent with its growing generalized enstrophy. Agreement near the principal spectral peak therefore does not imply correct small-scale behaviour.
+For mHW\_N256, the two finer LES meshes retain the final DNS spectral shape closely. The $32^2$ reconstruction has excess energy at intermediate and high wavenumbers, particularly for $k\gtrsim1$, consistent with its growing generalized enstrophy.
 
-Spectral agreement on logarithmic axes should be assessed together with the integrated diagnostics: similar shapes can coexist with energy deficits. The dotted line marks the $64^2$-grid Nyquist wavenumber in all panels; it is a fixed reference, not the cutoff of every LES mesh or a measured accuracy threshold.
+% Spectral agreement on logarithmic axes should be assessed together with the integrated diagnostics: similar shapes can coexist with energy deficits. The dotted line marks the $64^2$-grid Nyquist wavenumber in all panels; it is a fixed reference, not the cutoff of every LES mesh or a measured accuracy threshold.
 
 \begin{figure}[p]
 \centering
 \begin{subfigure}[t]{0.48\textwidth}
 \centering
-\includegraphics[width=\linewidth,height=0.175\textheight,keepaspectratio,trim=477.334bp 0bp 0bp 0.000bp,clip]{images/validation_current/HW_N256/hw_energy_spectra_initial_final.png}
+\includegraphics{images/validation_current/HW_N256/hw_energy_spectra_final.pdf}
 \caption{HW\_N256}
 \end{subfigure}
 \hfill
 \begin{subfigure}[t]{0.48\textwidth}
 \centering
-\includegraphics[width=\linewidth,height=0.175\textheight,keepaspectratio,trim=477.334bp 0bp 0bp 0.000bp,clip]{images/validation_current/HW_N512/hw_energy_spectra_initial_final.png}
+\includegraphics{images/validation_current/HW_N512/hw_energy_spectra_final.pdf}
 \caption{HW\_N512}
 \end{subfigure}
 \par\smallskip
 \begin{subfigure}[t]{0.48\textwidth}
 \centering
-\includegraphics[width=\linewidth,height=0.175\textheight,keepaspectratio,trim=477.334bp 0bp 0bp 0.000bp,clip]{images/validation_current/mHW_N256/hw_energy_spectra_initial_final.png}
+\includegraphics{images/validation_current/mHW_N256/hw_energy_spectra_final.pdf}
 \caption{mHW\_N256}
 \end{subfigure}
 \hfill
 \begin{subfigure}[t]{0.48\textwidth}
 \centering
-\includegraphics[width=\linewidth,height=0.175\textheight,keepaspectratio,trim=477.334bp 0bp 0bp 0.000bp,clip]{images/validation_current/mHW_N512/hw_energy_spectra_initial_final.png}
+\includegraphics{images/validation_current/mHW_N512/hw_energy_spectra_final.pdf}
 \caption{mHW\_N512}
 \end{subfigure}
-\caption{Final ($t=1000$ for HW and $t=100$ for mHW) shell-summed HW energy spectra for the available cases and all three LES resolutions. The dotted vertical line marks the $64^2$-grid Nyquist wavenumber.}
+\caption{Final ($t=1000$ for HW and $t=100$ for mHW) shell-summed HW energy spectra for the available cases and all three LES resolutions.}
 \label{fig:spectra}
 \end{figure}
 
@@ -661,25 +670,25 @@ In mHW\_N256, the $128^2$ and $64^2$ reconstructions retain the final vorticity 
 % \centering
 % \begin{subfigure}[t]{0.48\textwidth}
 % \centering
-% \includegraphics[width=\linewidth,height=0.175\textheight,keepaspectratio,trim=436.740bp 0bp 0bp 28.318bp,clip]{images/validation_current/HW_N256/U_pdf_vs_time.png}
+% \includegraphics{images/validation_current/HW_N256/U_pdf_vs_time.pdf}
 % \caption{HW\_N256}
 % \end{subfigure}
 % \hfill
 % \begin{subfigure}[t]{0.48\textwidth}
 % \centering
-% \includegraphics[width=\linewidth,height=0.175\textheight,keepaspectratio,trim=436.536bp 0bp 0bp 28.318bp,clip]{images/validation_current/HW_N512/U_pdf_vs_time.png}
+% \includegraphics[width=\linewidth,height=0.175\textheight,keepaspectratio,trim=436.536bp 0bp 0bp 28.318bp,clip]{images/validation_current/HW_N512/U_pdf_vs_time.pdf}
 % \caption{HW\_N512}
 % \end{subfigure}
 % \par\smallskip
 % \begin{subfigure}[t]{0.48\textwidth}
 % \centering
-% \includegraphics[width=\linewidth,height=0.175\textheight,keepaspectratio,trim=436.740bp 0bp 0bp 28.318bp,clip]{images/validation_current/mHW_N256/U_pdf_vs_time.png}
+% \includegraphics{images/validation_current/mHW_N256/U_pdf_vs_time.pdf}
 % \caption{mHW\_N256}
 % \end{subfigure}
 % \hfill
 % \begin{subfigure}[t]{0.48\textwidth}
 % \centering
-% \includegraphics[width=\linewidth,height=0.175\textheight,keepaspectratio,trim=436.740bp 0bp 0bp 28.318bp,clip]{images/validation_current/mHW_N512/U_pdf_vs_time.png}
+% \includegraphics{images/validation_current/mHW_N512/U_pdf_vs_time.pdf}
 % \caption{mHW\_N512}
 % \end{subfigure}
 % \caption{Spatial PDFs of density $n$ at $t=1000$ for HW or $t=100$ for mHW. Each available case includes DNS and three LES resolutions.}
@@ -690,25 +699,25 @@ In mHW\_N256, the $128^2$ and $64^2$ reconstructions retain the final vorticity 
 % \centering
 % \begin{subfigure}[t]{0.48\textwidth}
 % \centering
-% \includegraphics[width=\linewidth,height=0.175\textheight,keepaspectratio,trim=436.740bp 0bp 0bp 28.318bp,clip]{images/validation_current/HW_N256/V_pdf_vs_time.png}
+% \includegraphics{images/validation_current/HW_N256/V_pdf_vs_time.pdf}
 % \caption{HW\_N256}
 % \end{subfigure}
 % \hfill
 % \begin{subfigure}[t]{0.48\textwidth}
 % \centering
-% \includegraphics[width=\linewidth,height=0.175\textheight,keepaspectratio,trim=436.740bp 0bp 0bp 28.318bp,clip]{images/validation_current/HW_N512/V_pdf_vs_time.png}
+% \includegraphics{images/validation_current/HW_N512/V_pdf_vs_time.pdf}
 % \caption{HW\_N512}
 % \end{subfigure}
 % \par\smallskip
 % \begin{subfigure}[t]{0.48\textwidth}
 % \centering
-% \includegraphics[width=\linewidth,height=0.175\textheight,keepaspectratio,trim=436.740bp 0bp 0bp 28.318bp,clip]{images/validation_current/mHW_N256/V_pdf_vs_time.png}
+% \includegraphics{images/validation_current/mHW_N256/V_pdf_vs_time.pdf}
 % \caption{mHW\_N256}
 % \end{subfigure}
 % \hfill
 % \begin{subfigure}[t]{0.48\textwidth}
 % \centering
-% \includegraphics[width=\linewidth,height=0.175\textheight,keepaspectratio,trim=436.740bp 0bp 0bp 28.318bp,clip]{images/validation_current/mHW_N512/V_pdf_vs_time.png}
+% \includegraphics{images/validation_current/mHW_N512/V_pdf_vs_time.pdf}
 % \caption{mHW\_N512}
 % \end{subfigure}
 % \caption{Spatial PDFs of electrostatic potential $\phi$ at $t=1000$ for HW or $t=100$ for mHW. Each available case includes DNS and three LES resolutions.}
@@ -719,28 +728,28 @@ In mHW\_N256, the $128^2$ and $64^2$ reconstructions retain the final vorticity 
 \centering
 \begin{subfigure}[t]{0.48\textwidth}
 \centering
-\includegraphics[width=\linewidth,height=0.175\textheight,keepaspectratio,trim=436.740bp 0bp 0bp 28.318bp,clip]{images/validation_current/HW_N256/P_pdf_vs_time.png}
+\includegraphics{images/validation_current/HW_N256/P_pdf_vs_time.pdf}
 \caption{HW\_N256}
 \end{subfigure}
 \hfill
 \begin{subfigure}[t]{0.48\textwidth}
 \centering
-\includegraphics[width=\linewidth,height=0.175\textheight,keepaspectratio,trim=436.740bp 0bp 0bp 28.318bp,clip]{images/validation_current/HW_N512/P_pdf_vs_time.png}
+\includegraphics{images/validation_current/HW_N512/P_pdf_vs_time.pdf}
 \caption{HW\_N512}
 \end{subfigure}
 \par\smallskip
 \begin{subfigure}[t]{0.48\textwidth}
 \centering
-\includegraphics[width=\linewidth,height=0.175\textheight,keepaspectratio,trim=436.128bp 0bp 0bp 28.318bp,clip]{images/validation_current/mHW_N256/P_pdf_vs_time.png}
+\includegraphics{images/validation_current/mHW_N256/P_pdf_vs_time.pdf}
 \caption{mHW\_N256}
 \end{subfigure}
 \hfill
 \begin{subfigure}[t]{0.48\textwidth}
 \centering
-\includegraphics[width=\linewidth,height=0.175\textheight,keepaspectratio,trim=436.740bp 0bp 0bp 28.318bp,clip]{images/validation_current/mHW_N512/P_pdf_vs_time.png}
+\includegraphics{images/validation_current/mHW_N512/P_pdf_vs_time.pdf}
 \caption{mHW\_N512}
 \end{subfigure}
-\caption{Spatial PDFs of vorticity $\zeta$ (labelled $\omega$ in the plots) at $t=1000$ for HW or $t=100$ for mHW. Each available case includes DNS and three LES resolutions.}
+\caption{Spatial PDFs of vorticity at $t=1000$ for HW or $t=100$ for mHW. Each available case includes DNS and three LES resolutions.}
 \label{fig:pdf-vorticity}
 \end{figure}
 
@@ -755,40 +764,41 @@ The same fourth-order periodic derivatives used for energy enter the flux calcul
 
 Figure~\ref{fig:particle-flux} shows positive radial transport in all available cases. For HW\_N256, DNS fluctuates mainly around $0.11$--$0.15$, while the $32^2$ LES drops to approximately $0.04$ after the initial transient. The $128^2$ and $64^2$ meshes retain substantially more radial transport, although the latter is generally below DNS. In HW\_N512, DNS and the finest LES fluctuate mostly around $0.7$--$0.9$, whereas the coarsest mesh is typically around $0.55$--$0.65$. These deficits accompany the lower energy and enstrophy of the coarse solutions.
 
+\begin{figure}[p]
+\centering
+\begin{subfigure}[t]{0.48\textwidth}
+\centering
+\includegraphics[width=\linewidth]{images/validation_current/HW_N256/particle_flux_vs_time.pdf}
+\caption{HW\_N256}
+\end{subfigure}
+\hfill
+\begin{subfigure}[t]{0.48\textwidth}
+\centering
+\includegraphics[width=\linewidth]{images/validation_current/HW_N512/particle_flux_vs_time.pdf}
+\caption{HW\_N512}
+\end{subfigure}
+\par\smallskip
+\begin{subfigure}[t]{0.48\textwidth}
+\centering
+\includegraphics[width=\linewidth]{images/validation_current/mHW_N256/particle_flux_vs_time.pdf}
+\caption{mHW\_N256}
+\end{subfigure}
+\hfill
+\begin{subfigure}[t]{0.48\textwidth}
+\centering
+\includegraphics[width=\linewidth]{images/validation_current/mHW_N512/particle_flux_vs_time.pdf}
+\caption{mHW\_N512}
+\end{subfigure}
+\caption{Domain-averaged radial (upper axes) and poloidal (lower axes) turbulent particle flux over $0\leq t\leq1000$ for HW and $0\leq t\leq100$ for mHW. Density fluctuations are defined relative to the poloidal mean. All three LES resolutions are shown for each available case.}
+\label{fig:particle-flux}
+\end{figure}
+
 For mHW\_N256, DNS radial flux decreases from approximately $0.12$ to $0.026$ by $t=100$. The $128^2$ and $64^2$ reconstructions broadly follow this decline but end higher, at approximately $0.035$ and $0.033$. The $32^2$ reconstruction remains strongly fluctuating around $0.07$--$0.10$ after its initial transient and ends near $0.090$, more than three times the DNS value. Its excess transport accompanies the growth of energy and enstrophy rather than the DNS tendency toward laminarization. The finer meshes capture the early poloidal-flux extrema more closely; the coarsest mesh differs substantially in both timing and sign.
 
 The mHW\_N512 radial flux peaks near $0.10$ early in the evolution and decreases to approximately $0.02$--$0.03$ by $t=100$. The finest LES follows the overall decline closely, while coarser meshes generally underpredict the early and intermediate transport. The marked decrease in transport accompanies the decay of generalized enstrophy as the flow evolves toward laminarization.
 
 Poloidal transport fluctuates about zero and is smaller than radial transport. In HW\_N256, the $32^2$ LES strongly suppresses these fluctuations after the transient; the two finer meshes retain larger excursions but do not reproduce every DNS event. In HW\_N512, all curves remain strongly time dependent, with differences in the timing and amplitude of individual excursions. The mHW\_N512 LES curves capture the early negative excursions near $t\simeq13$ and $t\simeq27$ qualitatively, but differ from DNS later, including in sign. These comparisons distinguish preservation of the overall transport trend from agreement of instantaneous fluxes.
 
-\begin{figure}[p]
-\centering
-\begin{subfigure}[t]{0.48\textwidth}
-\centering
-\includegraphics[width=\linewidth]{images/validation_current/HW_N256/particle_flux_vs_time.png}
-\caption{HW\_N256}
-\end{subfigure}
-\hfill
-\begin{subfigure}[t]{0.48\textwidth}
-\centering
-\includegraphics[width=\linewidth]{images/validation_current/HW_N512/particle_flux_vs_time.png}
-\caption{HW\_N512}
-\end{subfigure}
-\par\smallskip
-\begin{subfigure}[t]{0.48\textwidth}
-\centering
-\includegraphics[width=\linewidth]{images/validation_current/mHW_N256/particle_flux_vs_time.png}
-\caption{mHW\_N256}
-\end{subfigure}
-\hfill
-\begin{subfigure}[t]{0.48\textwidth}
-\centering
-\includegraphics[width=\linewidth]{images/validation_current/mHW_N512/particle_flux_vs_time.png}
-\caption{mHW\_N512}
-\end{subfigure}
-\caption{Domain-averaged radial (upper axes) and poloidal (lower axes) turbulent particle flux over $0\leq t\leq1000$ for HW and $0\leq t\leq100$ for mHW. Density fluctuations are defined relative to the poloidal mean. All three LES resolutions are shown for each available case.}
-\label{fig:particle-flux}
-\end{figure}
 
 \subsection{Computational performance}
 
@@ -808,7 +818,7 @@ where $T$ is wall-clock runtime and $P$ is the number of MPI tasks. Here $S_{\ma
 \begin{table}[ht]
 \centering
 \small
-\caption{Current HW and mHW runtimes extracted from \texttt{BOUT.log.0}. All runs cover 1000 simulation time units. Each DNS row is the baseline for its LES rows. Runtimes are displayed in minutes (m) and seconds (s), retaining the one-second precision reported by BOUT++. For each case, we highlight the best performing $S_\mathrm{raw}$ and $S_\mathrm{MPI}$ in bold.}
+\caption{Current HW and mHW runtimes extracted from \texttt{BOUT.log.0}. All runs cover 1000 simulation time units. Each DNS row is the baseline for its LES rows. Runtimes are displayed in minutes (m) and seconds (s), retaining the one-second precision reported by BOUT++. For each case, we highlight the best performing $S_\mathrm{wall}$ and $S_\mathrm{MPI}$ in bold.}
 \label{tab:performance}
 \begin{tabular}{lrrrr}
 \toprule
@@ -837,7 +847,7 @@ mHW\_DNS512\_LES256 & 1 & 185~m 37~s & 0.23 & 7.36 \\
 \end{tabular}
 \end{table}
 
-Table~\ref{tab:performance} shows MPI task-time reductions of \textbf{4.82--49.45} for the LES runs. The HW and mHW $512^2$ cases with $64^2$ LES meshes achieve wall-clock speedups of \textbf{1.39} and \textbf{1.55}, respectively. All other LES runs have $S_{\mathrm{wall}}<1$. These measurements use integer-second runtimes and cover 1000 simulation time units per run. MPI task-time does not include accelerator resource costs, and these measurements do not quantify training cost or memory usage.
+Table~\ref{tab:performance} shows MPI task-time reductions of \textbf{4.82--49.45} for the LES runs. The HW and mHW $512^2$ cases with $64^2$ LES meshes achieve wall-clock speedups of \textbf{1.39} and \textbf{1.55}, respectively. All other LES runs have $S_{\mathrm{wall}}<1$. These measurements use integer-second runtimes and cover 1000 simulation time units per run.
 
 
 % \section{Discussion}
@@ -846,7 +856,6 @@ Table~\ref{tab:performance} shows MPI task-time reductions of \textbf{4.82--49.4
 % The longer HW validation exposes a marked failure of the $32^2$ reconstruction for HW\_N256. For this case energy, generalized enstrophy and radial transport all collapse to levels well below DNS, and the endpoint PDFs become too narrow. Finer meshes retain more of the statistical behaviour, although instantaneous trajectories diverge. The mHW\_N512 results instead follow an early growth phase and subsequent decay through $t=100$, consistent with faster evolution toward laminarization. The different validation windows should therefore be interpreted in relation to the different dynamics, rather than as equal-duration stationary turbulence tests. The corrected mHW\_N256 diagnostics show that its $32^2$ reconstruction instead develops excess energy, enstrophy and radial transport, failing to reproduce the DNS decay. The two finer meshes retain the integral trends much more closely.
 
 % The approach has several limitations. First, the generator may produce nonphysical small-scale structures outside the training distribution. Second, long-time stability is not guaranteed solely by minimizing instantaneous reconstruction error. Finally, the present method is limited by the validity of the chosen filter and by the statistical coverage of the training dataset.
-% \todo[inline=true]{This last bit needs revised}
 %----------------------------------------------------------------
 %
 %
@@ -858,13 +867,11 @@ Table~\ref{tab:performance} shows MPI task-time reductions of \textbf{4.82--49.4
 %----------------------------------------------------------------
 \section{Conclusions}\label{sec:Conclusions}
 
-A hybrid AI-classical algorithm for edge-plasma LES closure has been developed by learning DNS fields filtered with a differential filter. We use the AI model to enhance the LES field towards a filtered DNS by adding details lost during the subsampling from DNS to LES resolutions. The DNS fields are then reconstructed by inverting the differential filter of \citet{germano_differential_1986}. The reconstructed fields are used to evaluate the nonlinear Poisson-bracket terms, while the vorticity is obtained directly from the generated electrostatic potential.
+A hybrid AI-classical algorithm for edge-plasma LES closure has been developed by learning DNS fields filtered with a differential filter. We use the AI model to enhance the LES field towards a filtered DNS by adding details lost during the subsampling from DNS to LES resolutions. The DNS fields are then reconstructed by inverting the differential filter of \citet{germano_differential_1986}. The reconstructed fields are used to evaluate the nonlinear Poisson-bracket terms, while the vorticity is obtained directly from the generated electrostatic potential. The method is also applicable to other solvers in edge plasma physics and general purpose fluid dynamics solvers.
 
-% The method was tested with the HW\_N256, HW\_N512, mHW\_N256 and mHW\_N512 configurations. The main conclusions are:
+We benchmarked on the 2D Hasegawa-Wakatani and modified Hasegawa-Wakatani turbulent plasma models at $256^2$ and $512^2$ DNS resolutions using 2, 4 and 8 times smaller LES grids in each direction. Reconstructing from $32^2$ to $256^2$ resulted in poor prediction of the dynamics, as too much of the inertial subrange had been removed at this LES resolution, making the AI enhancement and differential filter inversion problematic. In all other cases, the time evolution statistics agreed well with the DNS for long time rollouts, showing enhanced stability compared to our previous study. Moreover, we showed the superiority of our approach to traditional algebraic LES models, which fail to capture most of the important dynamics of the turbulent flow. 
 
-We benchmarked on the 2D Hasegawa-Wakatani and modified Hasegawa-Wakatani equations at two resolutions obtained via BOUT++. Reconstructing from $32^2$ to $256^2$ resulted in poor prediction of the dynamics, as too much of the inertial subrange had been removed at this LES resolution, making the AI enhancement and differential filter inversion problematic. In all other cases, the time evolution statistics agreed well with the DNS for long time rollouts, showing enhanced stability compared to our previous study. This gave reasonable speedups of up to $1.5 \times$ on a single GPU (with LES on a single CPU), compared to DNS on 32 CPU cores. 
-
-The extension to 3D is straightforward, and we expect even larger performance improvements. The method is also applicable to other edge-plasma models such as Hermes-3, which is a 3D model that includes electromagnetic effects and multiple species, as well as to other CFD solvers like OpenFOAM. This will allow for accelerating not only edge plasma physics simulations for integration in powerplant design systems, but also several other applications in fluid dynamics.
+Overall the approach gave reasonable speedups of up to $1.55 \times$ on a single GPU (with LES on a single CPU), compared to DNS on 32 CPU cores. We expect a more significant speedup on larger 2D and future 3D studies. This will allow for accelerating not only edge plasma physics simulations for integration in powerplant design systems, but also several other applications in fluid dynamics.
 
 % \begin{itemize}
 %     \item the generative model reconstructs the dominant spatial structures of the DNS fields;
@@ -886,7 +893,7 @@ The extension to 3D is straightforward, and we expect even larger performance im
 %----------------------------------------------------------------
 \section*{Acknowledgements}
 
-Simulations reported in this study were performed on the Mary Coombs Hartree supercomputer platform, funded by Fusion Computing Lab collaboration between the Hartree Centre and UKAEA. The authors acknowledge funding from X and UK-USA AI Partnership Programme (ISPF-240).
+Simulations reported in this study were performed on the Mary Coombs Hartree supercomputer platform. The authors acknowledge funding from the Fusion Computing Lab collaboration between the Hartree Centre and UKAEA and from the UK-USA AI Partnership Programme (ISPF-240).
 
 \bibliographystyle{elsarticle-harv}
 \bibliography{references}
